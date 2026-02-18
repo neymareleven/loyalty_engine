@@ -1,0 +1,95 @@
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.db import get_db
+from app.models.loyalty_tier import LoyaltyTier
+from app.schemas.loyalty_tier import LoyaltyTierCreate, LoyaltyTierOut, LoyaltyTierUpdate
+
+
+router = APIRouter(prefix="/admin/loyalty-tiers", tags=["admin-loyalty-tiers"])
+
+
+@router.get("", response_model=list[LoyaltyTierOut])
+def list_loyalty_tiers(
+    brand: str | None = None,
+    active: bool | None = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(LoyaltyTier)
+    if brand:
+        q = q.filter(LoyaltyTier.brand == brand)
+    if active is not None:
+        q = q.filter(LoyaltyTier.active.is_(active))
+    return q.order_by(LoyaltyTier.brand.asc(), LoyaltyTier.rank.asc()).all()
+
+
+@router.post("", response_model=LoyaltyTierOut)
+def create_loyalty_tier(payload: LoyaltyTierCreate, db: Session = Depends(get_db)):
+    existing = (
+        db.query(LoyaltyTier.id)
+        .filter(LoyaltyTier.brand == payload.brand)
+        .filter(LoyaltyTier.key == payload.key)
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="Tier key already exists for brand")
+
+    obj = LoyaltyTier(
+        brand=payload.brand,
+        key=payload.key,
+        name=payload.name,
+        min_status_points=payload.min_status_points,
+        rank=payload.rank,
+        active=payload.active,
+    )
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.get("/{tier_id}", response_model=LoyaltyTierOut)
+def get_loyalty_tier(tier_id: UUID, db: Session = Depends(get_db)):
+    obj = db.query(LoyaltyTier).filter(LoyaltyTier.id == tier_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Tier not found")
+    return obj
+
+
+@router.patch("/{tier_id}", response_model=LoyaltyTierOut)
+def update_loyalty_tier(tier_id: UUID, payload: LoyaltyTierUpdate, db: Session = Depends(get_db)):
+    obj = db.query(LoyaltyTier).filter(LoyaltyTier.id == tier_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Tier not found")
+
+    data = payload.model_dump(exclude_unset=True)
+
+    if "key" in data and data["key"] != obj.key:
+        existing = (
+            db.query(LoyaltyTier.id)
+            .filter(LoyaltyTier.brand == obj.brand)
+            .filter(LoyaltyTier.key == data["key"])
+            .first()
+        )
+        if existing:
+            raise HTTPException(status_code=400, detail="Tier key already exists for brand")
+
+    for k, v in data.items():
+        setattr(obj, k, v)
+
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.delete("/{tier_id}")
+def delete_loyalty_tier(tier_id: UUID, db: Session = Depends(get_db)):
+    obj = db.query(LoyaltyTier).filter(LoyaltyTier.id == tier_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Tier not found")
+
+    db.delete(obj)
+    db.commit()
+    return {"deleted": True}
