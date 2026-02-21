@@ -74,10 +74,12 @@ def run_internal_job_once(
         already_exists = (
             db.query(Transaction.id)
             .filter(Transaction.event_id == event_id)
+            .filter(Transaction.brand == c.brand)
             .first()
         )
         if already_exists:
             idempotent_existing += 1
+            continue
 
         payload = job.payload_template or {}
         event = EventCreate(
@@ -91,8 +93,7 @@ def run_internal_job_once(
 
         try:
             create_transaction(db, event)
-            if not already_exists:
-                created += 1
+            created += 1
         except Exception:
             failed += 1
 

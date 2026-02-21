@@ -10,6 +10,7 @@ from app.models.loyalty_tier import LoyaltyTier
 from app.models.reward import Reward
 from app.services.reward_service import expire_rewards
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
+from app.schemas.rule import RuleCreate, RuleUpdate
 from app.schemas.rule_action_catalog import (
     AddCustomerTagAction,
     BurnPointsAction,
@@ -316,6 +317,149 @@ def list_rule_actions_catalog():
                 },
             },
         ]
+    }
+
+
+@router.get("/rules/ui-catalog")
+def get_rules_ui_catalog():
+
+    def _model_json_schema(model_cls):
+        fn = getattr(model_cls, "model_json_schema", None)
+        if callable(fn):
+            return fn()
+        return model_cls.schema()
+
+    return {
+        "create": {
+            "jsonSchema": _model_json_schema(RuleCreate),
+            "uiHints": {
+                "brand": {"widget": "hidden"},
+                "event_type": {
+                    "widget": "remote_select",
+                    "datasource": {
+                        "endpoint": "/admin/ui-options/event-types",
+                        "method": "GET",
+                        "query": {"origin": "EXTERNAL", "active": True},
+                        "valueField": "key",
+                        "labelField": "name",
+                        "brandVia": "X-Brand",
+                    },
+                },
+                "priority": {"widget": "number", "min": 0},
+                "active": {"widget": "switch"},
+                "conditions": {
+                    "widget": "rule_condition_builder",
+                    "catalog": {"endpoint": "/admin/rule-conditions", "method": "GET"},
+                },
+                "actions": {
+                    "widget": "rule_action_builder",
+                    "catalog": {"endpoint": "/admin/rule-actions", "method": "GET"},
+                },
+            },
+            "examples": [
+                {
+                    "event_type": "PURCHASE",
+                    "priority": 0,
+                    "active": True,
+                    "conditions": {"all": [{"amount_gte": 100}]},
+                    "actions": [{"type": "earn_points_from_amount", "rate": 1.0, "amount_path": "amount"}],
+                }
+            ],
+        },
+        "update": {
+            "jsonSchema": _model_json_schema(RuleUpdate),
+            "uiHints": {
+                "priority": {"widget": "number", "min": 0},
+                "active": {"widget": "switch"},
+                "conditions": {
+                    "widget": "rule_condition_builder",
+                    "catalog": {"endpoint": "/admin/rule-conditions", "method": "GET"},
+                },
+                "actions": {
+                    "widget": "rule_action_builder",
+                    "catalog": {"endpoint": "/admin/rule-actions", "method": "GET"},
+                },
+            },
+        },
+        "dependencies": {
+            "ruleActionsCatalog": {"endpoint": "/admin/rule-actions", "method": "GET"},
+            "ruleConditionsCatalog": {"endpoint": "/admin/rule-conditions", "method": "GET"},
+            "eventTypesOptions": {
+                "endpoint": "/admin/ui-options/event-types",
+                "method": "GET",
+                "brandVia": "X-Brand",
+            },
+        },
+    }
+
+
+@router.get("/rules/ui-bundle")
+def get_rules_ui_bundle(
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    rewards = db.query(Reward).filter(Reward.brand == brand).order_by(Reward.name.asc()).all()
+    event_types = db.query(EventType).filter(EventType.brand == brand).order_by(EventType.key.asc()).all()
+    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
+    tags_q = (
+        db.query(CustomerTag.tag)
+        .join(Customer, Customer.id == CustomerTag.customer_id)
+        .filter(Customer.brand == brand)
+        .distinct()
+        .order_by(CustomerTag.tag.asc())
+    )
+
+    return {
+        "brand": brand,
+        "rules": {"uiCatalog": get_rules_ui_catalog()},
+        "ruleActions": list_rule_actions_catalog(),
+        "ruleConditions": list_rule_conditions_catalog(),
+        "uiOptions": {
+            "rewards": {
+                "brand": brand,
+                "items": [
+                    {
+                        "id": str(r.id),
+                        "name": r.name,
+                        "active": r.active,
+                        "costPoints": r.cost_points,
+                        "type": r.type,
+                    }
+                    for r in rewards
+                ],
+            },
+            "eventTypes": {
+                "brand": brand,
+                "items": [
+                    {
+                        "id": str(et.id),
+                        "key": et.key,
+                        "name": et.name,
+                        "origin": et.origin,
+                        "active": et.active,
+                    }
+                    for et in event_types
+                ],
+            },
+            "loyaltyTiers": {
+                "brand": brand,
+                "items": [
+                    {
+                        "id": str(t.id),
+                        "key": t.key,
+                        "name": t.name,
+                        "rank": t.rank,
+                        "minStatusPoints": t.min_status_points,
+                        "active": t.active,
+                    }
+                    for t in tiers
+                ],
+            },
+            "customerTags": {
+                "brand": brand,
+                "items": [{"tag": row[0]} for row in tags_q.all()],
+            },
+        },
     }
 
 

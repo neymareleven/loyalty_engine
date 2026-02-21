@@ -2,10 +2,10 @@ from fastapi import Header, HTTPException, Query
 
 
 def get_active_brand(
-    brand: str | None = Query(default=None),
+    brand_query: str | None = Query(default=None, alias="brand"),
     x_brand: str | None = Header(default=None, alias="X-Brand"),
 ) -> str:
-    active = x_brand or brand
+    active = x_brand or brand_query
     if not active:
         raise HTTPException(
             status_code=400,

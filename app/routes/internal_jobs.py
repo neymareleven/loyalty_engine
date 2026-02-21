@@ -8,12 +8,15 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
+from app.models.customer_tag import CustomerTag
 from app.models.event_type import EventType
 from app.models.internal_job import InternalJob
+from app.models.loyalty_tier import LoyaltyTier
 from app.models.transaction import Transaction
 from app.schemas.event import EventCreate
 from app.schemas.internal_job import InternalJobCreate, InternalJobOut, InternalJobUpdate
 from app.schemas.internal_job_selector_catalog import get_internal_job_selector_catalog
+from app.schemas.internal_job_type_catalog import get_internal_job_type_catalog
 from app.services.internal_job_runner import compute_next_run_at, parse_schedule_seconds, run_internal_job_once
 from app.services.transaction_service import create_transaction
 
@@ -35,13 +38,15 @@ def get_internal_jobs_ui_catalog():
             "jsonSchema": _model_json_schema(InternalJobCreate),
             "uiHints": {
                 "job_key": {"widget": "text", "placeholder": "ex: BIRTHDAY_2026"},
+                "brand": {"widget": "hidden"},
                 "event_type": {
                     "widget": "remote_select",
                     "datasource": {
-                        "endpoint": "/admin/ui-options/event-types?origin=INTERNAL",
+                        "endpoint": "/admin/ui-options/event-types",
                         "method": "GET",
+                        "query": {"origin": "INTERNAL", "active": True},
                         "valueField": "key",
-                        "labelField": "key",
+                        "labelField": "name",
                         "brandVia": "X-Brand",
                     },
                 },
@@ -54,11 +59,72 @@ def get_internal_jobs_ui_catalog():
                 "start_in_seconds": {"widget": "number"},
             },
         },
+        "jobTypes": get_internal_job_type_catalog(),
         "selector": get_internal_job_selector_catalog(),
         "payloadTemplate": {
             "notes": "payload_template is merged into the INTERNAL event payload per selected customer.",
             "uiHints": {
                 "payload_template": {"widget": "json_object"},
+            },
+        },
+    }
+
+
+@router.get("/ui-bundle")
+def get_internal_jobs_ui_bundle(
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    event_types = (
+        db.query(EventType)
+        .filter(EventType.brand == brand)
+        .filter(EventType.origin == "INTERNAL")
+        .order_by(EventType.key.asc())
+        .all()
+    )
+    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
+    tags_q = (
+        db.query(CustomerTag.tag)
+        .join(Customer, Customer.id == CustomerTag.customer_id)
+        .filter(Customer.brand == brand)
+        .distinct()
+        .order_by(CustomerTag.tag.asc())
+    )
+
+    return {
+        "brand": brand,
+        "uiCatalog": get_internal_jobs_ui_catalog(),
+        "uiOptions": {
+            "eventTypes": {
+                "brand": brand,
+                "items": [
+                    {
+                        "id": str(et.id),
+                        "key": et.key,
+                        "name": et.name,
+                        "origin": et.origin,
+                        "active": et.active,
+                    }
+                    for et in event_types
+                ],
+            },
+            "loyaltyTiers": {
+                "brand": brand,
+                "items": [
+                    {
+                        "id": str(t.id),
+                        "key": t.key,
+                        "name": t.name,
+                        "rank": t.rank,
+                        "minStatusPoints": t.min_status_points,
+                        "active": t.active,
+                    }
+                    for t in tiers
+                ],
+            },
+            "customerTags": {
+                "brand": brand,
+                "items": [{"tag": row[0]} for row in tags_q.all()],
             },
         },
     }
