@@ -6,16 +6,62 @@ from sqlalchemy import extract
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.event_type import EventType
 from app.models.internal_job import InternalJob
 from app.models.transaction import Transaction
 from app.schemas.event import EventCreate
 from app.schemas.internal_job import InternalJobCreate, InternalJobOut, InternalJobUpdate
+from app.schemas.internal_job_selector_catalog import get_internal_job_selector_catalog
+from app.services.internal_job_runner import compute_next_run_at, parse_schedule_seconds, run_internal_job_once
 from app.services.transaction_service import create_transaction
 
 
 router = APIRouter(prefix="/admin/internal-jobs", tags=["admin-internal-jobs"])
+
+
+@router.get("/ui-catalog")
+def get_internal_jobs_ui_catalog():
+
+    def _model_json_schema(model_cls):
+        fn = getattr(model_cls, "model_json_schema", None)
+        if callable(fn):
+            return fn()
+        return model_cls.schema()
+
+    return {
+        "job": {
+            "jsonSchema": _model_json_schema(InternalJobCreate),
+            "uiHints": {
+                "job_key": {"widget": "text", "placeholder": "ex: BIRTHDAY_2026"},
+                "event_type": {
+                    "widget": "remote_select",
+                    "datasource": {
+                        "endpoint": "/admin/ui-options/event-types?origin=INTERNAL",
+                        "method": "GET",
+                        "valueField": "key",
+                        "labelField": "key",
+                        "brandVia": "X-Brand",
+                    },
+                },
+                "schedule": {
+                    "widget": "text",
+                    "placeholder": "ex: 24h | 1d | 3600s (optional)",
+                },
+                "active": {"widget": "switch"},
+                "first_run_at": {"widget": "datetime"},
+                "start_in_seconds": {"widget": "number"},
+            },
+        },
+        "selector": get_internal_job_selector_catalog(),
+        "payloadTemplate": {
+            "notes": "payload_template is merged into the INTERNAL event payload per selected customer.",
+            "uiHints": {
+                "payload_template": {"widget": "json_object"},
+            },
+        },
+    }
 
 
 def _selector_to_criterion(selector: dict, today: date):
@@ -99,15 +145,25 @@ def _apply_selector(q, selector: dict, today: date):
 
 
 @router.get("", response_model=list[InternalJobOut])
-def list_internal_jobs(active: bool | None = None, db: Session = Depends(get_db)):
-    q = db.query(InternalJob)
+def list_internal_jobs(
+    active_brand: str = Depends(get_active_brand),
+    active: bool | None = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(InternalJob).filter(InternalJob.brand == active_brand)
     if active is not None:
         q = q.filter(InternalJob.active.is_(active))
     return q.order_by(InternalJob.created_at.desc()).all()
 
 
 @router.post("", response_model=InternalJobOut)
-def create_internal_job(payload: InternalJobCreate, db: Session = Depends(get_db)):
+def create_internal_job(
+    payload: InternalJobCreate,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    if payload.brand is not None and payload.brand != active_brand:
+        raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
     q = (
         db.query(EventType.id)
         .filter(
@@ -116,23 +172,30 @@ def create_internal_job(payload: InternalJobCreate, db: Session = Depends(get_db
             EventType.origin == "INTERNAL",
         )
     )
-    if payload.brand:
-        q = q.filter(EventType.brand == payload.brand)
-    else:
-        q = q.filter(EventType.brand.is_(None))
+    q = q.filter(EventType.brand == active_brand)
     exists = q.first()
     if not exists:
         raise HTTPException(status_code=400, detail="Unknown/inactive event_type or not INTERNAL. Create it in /admin/event-types first.")
 
     job = InternalJob(
         job_key=payload.job_key,
-        brand=payload.brand,
+        brand=active_brand,
         event_type=payload.event_type,
         selector=payload.selector,
         payload_template=payload.payload_template,
         active=payload.active,
         schedule=payload.schedule,
     )
+
+    interval_seconds = parse_schedule_seconds(payload.schedule)
+    if payload.active and interval_seconds:
+        now = datetime.utcnow()
+        if payload.first_run_at is not None:
+            job.next_run_at = payload.first_run_at
+        elif payload.start_in_seconds is not None:
+            job.next_run_at = now + timedelta(seconds=int(payload.start_in_seconds))
+        else:
+            job.next_run_at = compute_next_run_at(base=now, interval_seconds=interval_seconds)
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -140,23 +203,34 @@ def create_internal_job(payload: InternalJobCreate, db: Session = Depends(get_db
 
 
 @router.get("/{job_id}", response_model=InternalJobOut)
-def get_internal_job(job_id: UUID, db: Session = Depends(get_db)):
+def get_internal_job(
+    job_id: UUID,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
-    if not job:
+    if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
     return job
 
 
 @router.patch("/{job_id}", response_model=InternalJobOut)
-def update_internal_job(job_id: UUID, payload: InternalJobUpdate, db: Session = Depends(get_db)):
+def update_internal_job(
+    job_id: UUID,
+    payload: InternalJobUpdate,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
-    if not job:
+    if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
 
     data = payload.model_dump(exclude_unset=True)
 
+    if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
+        raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
+
     if "event_type" in data and data["event_type"]:
-        next_brand = data.get("brand", job.brand)
         q = (
             db.query(EventType.id)
             .filter(
@@ -165,16 +239,27 @@ def update_internal_job(job_id: UUID, payload: InternalJobUpdate, db: Session = 
                 EventType.origin == "INTERNAL",
             )
         )
-        if next_brand:
-            q = q.filter(EventType.brand == next_brand)
-        else:
-            q = q.filter(EventType.brand.is_(None))
+        q = q.filter(EventType.brand == active_brand)
         exists = q.first()
         if not exists:
             raise HTTPException(status_code=400, detail="Unknown/inactive event_type or not INTERNAL. Create it in /admin/event-types first.")
 
     for k, v in data.items():
+        if k == "brand":
+            continue
         setattr(job, k, v)
+
+    if "schedule" in data or "active" in data or "first_run_at" in data or "start_in_seconds" in data:
+        interval_seconds = parse_schedule_seconds(job.schedule)
+        if job.active and interval_seconds:
+            if "first_run_at" in data and data.get("first_run_at") is not None:
+                job.next_run_at = data["first_run_at"]
+            elif "start_in_seconds" in data and data.get("start_in_seconds") is not None:
+                job.next_run_at = datetime.utcnow() + timedelta(seconds=int(data["start_in_seconds"]))
+            elif job.next_run_at is None:
+                job.next_run_at = compute_next_run_at(base=datetime.utcnow(), interval_seconds=interval_seconds)
+        else:
+            job.next_run_at = None
 
     db.commit()
     db.refresh(job)
@@ -182,9 +267,13 @@ def update_internal_job(job_id: UUID, payload: InternalJobUpdate, db: Session = 
 
 
 @router.delete("/{job_id}")
-def delete_internal_job(job_id: UUID, db: Session = Depends(get_db)):
+def delete_internal_job(
+    job_id: UUID,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
-    if not job:
+    if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
 
     db.delete(job)
@@ -193,9 +282,15 @@ def delete_internal_job(job_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/{job_id}/preview")
-def preview_internal_job(job_id: UUID, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+def preview_internal_job(
+    job_id: UUID,
+    limit: int = 50,
+    offset: int = 0,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
-    if not job:
+    if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
 
     if not job.active:
@@ -204,8 +299,7 @@ def preview_internal_job(job_id: UUID, limit: int = 50, offset: int = 0, db: Ses
     today = date.today()
 
     q = db.query(Customer)
-    if job.brand:
-        q = q.filter(Customer.brand == job.brand)
+    q = q.filter(Customer.brand == active_brand)
 
     q = _apply_selector(q, job.selector or {}, today)
 
@@ -233,86 +327,43 @@ def preview_internal_job(job_id: UUID, limit: int = 50, offset: int = 0, db: Ses
 
 
 @router.post("/{job_id}/run")
-def run_internal_job(job_id: UUID, db: Session = Depends(get_db)):
+def run_internal_job(
+    job_id: UUID,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
-    if not job:
+    if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
 
     if not job.active:
         raise HTTPException(status_code=400, detail="Internal job is inactive")
 
-    today = date.today()
-
-    q = db.query(Customer)
-    if job.brand:
-        q = q.filter(Customer.brand == job.brand)
-
-    q = _apply_selector(q, job.selector or {}, today)
-
-    customers = q.all()
-
-    processed = 0
-    created = 0
-    idempotent_existing = 0
-    failed = 0
-    results: list[dict] = []
-
-    for c in customers:
-        processed += 1
-        event_id = f"job_{job.id}_{today.isoformat()}_{c.brand}_{c.profile_id}"
-
-        already_exists = (
-            db.query(Transaction.id)
-            .filter(Transaction.event_id == event_id)
-            .first()
-        )
-        if already_exists:
-            idempotent_existing += 1
-
-        payload = job.payload_template or {}
-        event = EventCreate(
-            brand=c.brand,
-            profileId=c.profile_id,
-            eventType=job.event_type,
-            eventId=event_id,
-            source="INTERNAL_JOB",
-            payload=payload,
-        )
-
-        try:
-            tx = create_transaction(db, event)
-            results.append(
-                {
-                    "brand": c.brand,
-                    "profileId": c.profile_id,
-                    "eventId": event_id,
-                    "transactionId": str(tx.id),
-                    "status": tx.status,
-                    "idempotent": bool(already_exists),
-                }
-            )
-            if not already_exists:
-                created += 1
-        except Exception as e:
-            failed += 1
-            results.append(
-                {
-                    "brand": c.brand,
-                    "profileId": c.profile_id,
-                    "eventId": event_id,
-                    "error": str(e),
-                }
-            )
+    now = datetime.utcnow()
+    try:
+        stats = run_internal_job_once(db, job=job, now=now)
+        job.last_status = "SUCCESS"
+        job.last_error = None
+    except Exception as e:
+        job.last_status = "FAILED"
+        job.last_error = str(e)
+        raise
+    finally:
+        interval_seconds = parse_schedule_seconds(job.schedule)
+        if interval_seconds:
+            job.last_run_at = now
+            job.next_run_at = compute_next_run_at(base=now, interval_seconds=interval_seconds)
+        db.commit()
+        db.refresh(job)
 
     return {
         "jobId": str(job.id),
         "jobKey": job.job_key,
         "brand": job.brand,
         "eventType": job.event_type,
-        "date": today.isoformat(),
-        "targetCustomers": processed,
-        "created": created,
-        "idempotentExisting": idempotent_existing,
-        "failed": failed,
-        "results": results,
+        "date": now.date().isoformat(),
+        "targetCustomers": stats.processed,
+        "created": stats.created,
+        "idempotentExisting": stats.idempotent_existing,
+        "failed": stats.failed,
     }

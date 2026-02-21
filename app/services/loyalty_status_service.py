@@ -5,35 +5,28 @@ from sqlalchemy.orm import Session
 from app.models.loyalty_tier import LoyaltyTier
 
 
-# ============================================================
-# Détermination du statut selon les lifetime points
-# ============================================================
-def compute_loyalty_status(lifetime_points: int) -> str:
-    if lifetime_points >= 10000:
-        return "PLATINUM"
-    elif lifetime_points >= 5000:
-        return "GOLD"
-    elif lifetime_points >= 1000:
-        return "SILVER"
-    return "BRONZE"
+def compute_loyalty_status_from_tiers(db: Session, brand: str, status_points: int) -> str | None:
+    points = int(status_points or 0)
 
-
-def compute_loyalty_status_from_tiers(db: Session, brand: str, status_points: int) -> str:
     tier = (
         db.query(LoyaltyTier)
         .filter(LoyaltyTier.brand == brand)
         .filter(LoyaltyTier.active.is_(True))
-        .filter(LoyaltyTier.min_status_points <= int(status_points or 0))
+        .filter(LoyaltyTier.min_status_points <= points)
         .order_by(LoyaltyTier.min_status_points.desc(), LoyaltyTier.rank.desc())
         .first()
     )
     if tier:
         return tier.key
 
-    return compute_loyalty_status(int(status_points or 0))
+    # No tiers configured for this brand: do not update loyalty_status.
+    return None
 
 
 def _get_tier_rank(db: Session, brand: str, tier_key: str) -> int:
+    if not tier_key:
+        return 0
+
     tier = (
         db.query(LoyaltyTier)
         .filter(LoyaltyTier.brand == brand)
@@ -44,8 +37,7 @@ def _get_tier_rank(db: Session, brand: str, tier_key: str) -> int:
     if tier:
         return int(tier.rank)
 
-    fallback = {"BRONZE": 0, "SILVER": 1, "GOLD": 2, "PLATINUM": 3}
-    return fallback.get((tier_key or "").upper(), 0)
+    return 0
 
 
 # ============================================================
@@ -57,6 +49,11 @@ def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS"
     """
 
     new_status = compute_loyalty_status_from_tiers(db, customer.brand, customer.status_points)
+    if new_status is None:
+        if not customer.loyalty_status:
+            customer.loyalty_status = "UNCONFIGURED"
+            db.flush()
+        return customer.loyalty_status
 
     # éviter des écritures DB inutiles
     if customer.loyalty_status != new_status:
@@ -99,6 +96,7 @@ def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS"
                 event_id=event_id,
                 payload=payload,
                 depth=depth,
+                commit=False,
             )
 
     return customer.loyalty_status

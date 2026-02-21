@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.customer_reward import CustomerReward
 from app.models.point_movement import PointMovement
@@ -20,7 +21,14 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 
 
 @router.get("/{brand}/{profile_id}", response_model=CustomerOut)
-def get_customer(brand: str, profile_id: str, db: Session = Depends(get_db)):
+def get_customer(
+    brand: str,
+    profile_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)
@@ -32,10 +40,16 @@ def get_customer(brand: str, profile_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/upsert", response_model=CustomerOut)
-def upsert_customer(payload: CustomerUpsert, db: Session = Depends(get_db)):
+def upsert_customer(
+    payload: CustomerUpsert,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    if payload.brand != active_brand:
+        raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
     customer = get_or_create_customer(
         db,
-        payload.brand,
+        active_brand,
         payload.profileId,
         {"gender": payload.gender, "birthdate": payload.birthdate},
     )
@@ -45,7 +59,14 @@ def upsert_customer(payload: CustomerUpsert, db: Session = Depends(get_db)):
 
 
 @router.get("/{brand}/{profile_id}/wallet")
-def get_customer_wallet(brand: str, profile_id: str, db: Session = Depends(get_db)):
+def get_customer_wallet(
+    brand: str,
+    profile_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)
@@ -68,10 +89,13 @@ def get_customer_wallet(brand: str, profile_id: str, db: Session = Depends(get_d
 def list_point_movements(
     brand: str,
     profile_id: str,
+    active_brand: str = Depends(get_active_brand),
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)
@@ -97,11 +121,14 @@ def list_point_movements(
 def list_customer_rewards(
     brand: str,
     profile_id: str,
+    active_brand: str = Depends(get_active_brand),
     status: str | None = None,
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)
@@ -130,8 +157,11 @@ def use_customer_reward(
     brand: str,
     profile_id: str,
     customer_reward_id: str,
+    active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)
@@ -156,7 +186,14 @@ def use_customer_reward(
 
 
 @router.get("/{brand}/{profile_id}/loyalty")
-def get_customer_loyalty(brand: str, profile_id: str, db: Session = Depends(get_db)):
+def get_customer_loyalty(
+    brand: str,
+    profile_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)
@@ -236,10 +273,13 @@ def get_customer_loyalty(brand: str, profile_id: str, db: Session = Depends(get_
 def get_customer_loyalty_history(
     brand: str,
     profile_id: str,
+    active_brand: str = Depends(get_active_brand),
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer.id)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)
@@ -291,8 +331,11 @@ def get_customer_loyalty_history(
 def list_customer_tags(
     brand: str,
     profile_id: str,
+    active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
     customer = (
         db.query(Customer.id)
         .filter(Customer.brand == brand, Customer.profile_id == profile_id)

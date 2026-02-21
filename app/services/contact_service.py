@@ -55,7 +55,7 @@ def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: di
             brand=brand,
             profile_id=profile_id,
             status="ACTIVE",
-            loyalty_status=(lowest_tier.key if lowest_tier else "BRONZE"),
+            loyalty_status=(lowest_tier.key if lowest_tier else "UNCONFIGURED"),
         )
         db.add(customer)
         db.flush()

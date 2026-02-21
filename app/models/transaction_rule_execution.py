@@ -11,7 +11,7 @@ class TransactionRuleExecution(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     transaction_id = Column(UUID(as_uuid=True), ForeignKey("transactions.id"))
-    rule_id = Column(UUID(as_uuid=True), ForeignKey("rules.id"))
+    rule_id = Column(UUID(as_uuid=True), ForeignKey("rules.id", ondelete="SET NULL"), nullable=True)
 
     result = Column(String(20))  # SUCCESS / SKIPPED / FAILED
     details = Column(JSON)

@@ -17,6 +17,9 @@ class InternalJobCreate(BaseModel):
     active: bool = True
     schedule: Optional[str] = None
 
+    first_run_at: Optional[datetime] = None
+    start_in_seconds: Optional[int] = None
+
 
 class InternalJobUpdate(BaseModel):
     job_key: Optional[str] = None
@@ -28,6 +31,9 @@ class InternalJobUpdate(BaseModel):
 
     active: Optional[bool] = None
     schedule: Optional[str] = None
+
+    first_run_at: Optional[datetime] = None
+    start_in_seconds: Optional[int] = None
 
 
 class InternalJobOut(BaseModel):
@@ -41,6 +47,15 @@ class InternalJobOut(BaseModel):
 
     active: bool
     schedule: Optional[str] = None
+
+    next_run_at: Optional[datetime] = None
+    last_run_at: Optional[datetime] = None
+
+    locked_at: Optional[datetime] = None
+    locked_by: Optional[str] = None
+
+    last_status: Optional[str] = None
+    last_error: Optional[str] = None
 
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
