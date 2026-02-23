@@ -22,7 +22,7 @@ class InternalJob(Base):
 
     active = Column(Boolean, default=True)
 
-    schedule = Column(String(50), nullable=True)
+    schedule = Column(JSON, nullable=True)
 
     next_run_at = Column(TIMESTAMP, nullable=True)
     last_run_at = Column(TIMESTAMP, nullable=True)

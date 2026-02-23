@@ -17,7 +17,7 @@ from app.schemas.event import EventCreate
 from app.schemas.internal_job import InternalJobCreate, InternalJobOut, InternalJobUpdate
 from app.schemas.internal_job_selector_catalog import get_internal_job_selector_catalog
 from app.schemas.internal_job_type_catalog import get_internal_job_type_catalog
-from app.services.internal_job_runner import compute_next_run_at, parse_schedule_seconds, run_internal_job_once
+from app.services.internal_job_runner import compute_next_run_at_from_schedule, run_internal_job_once
 from app.services.transaction_service import create_transaction
 
 
@@ -51,13 +51,72 @@ def get_internal_jobs_ui_catalog():
                     },
                 },
                 "schedule": {
-                    "widget": "text",
-                    "placeholder": "ex: 24h | 1d | 3600s (optional)",
+                    "widget": "group",
+                    "fields": {
+                        "type": {"widget": "hidden", "default": "cron"},
+                        "cron": {"widget": "text", "placeholder": "ex: 0 3 * * 1"},
+                        "timezone": {"widget": "text", "placeholder": "ex: UTC (default) | Europe/Paris"},
+                    },
                 },
                 "active": {"widget": "switch"},
                 "first_run_at": {"widget": "datetime"},
                 "start_in_seconds": {"widget": "number"},
             },
+        },
+        "cronHelp": {
+            "timezone": {
+                "default": "UTC",
+                "examples": ["UTC", "Europe/Paris", "America/New_York"],
+                "note": "Timezone is applied when evaluating the cron schedule. The next_run_at stored in DB is UTC.",
+            },
+            "format": {
+                "type": "cron",
+                "fields": [
+                    {"name": "minute", "range": "0-59", "special": ["*", "*/n", "m,n", "m-n"]},
+                    {"name": "hour", "range": "0-23", "special": ["*", "*/n", "h1,h2", "h1-h2"]},
+                    {"name": "dayOfMonth", "range": "1-31", "special": ["*", "m,n", "m-n"]},
+                    {"name": "month", "range": "1-12", "special": ["*", "m,n", "m-n"]},
+                    {"name": "dayOfWeek", "range": "0-6", "aliases": {"0": "SUN", "1": "MON", "2": "TUE", "3": "WED", "4": "THU", "5": "FRI", "6": "SAT"}},
+                ],
+            },
+            "templates": [
+                {
+                    "id": "every_n_minutes",
+                    "label": "Every N minutes",
+                    "params": {"n": {"type": "number", "min": 1, "max": 59, "default": 15}},
+                    "example": "*/15 * * * *",
+                },
+                {
+                    "id": "every_hour_at_minute",
+                    "label": "Every hour at minute M",
+                    "params": {"minute": {"type": "number", "min": 0, "max": 59, "default": 0}},
+                    "example": "0 * * * *",
+                },
+                {
+                    "id": "daily_at",
+                    "label": "Every day at HH:MM",
+                    "params": {
+                        "hour": {"type": "number", "min": 0, "max": 23, "default": 9},
+                        "minute": {"type": "number", "min": 0, "max": 59, "default": 0},
+                    },
+                    "example": "0 9 * * *",
+                },
+                {
+                    "id": "weekly_at",
+                    "label": "Every week on weekday at HH:MM",
+                    "params": {
+                        "weekday": {"type": "select", "options": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "default": "MON"},
+                        "hour": {"type": "number", "min": 0, "max": 23, "default": 3},
+                        "minute": {"type": "number", "min": 0, "max": 59, "default": 0},
+                    },
+                    "example": "0 3 * * 1",
+                },
+            ],
+            "examples": [
+                {"cron": "0 3 * * 1", "meaning": "Every Monday at 03:00"},
+                {"cron": "*/15 * * * *", "meaning": "Every 15 minutes"},
+                {"cron": "0 0 * * *", "meaning": "Every day at midnight"},
+            ],
         },
         "jobTypes": get_internal_job_type_catalog(),
         "selector": get_internal_job_selector_catalog(),
@@ -243,6 +302,8 @@ def create_internal_job(
     if not exists:
         raise HTTPException(status_code=400, detail="Unknown/inactive event_type or not INTERNAL. Create it in /admin/event-types first.")
 
+    schedule_dict = payload.schedule.model_dump() if payload.schedule is not None else None
+
     job = InternalJob(
         job_key=payload.job_key,
         brand=active_brand,
@@ -250,18 +311,17 @@ def create_internal_job(
         selector=payload.selector,
         payload_template=payload.payload_template,
         active=payload.active,
-        schedule=payload.schedule,
+        schedule=schedule_dict,
     )
 
-    interval_seconds = parse_schedule_seconds(payload.schedule)
-    if payload.active and interval_seconds:
+    if payload.active and schedule_dict is not None:
         now = datetime.utcnow()
         if payload.first_run_at is not None:
             job.next_run_at = payload.first_run_at
         elif payload.start_in_seconds is not None:
             job.next_run_at = now + timedelta(seconds=int(payload.start_in_seconds))
         else:
-            job.next_run_at = compute_next_run_at(base=now, interval_seconds=interval_seconds)
+            job.next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=schedule_dict)
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -293,6 +353,9 @@ def update_internal_job(
 
     data = payload.model_dump(exclude_unset=True)
 
+    if "schedule" in data and data["schedule"] is not None:
+        data["schedule"] = data["schedule"].model_dump()
+
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
 
@@ -316,14 +379,13 @@ def update_internal_job(
         setattr(job, k, v)
 
     if "schedule" in data or "active" in data or "first_run_at" in data or "start_in_seconds" in data:
-        interval_seconds = parse_schedule_seconds(job.schedule)
-        if job.active and interval_seconds:
+        if job.active and job.schedule is not None:
             if "first_run_at" in data and data.get("first_run_at") is not None:
                 job.next_run_at = data["first_run_at"]
             elif "start_in_seconds" in data and data.get("start_in_seconds") is not None:
                 job.next_run_at = datetime.utcnow() + timedelta(seconds=int(data["start_in_seconds"]))
             elif job.next_run_at is None:
-                job.next_run_at = compute_next_run_at(base=datetime.utcnow(), interval_seconds=interval_seconds)
+                job.next_run_at = compute_next_run_at_from_schedule(base_utc=datetime.utcnow(), schedule=job.schedule)
         else:
             job.next_run_at = None
 
@@ -415,10 +477,8 @@ def run_internal_job(
         job.last_error = str(e)
         raise
     finally:
-        interval_seconds = parse_schedule_seconds(job.schedule)
-        if interval_seconds:
-            job.last_run_at = now
-            job.next_run_at = compute_next_run_at(base=now, interval_seconds=interval_seconds)
+        job.last_run_at = now
+        job.next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=job.schedule)
         db.commit()
         db.refresh(job)
 

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 class RuleExecutionOut(BaseModel):
     id: UUID
     transaction_id: UUID
-    rule_id: UUID
+    rule_id: Optional[UUID] = None
 
     result: str
     details: Optional[Dict[str, Any]] = None
