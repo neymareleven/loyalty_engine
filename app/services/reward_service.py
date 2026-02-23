@@ -11,9 +11,10 @@ from app.services.loyalty_service import burn_points
 # ============================================================
 # REDEEM REWARD (cas principal appelé par le rule engine)
 # ============================================================
-def redeem_reward(db: Session, customer, transaction):
+def redeem_reward(db: Session, customer, transaction, *, reward_id: str | None = None):
     payload = transaction.payload or {}
-    reward_id = payload.get("rewardId")
+    if reward_id is None:
+        reward_id = payload.get("rewardId") or payload.get("reward_id")
 
     if not reward_id:
         raise HTTPException(status_code=400, detail="rewardId is required")
@@ -76,9 +77,10 @@ def redeem_reward(db: Session, customer, transaction):
     return customer_reward
 
 
-def issue_reward(db: Session, customer, transaction):
+def issue_reward(db: Session, customer, transaction, *, reward_id: str | None = None):
     payload = transaction.payload or {}
-    reward_id = payload.get("rewardId")
+    if reward_id is None:
+        reward_id = payload.get("rewardId") or payload.get("reward_id")
 
     if not reward_id:
         raise HTTPException(status_code=400, detail="rewardId is required")

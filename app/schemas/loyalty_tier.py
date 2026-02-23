@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 
 class LoyaltyTierCreate(BaseModel):
-    brand: str
+    brand: Optional[str] = None
 
     key: str
     name: str

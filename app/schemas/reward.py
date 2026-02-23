@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 
 class RewardCreate(BaseModel):
-    brand: str
+    brand: Optional[str] = None
     name: str
     description: Optional[str] = None
     cost_points: Optional[int] = None

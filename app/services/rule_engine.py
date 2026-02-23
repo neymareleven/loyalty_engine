@@ -356,8 +356,17 @@ def _evaluate_condition_block(db: Session, customer, transaction, conditions) ->
             db.query(BonusDefinition)
             .filter(BonusDefinition.bonus_key == bonus_key)
             .filter(BonusDefinition.active.is_(True))
+            .filter(BonusDefinition.brand == transaction.brand)
             .first()
         )
+        if not definition:
+            definition = (
+                db.query(BonusDefinition)
+                .filter(BonusDefinition.bonus_key == bonus_key)
+                .filter(BonusDefinition.active.is_(True))
+                .filter(BonusDefinition.brand.is_(None))
+                .first()
+            )
         if not definition:
             return False
 
@@ -471,12 +480,22 @@ def _execute_actions(db: Session, customer, transaction, actions):
             executed.append({"type": action_type, "points": _as_int(points)})
 
         elif action_type == "redeem_reward":
-            redeem_reward(db, customer, transaction)
+            reward_id = action.get("reward_id") or action.get("rewardId") or action.get("rewardID")
+            if isinstance(reward_id, dict):
+                reward_id = reward_id.get("id") or reward_id.get("rewardId") or reward_id.get("reward_id")
+            if reward_id is not None:
+                reward_id = str(reward_id)
+            redeem_reward(db, customer, transaction, reward_id=reward_id)
             executed.append({"type": action_type})
 
         elif action_type == "issue_reward":
-            issue_reward(db, customer, transaction)
-            executed.append({"type": action_type})
+            reward_id = action.get("reward_id") or action.get("rewardId") or action.get("rewardID")
+            if isinstance(reward_id, dict):
+                reward_id = reward_id.get("id") or reward_id.get("rewardId") or reward_id.get("reward_id")
+            if reward_id is not None:
+                reward_id = str(reward_id)
+            issue_reward(db, customer, transaction, reward_id=reward_id)
+            executed.append({"type": action_type, "rewardId": reward_id})
 
         elif action_type == "record_bonus_award":
             bonus_key = action.get("bonusKey") or action.get("bonus_key")
@@ -487,8 +506,17 @@ def _execute_actions(db: Session, customer, transaction, actions):
                 db.query(BonusDefinition)
                 .filter(BonusDefinition.bonus_key == bonus_key)
                 .filter(BonusDefinition.active.is_(True))
+                .filter(BonusDefinition.brand == transaction.brand)
                 .first()
             )
+            if not definition:
+                definition = (
+                    db.query(BonusDefinition)
+                    .filter(BonusDefinition.bonus_key == bonus_key)
+                    .filter(BonusDefinition.active.is_(True))
+                    .filter(BonusDefinition.brand.is_(None))
+                    .first()
+                )
             if not definition:
                 raise ValueError(f"Unknown bonusKey: {bonus_key}")
 
@@ -641,6 +669,18 @@ def process_transaction_rules(db: Session, transaction):
         .all()
     )
 
+    if not rules:
+        if not transaction.error_code:
+            transaction.error_code = "NO_RULES"
+        if not transaction.error_message:
+            transaction.error_message = "No active rules matched this event."
+        else:
+            transaction.error_message = f"{transaction.error_message} No active rules matched this event."
+
+        transaction.status = "PROCESSED"
+        return
+
+    had_rule_failures = False
     for rule in rules:
 
         try:
@@ -655,10 +695,7 @@ def process_transaction_rules(db: Session, transaction):
                 db.add(execution)
                 continue
 
-            executed_actions = []
-            if rule.actions:
-                executed_actions = _execute_actions(db, customer, transaction, rule.actions)
-            else:
+            if not rule.actions:
                 execution = TransactionRuleExecution(
                     transaction_id=transaction.id,
                     rule_id=rule.id,
@@ -668,6 +705,11 @@ def process_transaction_rules(db: Session, transaction):
                 db.add(execution)
                 continue
 
+            executed_actions = []
+            with db.begin_nested():
+                executed_actions = _execute_actions(db, customer, transaction, rule.actions)
+                db.flush()
+
             execution = TransactionRuleExecution(
                 transaction_id=transaction.id,
                 rule_id=rule.id,
@@ -676,6 +718,7 @@ def process_transaction_rules(db: Session, transaction):
             )
             db.add(execution)
         except Exception as e:
+            had_rule_failures = True
             execution = TransactionRuleExecution(
                 transaction_id=transaction.id,
                 rule_id=rule.id,
@@ -684,4 +727,4 @@ def process_transaction_rules(db: Session, transaction):
             )
             db.add(execution)
 
-    transaction.status = "PROCESSED"
+    transaction.status = "PROCESSED_WITH_ERRORS" if had_rule_failures else "PROCESSED"

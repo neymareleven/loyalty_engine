@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 
 class RuleCreate(BaseModel):
-    brand: str
+    brand: Optional[str] = None
     event_type: str
     priority: int = 0
 

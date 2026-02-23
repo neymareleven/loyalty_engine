@@ -21,9 +21,9 @@ class CustomerOut(BaseModel):
 
     gender: Optional[str] = None
     birthdate: Optional[date] = None
-
+    
     status: str
-    loyalty_status: str
+    loyalty_status: Optional[str] = None
     lifetime_points: int
 
     created_at: Optional[datetime] = None

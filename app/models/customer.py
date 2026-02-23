@@ -17,7 +17,7 @@ class Customer(Base):
     birthdate = Column(Date)
 
     status = Column(String(20), default="ACTIVE")
-    loyalty_status = Column(String(20), nullable=False, default="BRONZE")
+    loyalty_status = Column(String(20), nullable=True)
     lifetime_points = Column(Integer, nullable=False, default=0)
 
     status_points = Column(Integer, nullable=False, default=0)

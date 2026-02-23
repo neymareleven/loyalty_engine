@@ -24,5 +24,14 @@ class InternalJob(Base):
 
     schedule = Column(String(50), nullable=True)
 
+    next_run_at = Column(TIMESTAMP, nullable=True)
+    last_run_at = Column(TIMESTAMP, nullable=True)
+
+    locked_at = Column(TIMESTAMP, nullable=True)
+    locked_by = Column(String(100), nullable=True)
+
+    last_status = Column(String(20), nullable=True)
+    last_error = Column(String(2000), nullable=True)
+
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())

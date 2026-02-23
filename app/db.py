@@ -19,7 +19,11 @@ if DATABASE_URL:
         # If parsing fails, ensure it's a valid UTF-8 string by replacing invalid bytes
         DATABASE_URL = DATABASE_URL.encode('utf-8', errors='replace').decode('utf-8')
 
-engine = create_engine(DATABASE_URL)
+connect_args = None
+if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+    connect_args = {"options": "-c timezone=utc"}
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args or {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 

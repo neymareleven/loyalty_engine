@@ -30,11 +30,17 @@ def create_internal_transaction(
     source: str = "SYSTEM",
     depth: int = 0,
     max_depth: int = 3,
+    commit: bool = True,
 ):
     if depth >= max_depth:
         return None
 
-    existing = db.query(Transaction).filter(Transaction.event_id == event_id).first()
+    existing = (
+        db.query(Transaction)
+        .filter(Transaction.event_id == event_id)
+        .filter(Transaction.brand == brand)
+        .first()
+    )
     if existing:
         return existing
 
@@ -48,16 +54,27 @@ def create_internal_transaction(
         status="PENDING",
     )
     db.add(transaction)
-    db.commit()
-    db.refresh(transaction)
+    if commit:
+        db.commit()
+        db.refresh(transaction)
+    else:
+        db.flush()
 
     try:
         process_transaction_rules(db, transaction)
-        db.commit()
+        transaction.processed_at = datetime.utcnow()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
     except Exception as e:
         transaction.status = "FAILED"
         transaction.error_message = str(e)
-        db.commit()
+        transaction.processed_at = datetime.utcnow()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
 
     return transaction
 
@@ -73,6 +90,7 @@ def create_transaction(db: Session, event_data):
     existing = (
         db.query(Transaction)
         .filter(Transaction.event_id == event_data.eventId)
+        .filter(Transaction.brand == event_data.brand)
         .first()
     )
 
@@ -107,11 +125,30 @@ def create_transaction(db: Session, event_data):
         status=status,
     )
 
+    if status != "PENDING":
+        transaction.processed_at = datetime.utcnow()
+
     db.add(transaction)
     db.commit()
     db.refresh(transaction)
 
     et = _find_event_type(db, brand=transaction.brand, key=transaction.event_type)
+    if not et:
+        et = EventType(
+            brand=transaction.brand,
+            key=transaction.event_type,
+            origin="EXTERNAL",
+            name=transaction.event_type,
+            description="Auto-created from inbound event",
+            active=True,
+        )
+        db.add(et)
+        db.commit()
+
+        transaction.error_code = "EVENT_TYPE_CREATED"
+        transaction.error_message = "EventType was missing in catalog and was created."
+        db.commit()
+
     if et and et.origin == "EXTERNAL":
         customer = (
             db.query(Customer)
@@ -126,10 +163,12 @@ def create_transaction(db: Session, event_data):
     if transaction.status == "PENDING":
         try:
             process_transaction_rules(db, transaction)
+            transaction.processed_at = datetime.utcnow()
             db.commit()
         except Exception as e:
             transaction.status = "FAILED"
             transaction.error_message = str(e)
+            transaction.processed_at = datetime.utcnow()
             db.commit()
 
     return transaction

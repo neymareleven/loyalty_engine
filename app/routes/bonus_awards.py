@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps.brand import get_active_brand
 from app.models.bonus_award import BonusAward
 from app.schemas.bonus_award import BonusAwardOut
 
@@ -13,6 +14,7 @@ router = APIRouter(prefix="/admin/bonus-awards", tags=["admin-bonus-awards"])
 
 @router.get("", response_model=list[BonusAwardOut])
 def list_bonus_awards(
+    active_brand: str = Depends(get_active_brand),
     brand: str | None = None,
     profileId: str | None = None,
     bonusKey: str | None = None,
@@ -21,8 +23,9 @@ def list_bonus_awards(
     db: Session = Depends(get_db),
 ):
     q = db.query(BonusAward)
-    if brand:
-        q = q.filter(BonusAward.brand == brand)
+    if brand and brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    q = q.filter(BonusAward.brand == active_brand)
     if profileId:
         q = q.filter(BonusAward.profile_id == profileId)
     if bonusKey:
@@ -40,8 +43,12 @@ def list_bonus_awards(
 
 
 @router.get("/{bonus_award_id}", response_model=BonusAwardOut)
-def get_bonus_award(bonus_award_id: UUID, db: Session = Depends(get_db)):
+def get_bonus_award(
+    bonus_award_id: UUID,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     obj = db.query(BonusAward).filter(BonusAward.id == bonus_award_id).first()
-    if not obj:
+    if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Bonus award not found")
     return obj

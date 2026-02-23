@@ -16,7 +16,6 @@ from app.models.bonus_award import BonusAward
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.customer_tag import CustomerTag
 
-from app.routes.events import router as events_router
 from app.routes.wallet import router as wallet_router
 from app.routes.customers import router as customers_router
 from app.routes.transactions import router as transactions_router
@@ -52,7 +51,6 @@ def startup():
     Base.metadata.create_all(bind=engine)
 
 
-app.include_router(events_router)
 app.include_router(wallet_router)
 app.include_router(customers_router)
 app.include_router(transactions_router)
