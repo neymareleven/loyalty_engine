@@ -8,6 +8,7 @@ from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.schemas.event import EventCreate
 from app.services.contact_service import get_or_create_customer
@@ -24,7 +25,11 @@ def _parse_date(value: str | None):
 
 
 @router.post("/customers")
-async def import_customers_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def import_customers_csv(
+    file: UploadFile = File(...),
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="CSV file is required")
 
@@ -40,13 +45,16 @@ async def import_customers_csv(file: UploadFile = File(...), db: Session = Depen
     for idx, row in enumerate(reader, start=2):
         processed += 1
         try:
-            brand = (row.get("brand") or "").strip()
+            brand_in = (row.get("brand") or "").strip()
+            if brand_in and brand_in != active_brand:
+                raise ValueError("brand does not match active brand context")
+            brand = brand_in or active_brand
             profile_id = (row.get("profileId") or row.get("profile_id") or "").strip()
             gender = (row.get("gender") or "").strip() or None
             birthdate = _parse_date((row.get("birthdate") or "").strip() or None)
 
-            if not brand or not profile_id:
-                raise ValueError("brand and profileId are required")
+            if not profile_id:
+                raise ValueError("profileId is required")
 
             get_or_create_customer(
                 db,
@@ -68,7 +76,11 @@ async def import_customers_csv(file: UploadFile = File(...), db: Session = Depen
 
 
 @router.post("/events")
-async def import_events_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def import_events_csv(
+    file: UploadFile = File(...),
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="CSV file is required")
 
@@ -82,7 +94,10 @@ async def import_events_csv(file: UploadFile = File(...), db: Session = Depends(
 
     for idx, row in enumerate(reader, start=2):
         rows.append((idx, row))
-        brand = (row.get("brand") or "").strip()
+        brand_in = (row.get("brand") or "").strip()
+        if brand_in and brand_in != active_brand:
+            continue
+        brand = brand_in or active_brand
         profile_id = (row.get("profileId") or row.get("profile_id") or "").strip()
         if brand and profile_id:
             customer_keys.add((brand, profile_id))
@@ -111,6 +126,21 @@ async def import_events_csv(file: UploadFile = File(...), db: Session = Depends(
             },
         )
 
+    mismatched_brand_lines: list[int] = []
+    for idx, row in rows:
+        brand_in = (row.get("brand") or "").strip()
+        if brand_in and brand_in != active_brand:
+            mismatched_brand_lines.append(idx)
+    if mismatched_brand_lines:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Some rows have a brand that does not match active brand context.",
+                "activeBrand": active_brand,
+                "lines": mismatched_brand_lines,
+            },
+        )
+
     processed = 0
     succeeded = 0
     failed = 0
@@ -119,7 +149,10 @@ async def import_events_csv(file: UploadFile = File(...), db: Session = Depends(
     for idx, row in rows:
         processed += 1
         try:
-            brand = (row.get("brand") or "").strip()
+            brand_in = (row.get("brand") or "").strip()
+            if brand_in and brand_in != active_brand:
+                raise ValueError("brand does not match active brand context")
+            brand = brand_in or active_brand
             profile_id = (row.get("profileId") or row.get("profile_id") or "").strip()
             event_type = (row.get("eventType") or row.get("event_type") or "").strip()
             event_id = (row.get("eventId") or row.get("event_id") or "").strip()

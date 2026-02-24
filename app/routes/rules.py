@@ -9,7 +9,7 @@ from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.event_type import EventType
 from app.models.rule import Rule
 from app.schemas.rule import RuleCreate, RuleOut, RuleUpdate
-from app.services.brand_context import get_active_brand
+from app.deps.brand import get_active_brand
 
 
 router = APIRouter(prefix="/rules", tags=["rules"])
