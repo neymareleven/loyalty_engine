@@ -1,9 +1,15 @@
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+class InternalJobScheduleCron(BaseModel):
+    type: Literal["cron"] = "cron"
+    cron: str
+    timezone: str = "UTC"
 
 
 class InternalJobCreate(BaseModel):
@@ -15,7 +21,7 @@ class InternalJobCreate(BaseModel):
     payload_template: Optional[Dict[str, Any]] = None
 
     active: bool = True
-    schedule: Optional[str] = None
+    schedule: Optional[InternalJobScheduleCron] = None
 
     first_run_at: Optional[datetime] = None
     start_in_seconds: Optional[int] = None
@@ -30,7 +36,7 @@ class InternalJobUpdate(BaseModel):
     payload_template: Optional[Dict[str, Any]] = None
 
     active: Optional[bool] = None
-    schedule: Optional[str] = None
+    schedule: Optional[InternalJobScheduleCron] = None
 
     first_run_at: Optional[datetime] = None
     start_in_seconds: Optional[int] = None
@@ -46,7 +52,7 @@ class InternalJobOut(BaseModel):
     payload_template: Optional[Dict[str, Any]] = None
 
     active: bool
-    schedule: Optional[str] = None
+    schedule: Optional[Dict[str, Any]] = None
 
     next_run_at: Optional[datetime] = None
     last_run_at: Optional[datetime] = None

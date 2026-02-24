@@ -35,7 +35,10 @@ def get_bonus_definitions_ui_catalog():
                 "widget": "select",
                 "options": ["ONCE_EVER", "ONCE_PER_YEAR", "ONCE_PER_MONTH", "ONCE_PER_WEEK", "ONCE_PER_DAY"],
             },
-            "policy_params": {"widget": "json_object"},
+            "policy_params": {
+                "widget": "award_policy_params",
+                "catalog": {"endpoint": "/admin/bonus-award-policies", "method": "GET"},
+            },
             "active": {"widget": "switch"},
         },
         "examples": [
@@ -47,6 +50,9 @@ def get_bonus_definitions_ui_catalog():
                 "active": True,
             }
         ],
+        "dependencies": {
+            "bonusAwardPoliciesCatalog": {"endpoint": "/admin/bonus-award-policies", "method": "GET"}
+        },
     }
 
 

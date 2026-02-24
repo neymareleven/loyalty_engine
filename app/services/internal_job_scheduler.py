@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models.internal_job import InternalJob
-from app.services.internal_job_runner import compute_next_run_at, parse_schedule_seconds, run_internal_job_once
+from app.services.internal_job_runner import compute_next_run_at_from_schedule, run_internal_job_once
+
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    # Keep naive UTC timestamps to match existing DB column types/semantics.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _claim_due_jobs(
@@ -57,6 +62,17 @@ def run_scheduler_loop(
     if worker_id is None:
         worker_id = os.getenv("INTERNAL_JOB_WORKER_ID") or os.getenv("HOSTNAME") or "worker"
 
+    logger.info(
+        "internal job scheduler started",
+        extra={
+            "worker_id": worker_id,
+            "batch_size": batch_size,
+            "lock_ttl_seconds": lock_ttl_seconds,
+            "idle_sleep_seconds": idle_sleep_seconds,
+            "max_sleep_seconds": max_sleep_seconds,
+        },
+    )
+
     while True:
         now = _utcnow()
 
@@ -70,6 +86,9 @@ def run_scheduler_loop(
                 lock_ttl_seconds=lock_ttl_seconds,
             )
             db.commit()
+
+            if jobs:
+                logger.info("claimed due internal jobs", extra={"count": len(jobs), "now": now.isoformat()})
 
             if not jobs:
                 next_due = (
@@ -88,31 +107,64 @@ def run_scheduler_loop(
                     if delta > 0:
                         sleep_for = min(max_sleep_seconds, max(1, int(delta)))
 
+                logger.debug(
+                    "no due jobs; sleeping",
+                    extra={
+                        "sleep_for_seconds": sleep_for,
+                        "now": now.isoformat(),
+                        "next_due": (next_due[0].isoformat() if next_due and next_due[0] else None),
+                    },
+                )
                 time.sleep(sleep_for)
                 continue
 
             for job in jobs:
                 run_now = _utcnow()
                 try:
+                    logger.info(
+                        "running internal job",
+                        extra={
+                            "job_id": str(job.id),
+                            "job_key": job.job_key,
+                            "brand": job.brand,
+                            "run_now": run_now.isoformat(),
+                        },
+                    )
                     stats = run_internal_job_once(db, job=job, now=run_now)
                     job.last_status = "SUCCESS"
                     job.last_error = None
 
-                    interval_seconds = parse_schedule_seconds(job.schedule)
-                    if interval_seconds:
-                        job.last_run_at = run_now
-                        job.next_run_at = compute_next_run_at(base=run_now, interval_seconds=interval_seconds)
-                    else:
-                        job.last_run_at = run_now
-                        job.next_run_at = None
+                    job.last_run_at = run_now
+                    job.next_run_at = compute_next_run_at_from_schedule(base_utc=run_now, schedule=job.schedule)
+
+                    logger.info(
+                        "internal job success",
+                        extra={
+                            "job_id": str(job.id),
+                            "job_key": job.job_key,
+                            "processed": stats.processed,
+                            "created": stats.created,
+                            "idempotent_existing": stats.idempotent_existing,
+                            "failed": stats.failed,
+                            "next_run_at": (job.next_run_at.isoformat() if job.next_run_at else None),
+                        },
+                    )
 
                 except Exception as e:
                     job.last_status = "FAILED"
                     job.last_error = str(e)
 
-                    interval_seconds = parse_schedule_seconds(job.schedule)
-                    if interval_seconds:
-                        job.next_run_at = compute_next_run_at(base=run_now, interval_seconds=interval_seconds)
+                    # On failure, keep moving next_run_at forward to avoid a tight retry loop.
+                    job.next_run_at = compute_next_run_at_from_schedule(base_utc=run_now, schedule=job.schedule)
+
+                    logger.exception(
+                        "internal job failed",
+                        extra={
+                            "job_id": str(job.id),
+                            "job_key": job.job_key,
+                            "next_run_at": (job.next_run_at.isoformat() if job.next_run_at else None),
+                        },
+                    )
 
                 finally:
                     job.locked_at = None

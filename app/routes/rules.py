@@ -5,10 +5,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps.brand import get_active_brand
+from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.event_type import EventType
 from app.models.rule import Rule
-from app.schemas.rule import RuleCreate, RuleUpdate, RuleOut
+from app.schemas.rule import RuleCreate, RuleOut, RuleUpdate
+from app.deps.brand import get_active_brand
 
 
 router = APIRouter(prefix="/rules", tags=["rules"])
@@ -123,6 +124,14 @@ def delete_rule(
     )
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
+
+    # Defensive cleanup: DB constraint should be ON DELETE SET NULL, but in case migrations
+    # were not applied or constraints differ, null out references explicitly.
+    (
+        db.query(TransactionRuleExecution)
+        .filter(TransactionRuleExecution.rule_id == rule_id)
+        .update({TransactionRuleExecution.rule_id: None}, synchronize_session=False)
+    )
 
     db.delete(rule)
     try:

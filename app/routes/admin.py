@@ -11,6 +11,7 @@ from app.models.reward import Reward
 from app.services.reward_service import expire_rewards
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
 from app.schemas.rule import RuleCreate, RuleUpdate
+from app.schemas.bonus_policy_catalog import get_bonus_award_policies_catalog
 from app.schemas.rule_action_catalog import (
     AddCustomerTagAction,
     BurnPointsAction,
@@ -466,3 +467,8 @@ def get_rules_ui_bundle(
 @router.get("/rule-conditions")
 def list_rule_conditions_catalog():
     return get_rule_conditions_catalog()
+
+
+@router.get("/bonus-award-policies")
+def list_bonus_award_policies_catalog():
+    return get_bonus_award_policies_catalog()

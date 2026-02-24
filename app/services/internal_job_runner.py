@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+from croniter import croniter
 
 from sqlalchemy.orm import Session
 
@@ -20,23 +23,54 @@ class InternalJobRunStats:
     failed: int
 
 
-def parse_schedule_seconds(schedule: str | None) -> int | None:
-    if schedule is None:
+def _as_utc_aware(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ZoneInfo("UTC"))
+    return dt.astimezone(ZoneInfo("UTC"))
+
+
+def _to_utc_naive(dt: datetime) -> datetime:
+    return _as_utc_aware(dt).replace(tzinfo=None)
+
+
+def compute_next_run_at_from_schedule(*, base_utc: datetime, schedule: dict | None) -> datetime | None:
+    if not schedule or not isinstance(schedule, dict):
         return None
-    s = str(schedule).strip()
-    if not s:
-        return None
-    return int(s)
+    if schedule.get("type") != "cron":
+        raise ValueError("Unsupported schedule.type (expected 'cron')")
+
+    cron_expr = schedule.get("cron")
+    if not cron_expr:
+        raise ValueError("schedule.cron is required")
+
+    tz_name = schedule.get("timezone") or "UTC"
+    tz = ZoneInfo(tz_name)
+
+    base_local = _as_utc_aware(base_utc).astimezone(tz)
+    it = croniter(cron_expr, base_local)
+    next_local: datetime = it.get_next(datetime)
+    return _to_utc_naive(next_local)
 
 
-def compute_next_run_at(*, base: datetime, interval_seconds: int) -> datetime:
-    return base + timedelta(seconds=int(interval_seconds))
+def compute_run_bucket_key_from_schedule(*, now_utc: datetime, schedule: dict | None) -> str:
+    if not schedule or not isinstance(schedule, dict):
+        return now_utc.date().isoformat()
+    if schedule.get("type") != "cron":
+        return now_utc.date().isoformat()
 
+    cron_expr = schedule.get("cron")
+    if not cron_expr:
+        return now_utc.date().isoformat()
+    tz_name = schedule.get("timezone") or "UTC"
+    tz = ZoneInfo(tz_name)
 
-def compute_run_bucket_key(*, now: datetime, interval_seconds: int | None) -> str:
-    if not interval_seconds:
-        return now.date().isoformat()
-    return str(int(now.timestamp()) // int(interval_seconds))
+    now_local = _as_utc_aware(now_utc).astimezone(tz)
+    it = croniter(cron_expr, now_local)
+    prev_local: datetime = it.get_prev(datetime)
+
+    # Bucket is identified by the scheduled "window" start instant in UTC.
+    prev_utc_naive = _to_utc_naive(prev_local)
+    return prev_utc_naive.isoformat()
 
 
 def run_internal_job_once(
@@ -59,8 +93,7 @@ def run_internal_job_once(
     q = _apply_selector(q, job.selector or {}, today)
     customers = q.all()
 
-    interval_seconds = parse_schedule_seconds(job.schedule)
-    bucket_key = compute_run_bucket_key(now=now, interval_seconds=interval_seconds)
+    bucket_key = compute_run_bucket_key_from_schedule(now_utc=now, schedule=job.schedule)
 
     processed = 0
     created = 0
