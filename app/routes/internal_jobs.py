@@ -132,6 +132,11 @@ def get_internal_jobs_ui_catalog():
     }
 
 
+@router.get("/selector-catalog")
+def get_internal_job_selector_catalog_route():
+    return get_internal_job_selector_catalog()
+
+
 @router.get("/ui-bundle")
 def get_internal_jobs_ui_bundle(
     brand: str = Depends(get_active_brand),
