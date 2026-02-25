@@ -50,13 +50,16 @@ def get_internal_jobs_ui_catalog():
                         "brandVia": "X-Brand",
                     },
                 },
+                "selector": {
+                    "widget": "internal_job_selector_builder",
+                    "catalog": {"path": "$.selector"},
+                },
+                "payload_template": {
+                    "widget": "json_object",
+                },
                 "schedule": {
-                    "widget": "group",
-                    "fields": {
-                        "type": {"widget": "hidden", "default": "cron"},
-                        "cron": {"widget": "text", "placeholder": "ex: 0 3 * * 1"},
-                        "timezone": {"widget": "text", "placeholder": "ex: UTC (default) | Europe/Paris"},
-                    },
+                    "widget": "cron_builder",
+                    "help": {"path": "$.cronHelp"},
                 },
                 "active": {"widget": "switch"},
                 "first_run_at": {"widget": "datetime"},

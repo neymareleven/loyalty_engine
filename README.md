@@ -125,6 +125,51 @@
  
  - `POST /admin/internal-jobs/{job_id}/preview`
  - `POST /admin/internal-jobs/{job_id}/run`
+
+## Loyalty tiers (loyalty_status)
+
+Customers have a `loyalty_status` (stored as a tier `key`) derived from their current `status_points`.
+
+### Tier configuration rules (brand-scoped)
+
+- A **base tier is required**:
+  - `rank = 0`
+  - `min_status_points = 0`
+- `rank` and `min_status_points` must be **non-negative integers**.
+- Tiers must be **strictly increasing**:
+  - When `rank` increases, `min_status_points` must strictly increase.
+- Uniqueness (per brand):
+  - `(brand, rank)` is unique
+  - `(brand, min_status_points)` is unique
+
+These rules are enforced both at the API level and in the database via constraints.
+
+### How a customer's loyalty status is assigned
+
+- On customer creation, the backend assigns an initial `loyalty_status` using the tier rules with `status_points = 0`.
+- On point earn / rule actions, the backend recomputes the status based on `status_points`:
+  - Only tiers with `active = true` are eligible.
+  - The chosen tier is the one with the greatest `min_status_points` such that `min_status_points <= status_points`.
+
+### Active flag
+
+- A tier with `active = false` is **never selected** by the tier computation.
+- If a tier is deactivated, existing customers may still have its `key` until a recompute occurs.
+
+### After changing tiers: recompute customers
+
+Changing tiers (create/update/delete/deactivate) does **not** automatically update all customers.
+
+To bring customers back in sync, call:
+
+- `POST /admin/loyalty-tiers/recompute-customers`
+  - Header: `X-Brand: <brand>`
+  - Effect: recomputes `Customer.loyalty_status` for all customers of the active brand from their `status_points`.
+
+Recommended usage (frontend/admin UI):
+
+- After saving tier changes, display a CTA/button: **"Recompute customers"**.
+- Or trigger recompute automatically after a successful tier update if your dataset is small.
  
  ## Internal job idempotence
  

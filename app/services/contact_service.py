@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from app.models.customer import Customer
-from app.models.loyalty_tier import LoyaltyTier
+from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
 
 
 def get_customer(db: Session, brand: str, profile_id: str):
@@ -43,19 +43,13 @@ def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: di
     )
 
     if not customer:
-        lowest_tier = (
-            db.query(LoyaltyTier)
-            .filter(LoyaltyTier.brand == brand)
-            .filter(LoyaltyTier.active.is_(True))
-            .order_by(LoyaltyTier.rank.asc())
-            .first()
-        )
+        initial_status = compute_loyalty_status_from_tiers(db, brand, status_points=0)
 
         customer = Customer(
             brand=brand,
             profile_id=profile_id,
             status="ACTIVE",
-            loyalty_status=(lowest_tier.key if lowest_tier else "UNCONFIGURED"),
+            loyalty_status=(initial_status if initial_status else "UNCONFIGURED"),
         )
         db.add(customer)
         db.flush()
