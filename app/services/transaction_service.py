@@ -1,4 +1,6 @@
 from datetime import datetime
+import os
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -7,6 +9,74 @@ from app.models.customer import Customer
 from app.models.event_type import EventType
 from app.models.transaction import Transaction
 from app.services.rule_engine import process_transaction_rules
+
+
+def _infer_json_schema_from_payload(value: Any, *, _depth: int = 0, _max_depth: int = 6) -> dict | None:
+    if _depth >= _max_depth:
+        return {}
+
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "boolean"}
+    if isinstance(value, int) and not isinstance(value, bool):
+        return {"type": "integer"}
+    if isinstance(value, float):
+        return {"type": "number"}
+    if isinstance(value, str):
+        return {"type": "string"}
+
+    if isinstance(value, dict):
+        props: dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                continue
+            props[k] = _infer_json_schema_from_payload(v, _depth=_depth + 1, _max_depth=_max_depth) or {}
+        return {"type": "object", "properties": props}
+
+    if isinstance(value, list):
+        items_schema: dict[str, Any] | None = None
+        for item in value[:50]:
+            s = _infer_json_schema_from_payload(item, _depth=_depth + 1, _max_depth=_max_depth) or {}
+            items_schema = _merge_json_schemas(items_schema, s)
+        return {"type": "array", "items": items_schema or {}}
+
+    return {}
+
+
+def _merge_json_schemas(a: dict | None, b: dict | None) -> dict | None:
+    if not a:
+        return b
+    if not b:
+        return a
+
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return a
+
+    a_type = a.get("type")
+    b_type = b.get("type")
+    if a_type and b_type and a_type != b_type:
+        return {"anyOf": [a, b]}
+
+    out = dict(a)
+
+    if out.get("type") == "object":
+        out_props = dict(out.get("properties") or {})
+        b_props = b.get("properties") or {}
+        if isinstance(b_props, dict):
+            for k, v in b_props.items():
+                if k in out_props:
+                    out_props[k] = _merge_json_schemas(out_props.get(k), v) or out_props[k]
+                else:
+                    out_props[k] = v
+        out["properties"] = out_props
+        return out
+
+    if out.get("type") == "array":
+        out["items"] = _merge_json_schemas(out.get("items"), b.get("items")) or out.get("items") or {}
+        return out
+
+    return out
 
 
 def _find_event_type(db: Session, *, brand: str, key: str):
@@ -134,12 +204,14 @@ def create_transaction(db: Session, event_data):
 
     et = _find_event_type(db, brand=transaction.brand, key=transaction.event_type)
     if not et:
+        inferred_schema = _infer_json_schema_from_payload(transaction.payload) if transaction.payload is not None else None
         et = EventType(
             brand=transaction.brand,
             key=transaction.event_type,
             origin="EXTERNAL",
             name=transaction.event_type,
             description="Auto-created from inbound event",
+            payload_schema=inferred_schema,
             active=True,
         )
         db.add(et)
@@ -148,6 +220,20 @@ def create_transaction(db: Session, event_data):
         transaction.error_code = "EVENT_TYPE_CREATED"
         transaction.error_message = "EventType was missing in catalog and was created."
         db.commit()
+
+    auto_update_schema = (os.getenv("AUTO_UPDATE_EVENTTYPE_PAYLOAD_SCHEMA", "true") or "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if auto_update_schema and et and et.origin == "EXTERNAL":
+        inferred_schema = _infer_json_schema_from_payload(transaction.payload) if transaction.payload is not None else None
+        if inferred_schema:
+            merged = _merge_json_schemas(et.payload_schema, inferred_schema)
+            if merged != et.payload_schema:
+                et.payload_schema = merged
+                db.commit()
 
     if et and et.origin == "EXTERNAL":
         customer = (

@@ -362,7 +362,9 @@ def update_internal_job(
     data = payload.model_dump(exclude_unset=True)
 
     if "schedule" in data and data["schedule"] is not None:
-        data["schedule"] = data["schedule"].model_dump()
+        fn = getattr(data["schedule"], "model_dump", None)
+        if callable(fn):
+            data["schedule"] = fn()
 
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
