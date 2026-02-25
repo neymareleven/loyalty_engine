@@ -147,7 +147,8 @@ def list_rule_actions_catalog():
         "actions": [
             {
                 "type": "earn_points",
-                "title": "Earn points",
+                "title": "Ajouter des points",
+                "description": "Crédite un nombre de points au client.",
                 "params": {"points": "int", "from_payload": "str (optional)"},
                 "jsonSchema": _model_json_schema(EarnPointsAction),
                 "examples": [{"type": "earn_points", "points": 50}],
@@ -160,7 +161,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "burn_points",
-                "title": "Burn points",
+                "title": "Retirer des points",
+                "description": "Débite un nombre de points au client.",
                 "params": {"points": "int", "from_payload": "str (optional)"},
                 "jsonSchema": _model_json_schema(BurnPointsAction),
                 "examples": [{"type": "burn_points", "points": 20}],
@@ -173,7 +175,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "redeem_reward",
-                "title": "Redeem reward",
+                "title": "Utiliser une récompense",
+                "description": "Consomme une récompense (et peut débiter des points selon la config de la récompense).",
                 "params": {"reward_id": "uuid"},
                 "jsonSchema": _model_json_schema(RedeemRewardAction),
                 "examples": [{"type": "redeem_reward", "reward_id": "<uuid>"}],
@@ -198,7 +201,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "issue_reward",
-                "title": "Issue reward",
+                "title": "Attribuer une récompense",
+                "description": "Crée une récompense pour le client (sans la consommer).",
                 "params": {"reward_id": "uuid"},
                 "jsonSchema": _model_json_schema(IssueRewardAction),
                 "examples": [{"type": "issue_reward", "reward_id": "<uuid>"}],
@@ -223,7 +227,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "earn_points_from_amount",
-                "title": "Earn points from amount",
+                "title": "Ajouter des points selon un montant",
+                "description": "Calcule des points à partir d'un montant dans le payload (ex: amount * rate).",
                 "params": {
                     "amount_path": "str (optional, default: amount)",
                     "rate": "float",
@@ -241,7 +246,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "record_bonus_award",
-                "title": "Record bonus award",
+                "title": "Enregistrer l'attribution d'un bonus",
+                "description": "Enregistre qu'un bonus a été attribué au client (utile pour l'idempotence selon la policy).",
                 "params": {"bonusKey": "str"},
                 "jsonSchema": _model_json_schema(RecordBonusAwardAction),
                 "examples": [{"type": "record_bonus_award", "bonusKey": "BIRTHDAY_200"}],
@@ -254,7 +260,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "reset_status_points",
-                "title": "Reset status points",
+                "title": "Réinitialiser les points de statut",
+                "description": "Remet les points de statut du client à zéro.",
                 "params": {},
                 "jsonSchema": _model_json_schema(ResetStatusPointsAction),
                 "examples": [{"type": "reset_status_points"}],
@@ -267,7 +274,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "downgrade_one_tier",
-                "title": "Downgrade one tier",
+                "title": "Rétrograder d'un niveau",
+                "description": "Fait reculer le client d'un tier de fidélité (selon la configuration des tiers).",
                 "params": {},
                 "jsonSchema": _model_json_schema(DowngradeOneTierAction),
                 "examples": [{"type": "downgrade_one_tier"}],
@@ -280,7 +288,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "set_customer_status",
-                "title": "Set customer status",
+                "title": "Définir le statut client",
+                "description": "Met à jour le champ status du client (ex: VIP).",
                 "params": {"status": "str"},
                 "jsonSchema": _model_json_schema(SetCustomerStatusAction),
                 "examples": [{"type": "set_customer_status", "status": "VIP"}],
@@ -293,7 +302,8 @@ def list_rule_actions_catalog():
             },
             {
                 "type": "add_customer_tag",
-                "title": "Add customer tag",
+                "title": "Ajouter un tag client",
+                "description": "Ajoute un tag au client (et peut créer le tag s'il n'existe pas).",
                 "params": {"tag": "str"},
                 "jsonSchema": _model_json_schema(AddCustomerTagAction),
                 "examples": [{"type": "add_customer_tag", "tag": "birthday"}],

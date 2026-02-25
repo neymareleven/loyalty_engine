@@ -52,7 +52,7 @@ class InternalJobOut(BaseModel):
     payload_template: Optional[Dict[str, Any]] = None
 
     active: bool
-    schedule: Optional[Dict[str, Any]] = None
+    schedule: Optional[Any] = None
 
     next_run_at: Optional[datetime] = None
     last_run_at: Optional[datetime] = None
