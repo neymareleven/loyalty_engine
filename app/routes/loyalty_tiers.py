@@ -1,4 +1,5 @@
 from uuid import UUID
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -12,6 +13,26 @@ from app.services.loyalty_status_service import compute_loyalty_status_from_tier
 
 
 router = APIRouter(prefix="/admin/loyalty-tiers", tags=["admin-loyalty-tiers"])
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _recompute_customers(db: Session, brand: str) -> dict:
+    customers = db.query(Customer).filter(Customer.brand == brand).all()
+    updated = 0
+    for c in customers:
+        new_status = compute_loyalty_status_from_tiers(db, brand, c.status_points)
+        new_status = new_status if new_status else "UNCONFIGURED"
+        if c.loyalty_status != new_status:
+            c.loyalty_status = new_status
+            updated += 1
+    db.commit()
+    return {"brand": brand, "customers": len(customers), "updated": updated}
 
 
 def _validate_tier_payload(
@@ -129,6 +150,10 @@ def create_loyalty_tier(
     db.add(obj)
     db.commit()
     db.refresh(obj)
+
+    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
+        _recompute_customers(db, active_brand)
+
     return obj
 
 
@@ -188,6 +213,10 @@ def update_loyalty_tier(
 
     db.commit()
     db.refresh(obj)
+
+    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
+        _recompute_customers(db, active_brand)
+
     return obj
 
 
@@ -203,6 +232,10 @@ def delete_loyalty_tier(
 
     db.delete(obj)
     db.commit()
+
+    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
+        _recompute_customers(db, active_brand)
+
     return {"deleted": True}
 
 
@@ -211,13 +244,4 @@ def recompute_customers_loyalty_status(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    customers = db.query(Customer).filter(Customer.brand == active_brand).all()
-    updated = 0
-    for c in customers:
-        new_status = compute_loyalty_status_from_tiers(db, active_brand, c.status_points)
-        new_status = new_status if new_status else "UNCONFIGURED"
-        if c.loyalty_status != new_status:
-            c.loyalty_status = new_status
-            updated += 1
-    db.commit()
-    return {"brand": active_brand, "customers": len(customers), "updated": updated}
+    return _recompute_customers(db, active_brand)

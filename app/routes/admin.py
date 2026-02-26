@@ -83,6 +83,7 @@ def list_ui_options_event_types(
                 "name": et.name,
                 "origin": et.origin,
                 "active": et.active,
+                "hasPayloadSchema": bool(et.payload_schema),
             }
             for et in items
         ],
@@ -152,6 +153,14 @@ def list_rule_actions_catalog():
                 "params": {"points": "int", "from_payload": "str (optional)"},
                 "jsonSchema": _model_json_schema(EarnPointsAction),
                 "examples": [{"type": "earn_points", "points": 50}],
+                "uiHints": {
+                    "from_payload": {
+                        "widget": "json_path",
+                        "placeholder": "ex: amount",
+                        "note": "Champ dans les données de l’événement. Exemple: amount ou order.total",
+                        "requiresPayloadSchema": True,
+                    }
+                },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": False,
@@ -166,6 +175,14 @@ def list_rule_actions_catalog():
                 "params": {"points": "int", "from_payload": "str (optional)"},
                 "jsonSchema": _model_json_schema(BurnPointsAction),
                 "examples": [{"type": "burn_points", "points": 20}],
+                "uiHints": {
+                    "from_payload": {
+                        "widget": "json_path",
+                        "placeholder": "ex: points",
+                        "note": "Champ dans les données de l’événement. Exemple: points ou cart.points",
+                        "requiresPayloadSchema": True,
+                    }
+                },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": False,
@@ -237,6 +254,18 @@ def list_rule_actions_catalog():
                 },
                 "jsonSchema": _model_json_schema(EarnPointsFromAmountAction),
                 "examples": [{"type": "earn_points_from_amount", "rate": 1.0, "amount_path": "amount"}],
+                "requiresPayloadSchema": True,
+                "uiHints": {
+                    "amount_path": {
+                        "widget": "json_path",
+                        "placeholder": "amount",
+                        "default": "amount",
+                        "note": "Champ (montant) dans les données de l’événement. Par défaut: amount",
+                    },
+                    "rate": {"widget": "number", "step": 0.01, "min": 0},
+                    "min_points": {"widget": "number", "min": 0},
+                    "max_points": {"widget": "number", "min": 0},
+                },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": False,
@@ -293,6 +322,12 @@ def list_rule_actions_catalog():
                 "params": {"status": "str"},
                 "jsonSchema": _model_json_schema(SetCustomerStatusAction),
                 "examples": [{"type": "set_customer_status", "status": "VIP"}],
+                "uiHints": {
+                    "status": {
+                        "widget": "select",
+                        "options": ["ACTIVE", "INACTIVE", "VIP", "BANNED"],
+                    }
+                },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": True,
