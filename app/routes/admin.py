@@ -145,22 +145,26 @@ def list_rule_actions_catalog():
         return model_cls.schema()
 
     return {
+        "flags": {
+            "requiresPayloadSchema": {
+                "meaning": "Dépend de la structure des données de l’événement (payload_schema) pour permettre une configuration guidée (sélecteur de champs) et/ou une exécution correcte.",
+                "uiRecommendation": {
+                    "ifEventTypeHasNoPayloadSchema": {
+                        "disableActions": "Désactiver toute action qui a requiresPayloadSchema=true au niveau de l’action.",
+                        "disableFields": "Désactiver tout champ dont uiHints.<field>.requiresPayloadSchema=true.",
+                    }
+                },
+                "appliesTo": ["action", "field"],
+            }
+        },
         "actions": [
             {
                 "type": "earn_points",
                 "title": "Ajouter des points",
                 "description": "Crédite un nombre de points au client.",
-                "params": {"points": "int", "from_payload": "str (optional)"},
+                "params": {"points": "int"},
                 "jsonSchema": _model_json_schema(EarnPointsAction),
                 "examples": [{"type": "earn_points", "points": 50}],
-                "uiHints": {
-                    "from_payload": {
-                        "widget": "json_path",
-                        "placeholder": "ex: amount",
-                        "note": "Champ dans les données de l’événement. Exemple: amount ou order.total",
-                        "requiresPayloadSchema": True,
-                    }
-                },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": False,
@@ -172,17 +176,9 @@ def list_rule_actions_catalog():
                 "type": "burn_points",
                 "title": "Retirer des points",
                 "description": "Débite un nombre de points au client.",
-                "params": {"points": "int", "from_payload": "str (optional)"},
+                "params": {"points": "int"},
                 "jsonSchema": _model_json_schema(BurnPointsAction),
                 "examples": [{"type": "burn_points", "points": 20}],
-                "uiHints": {
-                    "from_payload": {
-                        "widget": "json_path",
-                        "placeholder": "ex: points",
-                        "note": "Champ dans les données de l’événement. Exemple: points ou cart.points",
-                        "requiresPayloadSchema": True,
-                    }
-                },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": False,
@@ -245,22 +241,24 @@ def list_rule_actions_catalog():
             {
                 "type": "earn_points_from_amount",
                 "title": "Ajouter des points selon un montant",
-                "description": "Calcule des points à partir d'un montant dans le payload (ex: amount * rate).",
+                "description": "Calcule des points à partir d'un montant dans les données de l’événement (ex: amount * rate).",
                 "params": {
-                    "amount_path": "str (optional, default: amount)",
-                    "rate": "float",
+                    "amount_path": "str (required)",
+                    "rate": "float (required)",
                     "min_points": "int (optional)",
                     "max_points": "int (optional)",
                 },
                 "jsonSchema": _model_json_schema(EarnPointsFromAmountAction),
                 "examples": [{"type": "earn_points_from_amount", "rate": 1.0, "amount_path": "amount"}],
                 "requiresPayloadSchema": True,
+                "requiredPayloadFieldSelection": True,
                 "uiHints": {
                     "amount_path": {
                         "widget": "json_path",
+                        "mode": "field_picker_only",
                         "placeholder": "amount",
-                        "default": "amount",
-                        "note": "Champ (montant) dans les données de l’événement. Par défaut: amount",
+                        "note": "Champ (montant) dans les données de l’événement.",
+                        "requiresPayloadSchema": True,
                     },
                     "rate": {"widget": "number", "step": 0.01, "min": 0},
                     "min_points": {"widget": "number", "min": 0},

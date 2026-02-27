@@ -6,8 +6,12 @@ from uuid import UUID
 from pydantic import BaseModel
 
 
+class CustomerCreate(BaseModel):
+    gender: Optional[str] = None
+    birthdate: Optional[date] = None
+
+
 class CustomerUpsert(BaseModel):
-    brand: str
     profileId: str
 
     gender: Optional[str] = None

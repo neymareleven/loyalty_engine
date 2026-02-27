@@ -5,19 +5,17 @@ from pydantic import BaseModel, Field
 
 class EarnPointsAction(BaseModel):
     type: Literal["earn_points"] = "earn_points"
-    points: Optional[int] = Field(default=None)
-    from_payload: Optional[str] = Field(default=None)
+    points: int
 
 
 class BurnPointsAction(BaseModel):
     type: Literal["burn_points"] = "burn_points"
-    points: Optional[int] = Field(default=None)
-    from_payload: Optional[str] = Field(default=None)
+    points: int
 
 
 class EarnPointsFromAmountAction(BaseModel):
     type: Literal["earn_points_from_amount"] = "earn_points_from_amount"
-    amount_path: Optional[str] = Field(default="amount")
+    amount_path: str
     rate: float
     min_points: Optional[int] = Field(default=None)
     max_points: Optional[int] = Field(default=None)
