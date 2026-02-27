@@ -411,8 +411,6 @@ def _execute_actions(db: Session, customer, transaction, actions):
         action_type = action.get("type")
         if action_type == "earn_points":
             points = action.get("points")
-            if points is None and action.get("from_payload"):
-                points = _get_by_path(transaction.payload or {}, action.get("from_payload"))
 
             depth = _as_int(_get_by_path(transaction.payload or {}, "_ruleDepth")) or 0
 
@@ -425,7 +423,9 @@ def _execute_actions(db: Session, customer, transaction, actions):
             executed.append({"type": action_type, "points": _as_int(points)})
 
         elif action_type == "earn_points_from_amount":
-            amount_path = action.get("amount_path") or "amount"
+            amount_path = action.get("amount_path")
+            if not amount_path:
+                raise ValueError("earn_points_from_amount requires amount_path")
             rate = action.get("rate")
             if rate is None:
                 raise ValueError("earn_points_from_amount requires rate")
@@ -466,8 +466,6 @@ def _execute_actions(db: Session, customer, transaction, actions):
 
         elif action_type == "burn_points":
             points = action.get("points")
-            if points is None and action.get("from_payload"):
-                points = _get_by_path(transaction.payload or {}, action.get("from_payload"))
 
             depth = _as_int(_get_by_path(transaction.payload or {}, "_ruleDepth")) or 0
 

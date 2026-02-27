@@ -30,7 +30,7 @@ def get_internal_job_selector_catalog():
                 "type": "loyalty_status_in",
                 "title": "Tier de fidélité",
                 "description": "Cible les clients appartenant à un ou plusieurs tiers de fidélité.",
-                "value": ["BRONZE"],
+                "value": [],
             },
             {
                 "type": "lifetime_points_gte",
