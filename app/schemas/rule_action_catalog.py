@@ -13,12 +13,9 @@ class BurnPointsAction(BaseModel):
     points: int
 
 
-class EarnPointsFromAmountAction(BaseModel):
-    type: Literal["earn_points_from_amount"] = "earn_points_from_amount"
-    amount_path: str
-    rate: float
-    min_points: Optional[int] = Field(default=None)
-    max_points: Optional[int] = Field(default=None)
+class BurnStatusPointsAction(BaseModel):
+    type: Literal["burn_status_points"] = "burn_status_points"
+    points: int
 
 
 class RedeemRewardAction(BaseModel):
