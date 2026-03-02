@@ -12,6 +12,7 @@ class CustomerCreate(BaseModel):
 
 
 class CustomerUpsert(BaseModel):
+    brand: str
     profileId: str
 
     gender: Optional[str] = None

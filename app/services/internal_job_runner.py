@@ -23,6 +23,11 @@ class InternalJobRunStats:
     failed: int
 
 
+@dataclass
+class MaintenanceJobRunStats:
+    expired: int
+
+
 def _as_utc_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=ZoneInfo("UTC"))
@@ -78,9 +83,18 @@ def run_internal_job_once(
     *,
     job: InternalJob,
     now: datetime | None = None,
-) -> InternalJobRunStats:
+) -> object:
     if now is None:
         now = datetime.utcnow()
+
+    if job.job_key == "MAINT_EXPIRE_REWARDS":
+        if not job.brand:
+            raise ValueError("MAINT_EXPIRE_REWARDS requires job.brand")
+
+        from app.services.reward_service import expire_rewards
+
+        expired = expire_rewards(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(expired))
 
     today: date = now.date()
 

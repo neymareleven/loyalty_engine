@@ -75,3 +75,31 @@ def burn_points(db: Session, customer, transaction):
     db.flush()
 
     return movement
+
+
+def burn_wallet_points(db: Session, customer, transaction):
+    return burn_points(db, customer, transaction)
+
+
+def burn_status_points(db: Session, customer, transaction):
+    payload = transaction.payload or {}
+
+    points = int(payload.get("points", 0))
+    if points <= 0:
+        return None
+
+    # Ensure we operate on the row attached to the current session.
+    customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
+
+    customer.status_points = max(0, int(customer.status_points or 0) - points)
+
+    depth = 0
+    try:
+        depth = int((transaction.payload or {}).get("_ruleDepth") or 0)
+    except Exception:
+        depth = 0
+
+    update_customer_status(db, customer, reason="BURN_STATUS_POINTS", source_transaction_id=transaction.id, depth=depth)
+
+    db.flush()
+    return {"type": "burn_status_points", "points": int(points)}

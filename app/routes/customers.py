@@ -1,6 +1,5 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -8,7 +7,7 @@ from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.customer_reward import CustomerReward
 from app.models.point_movement import PointMovement
-from app.schemas.customer import CustomerCreate, CustomerOut, CustomerUpsert
+from app.schemas.customer import CustomerOut, CustomerUpsert
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.contact_service import get_or_create_customer
@@ -20,6 +19,47 @@ from app.models.customer_tag import CustomerTag
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])
+
+
+@router.get("")
+def list_customers(
+    q: str | None = None,
+    status: str | None = None,
+    loyalty_status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    query = db.query(Customer).filter(Customer.brand == active_brand)
+
+    if q:
+        query = query.filter(Customer.profile_id.ilike(f"%{q}%"))
+
+    if status:
+        query = query.filter(Customer.status == status)
+
+    if loyalty_status:
+        query = query.filter(Customer.loyalty_status == loyalty_status)
+
+    total = query.with_entities(func.count()).scalar() or 0
+    items = (
+        query.order_by(Customer.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "brand": active_brand,
+        "count": int(total),
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/{brand}/{profile_id}", response_model=CustomerOut)
@@ -44,33 +84,17 @@ def get_customer(
 @router.post("/upsert", response_model=CustomerOut)
 def upsert_customer(
     payload: CustomerUpsert,
-    active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
+    brand = (payload.brand or "").strip() or None
+    if not brand:
+        raise HTTPException(status_code=400, detail="brand is required")
     profile_id = (payload.profileId or "").strip() or None
     if not profile_id:
         raise HTTPException(status_code=400, detail="profileId is required")
     customer = get_or_create_customer(
         db,
-        active_brand,
-        profile_id,
-        {"gender": payload.gender, "birthdate": payload.birthdate},
-    )
-    db.commit()
-    db.refresh(customer)
-    return customer
-
-
-@router.post("", response_model=CustomerOut)
-def create_customer(
-    payload: CustomerCreate,
-    active_brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    profile_id = str(uuid.uuid4())
-    customer = get_or_create_customer(
-        db,
-        active_brand,
+        brand,
         profile_id,
         {"gender": payload.gender, "birthdate": payload.birthdate},
     )
@@ -237,7 +261,10 @@ def get_customer_loyalty(
 
     next_tier = None
     if current_rank is not None:
-        next_tier = next((t for t in tiers if int(t.rank) == current_rank + 1), None)
+        next_tier = next(
+            (t for t in tiers if int(t.rank) > current_rank),
+            None,
+        )
     elif tiers:
         # If current tier isn't found, best-effort: choose the first tier above current status_points.
         sp = int(customer.status_points or 0)

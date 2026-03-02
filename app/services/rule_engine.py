@@ -11,7 +11,7 @@ from app.models.rule import Rule
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.point_movement import PointMovement
 from app.services.contact_service import get_customer
-from app.services.loyalty_service import earn_points, burn_points
+from app.services.loyalty_service import earn_points, burn_points, burn_status_points
 from app.services.reward_service import issue_reward, redeem_reward
 
 
@@ -422,48 +422,6 @@ def _execute_actions(db: Session, customer, transaction, actions):
             earn_points(db, customer, fake_tx)
             executed.append({"type": action_type, "points": _as_int(points)})
 
-        elif action_type == "earn_points_from_amount":
-            amount_path = action.get("amount_path")
-            if not amount_path:
-                raise ValueError("earn_points_from_amount requires amount_path")
-            rate = action.get("rate")
-            if rate is None:
-                raise ValueError("earn_points_from_amount requires rate")
-            try:
-                rate_f = float(rate)
-            except Exception:
-                raise ValueError("earn_points_from_amount rate must be a number")
-
-            raw_amount = _get_by_path(transaction.payload or {}, amount_path)
-            try:
-                amount_f = float(raw_amount)
-            except Exception:
-                raise ValueError("earn_points_from_amount amount is missing or not numeric")
-
-            points = int(amount_f * rate_f)
-            if action.get("min_points") is not None:
-                points = max(points, int(action.get("min_points")))
-            if action.get("max_points") is not None:
-                points = min(points, int(action.get("max_points")))
-
-            depth = _as_int(_get_by_path(transaction.payload or {}, "_ruleDepth")) or 0
-            fake_tx = type(
-                "FakeTx",
-                (),
-                {"id": transaction.id, "payload": {"amount": points, "_ruleDepth": depth}},
-            )
-            earn_points(db, customer, fake_tx)
-            executed.append(
-                {
-                    "type": action_type,
-                    "amountPath": amount_path,
-                    "rate": rate_f,
-                    "points": int(points),
-                    "minPoints": action.get("min_points"),
-                    "maxPoints": action.get("max_points"),
-                }
-            )
-
         elif action_type == "burn_points":
             points = action.get("points")
 
@@ -475,6 +433,19 @@ def _execute_actions(db: Session, customer, transaction, actions):
                 {"id": transaction.id, "payload": {"points": points, "_ruleDepth": depth}},
             )
             burn_points(db, customer, fake_tx)
+            executed.append({"type": action_type, "points": _as_int(points)})
+
+        elif action_type == "burn_status_points":
+            points = action.get("points")
+
+            depth = _as_int(_get_by_path(transaction.payload or {}, "_ruleDepth")) or 0
+
+            fake_tx = type(
+                "FakeTx",
+                (),
+                {"id": transaction.id, "payload": {"points": points, "_ruleDepth": depth}},
+            )
+            burn_status_points(db, customer, fake_tx)
             executed.append({"type": action_type, "points": _as_int(points)})
 
         elif action_type == "redeem_reward":
