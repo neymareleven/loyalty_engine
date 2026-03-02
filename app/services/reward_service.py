@@ -133,11 +133,13 @@ def use_reward(db: Session, customer_reward: CustomerReward):
 # ============================================================
 # EXPIRE REWARDS (job batch / cron)
 # ============================================================
-def expire_rewards(db: Session):
+def expire_rewards(db: Session, *, brand: str):
     now = datetime.utcnow()
 
     expired = (
         db.query(CustomerReward)
+        .join(Reward, Reward.id == CustomerReward.reward_id)
+        .filter(Reward.brand == brand)
         .filter(CustomerReward.status == "ISSUED")
         .filter(CustomerReward.expires_at.isnot(None))
         .filter(CustomerReward.expires_at < now)

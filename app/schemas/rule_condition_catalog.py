@@ -1,17 +1,7 @@
 def get_rule_conditions_catalog():
     return {
         "combinators": ["all", "any", "not"],
-        "flags": {
-            "requiresPayloadSchema": {
-                "meaning": "Cette condition a besoin de la structure des données de l’événement (payload_schema) pour être configurée de façon guidée (sélecteur de champs).",
-                "uiRecommendation": "Si l’event type sélectionné n’a pas de payload_schema, griser/désactiver ces conditions.",
-                "appliesTo": ["condition"],
-            }
-        },
         "uiHints": {
-            "payload_path": {"widget": "json_path", "mode": "field_picker_only"},
-            "payload_cmp.path": {"widget": "json_path", "mode": "field_picker_only"},
-            "payload_cmp.op": {"widget": "select", "options": ["eq", "gte", "lte", "between"]},
             "customer_cmp.op": {"widget": "select", "options": ["eq", "gte", "lte", "between"]},
             "customer_cmp.field": {
                 "widget": "select",
@@ -52,57 +42,6 @@ def get_rule_conditions_catalog():
             },
         },
         "conditions": [
-            {
-                "type": "payload",
-                "title": "Données de l’événement (égalité)",
-                "description": "Vérifie que certains champs des données de l’événement ont une valeur exacte (ex: amount == 100).",
-                "params": {"field": ["<champ>"], "value": "<valeurAttendues>"},
-                "requiresPayloadSchema": True,
-            },
-            {
-                "type": "payload_present",
-                "title": "Champs présents dans les données de l’événement",
-                "description": "Vérifie que des champs existent dans les données de l’événement et ne sont pas vides.",
-                "params": {"fields": ["<champ>"]},
-                "requiresPayloadSchema": True,
-            },
-            {
-                "type": "payload_in",
-                "title": "Champ dans une liste de valeurs",
-                "description": "Vérifie qu'un champ des données de l’événement est inclus dans une liste de valeurs autorisées.",
-                "params": {"field": ["<champ>"], "values": ["<valeur>"]},
-                "requiresPayloadSchema": True,
-            },
-            {
-                "type": "payload_contains",
-                "title": "Champ contient une valeur",
-                "description": "Vérifie qu'un champ des données de l’événement contient une valeur (texte ou liste).",
-                "params": {"field": ["<champ>"], "value": "<valeur>"},
-                "requiresPayloadSchema": True,
-            },
-            {
-                "type": "payload_cmp",
-                "title": "Comparer un champ des données de l’événement",
-                "description": "Compare un champ des données de l’événement (eq/gte/lte/between) avec une valeur donnée.",
-                "params": {"path": ["<champ>"], "op": "eq|gte|lte|between", "value": "any"},
-                "requiresPayloadSchema": True,
-            },
-            {
-                "type": "amount_gte",
-                "title": "Montant minimum",
-                "description": "Vérifie que le champ amount des données de l’événement est supérieur ou égal à une valeur.",
-                "params": {"value": 0},
-                "requiresPayloadSchema": True,
-                "requiredPayloadFields": ["amount"],
-            },
-            {
-                "type": "points_gte",
-                "title": "Points minimum",
-                "description": "Vérifie que le champ points des données de l’événement est supérieur ou égal à une valeur.",
-                "params": {"value": 0},
-                "requiresPayloadSchema": True,
-                "requiredPayloadFields": ["points"],
-            },
             {
                 "type": "customer_loyalty_status_in",
                 "title": "Statut de fidélité (tiers)",

@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -20,6 +21,47 @@ from app.models.customer_tag import CustomerTag
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])
+
+
+@router.get("")
+def list_customers(
+    q: str | None = None,
+    status: str | None = None,
+    loyalty_status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    query = db.query(Customer).filter(Customer.brand == active_brand)
+
+    if q:
+        query = query.filter(Customer.profile_id.ilike(f"%{q}%"))
+
+    if status:
+        query = query.filter(Customer.status == status)
+
+    if loyalty_status:
+        query = query.filter(Customer.loyalty_status == loyalty_status)
+
+    total = query.with_entities(func.count()).scalar() or 0
+    items = (
+        query.order_by(Customer.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "brand": active_brand,
+        "count": int(total),
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/{brand}/{profile_id}", response_model=CustomerOut)
@@ -237,7 +279,10 @@ def get_customer_loyalty(
 
     next_tier = None
     if current_rank is not None:
-        next_tier = next((t for t in tiers if int(t.rank) == current_rank + 1), None)
+        next_tier = next(
+            (t for t in tiers if int(t.rank) > current_rank),
+            None,
+        )
     elif tiers:
         # If current tier isn't found, best-effort: choose the first tier above current status_points.
         sp = int(customer.status_points or 0)

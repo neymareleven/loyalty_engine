@@ -15,9 +15,9 @@ from app.schemas.bonus_policy_catalog import get_bonus_award_policies_catalog
 from app.schemas.rule_action_catalog import (
     AddCustomerTagAction,
     BurnPointsAction,
+    BurnStatusPointsAction,
     DowngradeOneTierAction,
     EarnPointsAction,
-    EarnPointsFromAmountAction,
     IssueRewardAction,
     RecordBonusAwardAction,
     RedeemRewardAction,
@@ -30,10 +30,13 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 @router.post("/rewards/expire")
-def admin_expire_rewards(db: Session = Depends(get_db)):
-    expired_count = expire_rewards(db)
+def admin_expire_rewards(
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    expired_count = expire_rewards(db, brand=brand)
     db.commit()
-    return {"expired": expired_count}
+    return {"brand": brand, "expired": expired_count}
 
 
 @router.get("/ui-options/rewards")
@@ -175,15 +178,29 @@ def list_rule_actions_catalog():
             {
                 "type": "burn_points",
                 "title": "Retirer des points",
-                "description": "Débite un nombre de points au client.",
+                "description": "Débite un nombre de points du portefeuille (wallet) du client.",
                 "params": {"points": "int"},
                 "jsonSchema": _model_json_schema(BurnPointsAction),
                 "examples": [{"type": "burn_points", "points": 20}],
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": False,
-                    "sideEffects": ["Creates point movement", "Decrements customer points", "May update loyalty status"],
+                    "sideEffects": ["Creates point movement"],
                     "commonErrors": ["points missing/invalid", "not enough points", "customer not found"],
+                },
+            },
+            {
+                "type": "burn_status_points",
+                "title": "Retirer des points de statut",
+                "description": "Diminue status_points (points de statut) et peut déclencher un TIER_DOWNGRADED si un seuil est franchi.",
+                "params": {"points": "int"},
+                "jsonSchema": _model_json_schema(BurnStatusPointsAction),
+                "examples": [{"type": "burn_status_points", "points": 50}],
+                "semantics": {
+                    "atomicity": "Per-rule: all actions rollback if one fails.",
+                    "idempotent": False,
+                    "sideEffects": ["Updates customer.status_points", "May update loyalty status"],
+                    "commonErrors": ["points missing/invalid", "customer not found"],
                 },
             },
             {
@@ -236,39 +253,6 @@ def list_rule_actions_catalog():
                     "idempotent": False,
                     "sideEffects": ["Creates customer reward"],
                     "commonErrors": ["reward_id missing", "reward not found"],
-                },
-            },
-            {
-                "type": "earn_points_from_amount",
-                "title": "Ajouter des points selon un montant",
-                "description": "Calcule des points à partir d'un montant dans les données de l’événement (ex: amount * rate).",
-                "params": {
-                    "amount_path": "str (required)",
-                    "rate": "float (required)",
-                    "min_points": "int (optional)",
-                    "max_points": "int (optional)",
-                },
-                "jsonSchema": _model_json_schema(EarnPointsFromAmountAction),
-                "examples": [{"type": "earn_points_from_amount", "rate": 1.0, "amount_path": "amount"}],
-                "requiresPayloadSchema": True,
-                "requiredPayloadFieldSelection": True,
-                "uiHints": {
-                    "amount_path": {
-                        "widget": "json_path",
-                        "mode": "field_picker_only",
-                        "placeholder": "amount",
-                        "note": "Champ (montant) dans les données de l’événement.",
-                        "requiresPayloadSchema": True,
-                    },
-                    "rate": {"widget": "number", "step": 0.01, "min": 0},
-                    "min_points": {"widget": "number", "min": 0},
-                    "max_points": {"widget": "number", "min": 0},
-                },
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": False,
-                    "sideEffects": ["Creates point movement", "Increments customer points", "May update loyalty status"],
-                    "commonErrors": ["rate missing/invalid", "amount missing/invalid"],
                 },
             },
             {
@@ -406,7 +390,7 @@ def get_rules_ui_catalog():
                     "priority": 0,
                     "active": True,
                     "conditions": {"all": [{"amount_gte": 100}]},
-                    "actions": [{"type": "earn_points_from_amount", "rate": 1.0, "amount_path": "amount"}],
+                    "actions": [{"type": "earn_points", "points": 10}],
                 }
             ],
         },

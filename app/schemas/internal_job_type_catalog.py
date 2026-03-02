@@ -52,6 +52,7 @@ def get_internal_job_type_catalog():
         ],
         "notes": [
             "These are UI presets only. Backend enforcement is done by InternalJobCreate schema + validation.",
-            "Event types must exist (origin=INTERNAL) for the active brand before a job can be created.",
+            "For customer-emitting jobs, event types must exist (origin=INTERNAL) for the active brand before a job can be created.",
+            "Maintenance jobs may ignore event_type validation.",
         ],
     }

@@ -9,7 +9,9 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.models.customer import Customer
 from app.models.internal_job import InternalJob
+from app.models.reward import Reward
 from app.services.internal_job_runner import compute_next_run_at_from_schedule, run_internal_job_once
 
 
@@ -51,6 +53,48 @@ def _claim_due_jobs(
     return jobs
 
 
+def _ensure_system_managed_jobs(db: Session, *, now: datetime):
+    brands = set()
+    for (b,) in db.query(Customer.brand).filter(Customer.brand.isnot(None)).distinct().all():
+        if b:
+            brands.add(str(b))
+    for (b,) in db.query(Reward.brand).filter(Reward.brand.isnot(None)).distinct().all():
+        if b:
+            brands.add(str(b))
+
+    if not brands:
+        return
+
+    default_schedule = {"type": "cron", "cron": "0 0 * * *", "timezone": "UTC"}
+
+    created_any = False
+    for brand in brands:
+        exists = (
+            db.query(InternalJob.id)
+            .filter(InternalJob.job_key == "MAINT_EXPIRE_REWARDS")
+            .filter(InternalJob.brand == brand)
+            .first()
+        )
+        if exists:
+            continue
+
+        job = InternalJob(
+            job_key="MAINT_EXPIRE_REWARDS",
+            brand=brand,
+            event_type="MAINTENANCE",
+            selector={},
+            payload_template=None,
+            active=True,
+            schedule=default_schedule,
+        )
+        job.next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=default_schedule)
+        db.add(job)
+        created_any = True
+
+    if created_any:
+        db.flush()
+
+
 def run_scheduler_loop(
     *,
     worker_id: str | None = None,
@@ -78,6 +122,7 @@ def run_scheduler_loop(
 
         db = SessionLocal()
         try:
+            _ensure_system_managed_jobs(db, now=now)
             jobs = _claim_due_jobs(
                 db,
                 now=now,
@@ -137,15 +182,17 @@ def run_scheduler_loop(
                     job.last_run_at = run_now
                     job.next_run_at = compute_next_run_at_from_schedule(base_utc=run_now, schedule=job.schedule)
 
+                    stats_payload = {}
+                    for k in ["processed", "created", "idempotent_existing", "failed", "expired"]:
+                        if hasattr(stats, k):
+                            stats_payload[k] = getattr(stats, k)
+
                     logger.info(
                         "internal job success",
                         extra={
                             "job_id": str(job.id),
                             "job_key": job.job_key,
-                            "processed": stats.processed,
-                            "created": stats.created,
-                            "idempotent_existing": stats.idempotent_existing,
-                            "failed": stats.failed,
+                            **stats_payload,
                             "next_run_at": (job.next_run_at.isoformat() if job.next_run_at else None),
                         },
                     )

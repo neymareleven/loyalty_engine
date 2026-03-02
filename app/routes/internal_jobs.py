@@ -24,6 +24,10 @@ from app.services.transaction_service import create_transaction
 router = APIRouter(prefix="/admin/internal-jobs", tags=["admin-internal-jobs"])
 
 
+def _is_system_managed_job(job: InternalJob) -> bool:
+    return job.job_key == "MAINT_EXPIRE_REWARDS"
+
+
 @router.get("/ui-catalog")
 def get_internal_jobs_ui_catalog():
 
@@ -283,7 +287,7 @@ def list_internal_jobs(
     active: bool | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(InternalJob).filter(InternalJob.brand == active_brand)
+    q = db.query(InternalJob).filter(InternalJob.brand == active_brand).filter(InternalJob.job_key != "MAINT_EXPIRE_REWARDS")
     if active is not None:
         q = q.filter(InternalJob.active.is_(active))
     return q.order_by(InternalJob.created_at.desc()).all()
@@ -297,6 +301,8 @@ def create_internal_job(
 ):
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
+    if payload.job_key == "MAINT_EXPIRE_REWARDS":
+        raise HTTPException(status_code=400, detail="This internal job is system-managed")
     q = (
         db.query(EventType.id)
         .filter(
@@ -345,6 +351,8 @@ def get_internal_job(
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
     if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
+    if _is_system_managed_job(job):
+        raise HTTPException(status_code=404, detail="Internal job not found")
     return job
 
 
@@ -358,6 +366,8 @@ def update_internal_job(
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
     if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
+    if _is_system_managed_job(job):
+        raise HTTPException(status_code=400, detail="This internal job is system-managed")
 
     data = payload.model_dump(exclude_unset=True)
 
@@ -413,6 +423,8 @@ def delete_internal_job(
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
     if not job or job.brand != active_brand:
         raise HTTPException(status_code=404, detail="Internal job not found")
+    if _is_system_managed_job(job):
+        raise HTTPException(status_code=400, detail="This internal job is system-managed")
 
     db.delete(job)
     db.commit()
@@ -429,6 +441,8 @@ def preview_internal_job(
 ):
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
     if not job or job.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Internal job not found")
+    if _is_system_managed_job(job):
         raise HTTPException(status_code=404, detail="Internal job not found")
 
     if not job.active:
@@ -472,6 +486,8 @@ def run_internal_job(
 ):
     job = db.query(InternalJob).filter(InternalJob.id == job_id).first()
     if not job or job.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Internal job not found")
+    if _is_system_managed_job(job):
         raise HTTPException(status_code=404, detail="Internal job not found")
 
     if not job.active:
