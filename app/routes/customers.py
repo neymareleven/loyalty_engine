@@ -237,7 +237,11 @@ def get_customer_loyalty(
 
     next_tier = None
     if current_rank is not None:
-        next_tier = next((t for t in tiers if int(t.rank) == current_rank + 1), None)
+        # Ranks are only guaranteed to be unique (not contiguous), so pick the next higher rank.
+        for t in tiers:
+            if int(t.rank) > current_rank:
+                next_tier = t
+                break
     elif tiers:
         # If current tier isn't found, best-effort: choose the first tier above current status_points.
         sp = int(customer.status_points or 0)
