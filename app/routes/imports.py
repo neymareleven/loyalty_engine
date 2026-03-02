@@ -37,34 +37,57 @@ async def import_customers_csv(
     created_or_updated = 0
     errors: list[dict] = []
 
+    rows: list[tuple[int, dict]] = []
+
     for idx, row in enumerate(reader, start=2):
         processed += 1
+        rows.append((idx, row))
+
+    for idx, row in rows:
         try:
             brand_in = (row.get("brand") or "").strip()
-            if brand_in and brand_in != active_brand:
+            if not brand_in:
+                raise ValueError("brand is required")
+            if brand_in != active_brand:
                 raise ValueError("brand does not match active brand context")
-            brand = brand_in or active_brand
-            profile_id = (row.get("profileId") or row.get("profile_id") or "").strip()
-            gender = (row.get("gender") or "").strip() or None
-            birthdate = _parse_date((row.get("birthdate") or "").strip() or None)
 
+            profile_id = (row.get("profileId") or row.get("profile_id") or "").strip()
             if not profile_id:
                 raise ValueError("profileId is required")
 
-            get_or_create_customer(
-                db,
-                brand,
-                profile_id,
-                {"gender": gender, "birthdate": birthdate},
-            )
-            created_or_updated += 1
+            gender = (row.get("gender") or "").strip() or None
+            birthdate = _parse_date((row.get("birthdate") or "").strip() or None)
         except Exception as e:
             errors.append({"line": idx, "error": str(e), "row": row})
+
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Import rejected: CSV validation failed. No customers were imported.",
+                "processed": processed,
+                "errors": errors,
+            },
+        )
+
+    for idx, row in rows:
+        brand = (row.get("brand") or "").strip()
+        profile_id = (row.get("profileId") or row.get("profile_id") or "").strip()
+        gender = (row.get("gender") or "").strip() or None
+        birthdate = _parse_date((row.get("birthdate") or "").strip() or None)
+
+        get_or_create_customer(
+            db,
+            brand,
+            profile_id,
+            {"gender": gender, "birthdate": birthdate},
+        )
+        created_or_updated += 1
 
     db.commit()
 
     return {
         "processed": processed,
         "upserted": created_or_updated,
-        "errors": errors,
+        "errors": [],
     }

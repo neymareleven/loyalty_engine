@@ -1,5 +1,3 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -9,7 +7,7 @@ from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.customer_reward import CustomerReward
 from app.models.point_movement import PointMovement
-from app.schemas.customer import CustomerCreate, CustomerOut, CustomerUpsert
+from app.schemas.customer import CustomerOut, CustomerUpsert
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.contact_service import get_or_create_customer
@@ -86,33 +84,17 @@ def get_customer(
 @router.post("/upsert", response_model=CustomerOut)
 def upsert_customer(
     payload: CustomerUpsert,
-    active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
+    brand = (payload.brand or "").strip() or None
+    if not brand:
+        raise HTTPException(status_code=400, detail="brand is required")
     profile_id = (payload.profileId or "").strip() or None
     if not profile_id:
         raise HTTPException(status_code=400, detail="profileId is required")
     customer = get_or_create_customer(
         db,
-        active_brand,
-        profile_id,
-        {"gender": payload.gender, "birthdate": payload.birthdate},
-    )
-    db.commit()
-    db.refresh(customer)
-    return customer
-
-
-@router.post("", response_model=CustomerOut)
-def create_customer(
-    payload: CustomerCreate,
-    active_brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    profile_id = str(uuid.uuid4())
-    customer = get_or_create_customer(
-        db,
-        active_brand,
+        brand,
         profile_id,
         {"gender": payload.gender, "birthdate": payload.birthdate},
     )
