@@ -17,12 +17,12 @@ class BonusDefinitionCreate(BaseModel):
     policy_params: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Optional. Policy parameters for award_policy. "
-            "For the currently supported policies (ONCE_EVER/ONCE_PER_YEAR/ONCE_PER_MONTH/ONCE_PER_WEEK/ONCE_PER_DAY), "
-            "this object is not used by the engine and can be omitted or set to {}. "
-            "The frontend should render a guided form based on /admin/bonus-award-policies."
+            "Optional. Parameters for bonus behavior. "
+            "Award frequency is controlled by award_policy (see /admin/bonus-award-policies). "
+            "Additionally, when a rule uses the action grant_bonus, the engine will use policy_params.points "
+            "as the default number of points if the action does not provide an explicit points override."
         ),
-        examples=[{}, None],
+        examples=[{"points": 200}, {}, None],
     )
 
     active: bool = True
@@ -39,10 +39,12 @@ class BonusDefinitionUpdate(BaseModel):
     policy_params: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Optional. Same as on create. Usually omit or set to {} for current policies. "
-            "See /admin/bonus-award-policies for the guided schema/examples."
+            "Optional. Same as on create. "
+            "Award frequency is controlled by award_policy (see /admin/bonus-award-policies). "
+            "When using the grant_bonus action, policy_params.points can define the default number of points "
+            "if the action does not provide points."
         ),
-        examples=[{}],
+        examples=[{"points": 200}, {}],
     )
 
     active: Optional[bool] = None
@@ -60,10 +62,11 @@ class BonusDefinitionOut(BaseModel):
     policy_params: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Optional policy parameters. For current policies this is usually {} or null. "
-            "The authoritative catalog is /admin/bonus-award-policies."
+            "Optional parameters for bonus behavior. "
+            "award_policy controls frequency (see /admin/bonus-award-policies). "
+            "policy_params.points can be used as the default points value for the grant_bonus rule action."
         ),
-        examples=[{}, None],
+        examples=[{"points": 200}, {}, None],
     )
 
     active: bool

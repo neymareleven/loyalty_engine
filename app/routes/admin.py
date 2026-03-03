@@ -5,6 +5,7 @@ from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.customer_tag import CustomerTag
+from app.models.bonus_definition import BonusDefinition
 from app.models.event_type import EventType
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.reward import Reward
@@ -18,6 +19,9 @@ from app.schemas.rule_action_catalog import (
     BurnStatusPointsAction,
     DowngradeOneTierAction,
     EarnPointsAction,
+    GrantBonusAction,
+    GrantBonusRewardAction,
+    GrantBonusStatusAction,
     IssueRewardAction,
     RecordBonusAwardAction,
     RedeemRewardAction,
@@ -89,6 +93,32 @@ def list_ui_options_event_types(
                 "hasPayloadSchema": bool(et.payload_schema),
             }
             for et in items
+        ],
+    }
+
+
+@router.get("/ui-options/bonus-definitions")
+def list_ui_options_bonus_definitions(
+    brand: str = Depends(get_active_brand),
+    active: bool | None = True,
+    db: Session = Depends(get_db),
+):
+    q = db.query(BonusDefinition).filter(BonusDefinition.brand == brand)
+    if active is not None:
+        q = q.filter(BonusDefinition.active.is_(active))
+    items = q.order_by(BonusDefinition.name.asc()).all()
+    return {
+        "brand": brand,
+        "items": [
+            {
+                "id": str(bd.id),
+                "bonus_key": bd.bonus_key,
+                "name": bd.name,
+                "active": bd.active,
+                "award_policy": bd.award_policy,
+                "policy_params": bd.policy_params,
+            }
+            for bd in items
         ],
     }
 
@@ -267,6 +297,129 @@ def list_rule_actions_catalog():
                     "idempotent": True,
                     "sideEffects": ["Creates a bonus award record if not already awarded in period"],
                     "commonErrors": ["bonusKey missing", "bonusKey unknown", "brand mismatch"],
+                },
+            },
+            {
+                "type": "grant_bonus",
+                "title": "Attribuer un bonus (points)",
+                "description": "Enregistre l'attribution du bonus (idempotence selon award_policy) puis crédite des points au client.",
+                "params": {"bonusKey": "str", "points": "int (optional override)"},
+                "jsonSchema": _model_json_schema(GrantBonusAction),
+                "examples": [
+                    {"type": "grant_bonus", "bonusKey": "BIRTHDAY_200"},
+                    {"type": "grant_bonus", "bonusKey": "BIRTHDAY_200", "points": 200},
+                ],
+                "uiHints": {
+                    "bonusKey": {
+                        "widget": "remote_select",
+                        "datasource": {
+                            "endpoint": "/admin/ui-options/bonus-definitions",
+                            "method": "GET",
+                            "valueField": "bonus_key",
+                            "labelField": "name",
+                            "brandVia": "X-Brand",
+                        },
+                    },
+                    "points": {"widget": "number", "min": 0, "placeholder": "Optional override"},
+                },
+                "semantics": {
+                    "atomicity": "Per-rule: all actions rollback if one fails.",
+                    "idempotent": True,
+                    "sideEffects": [
+                        "Creates a bonus award record (ledger)",
+                        "Credits points to customer",
+                        "May update loyalty status",
+                    ],
+                    "commonErrors": [
+                        "bonusKey missing",
+                        "bonusKey unknown",
+                        "bonusKey brand mismatch",
+                        "points missing and bonus definition has no points configured",
+                    ],
+                },
+            },
+            {
+                "type": "grant_bonus_reward",
+                "title": "Attribuer un bonus (récompense)",
+                "description": "Enregistre l'attribution du bonus (idempotence selon award_policy) puis attribue une récompense au client.",
+                "params": {"bonusKey": "str", "reward_id": "uuid (optional override)"},
+                "jsonSchema": _model_json_schema(GrantBonusRewardAction),
+                "examples": [
+                    {"type": "grant_bonus_reward", "bonusKey": "WELCOME_REWARD"},
+                    {"type": "grant_bonus_reward", "bonusKey": "WELCOME_REWARD", "reward_id": "<uuid>"},
+                ],
+                "uiHints": {
+                    "bonusKey": {
+                        "widget": "remote_select",
+                        "datasource": {
+                            "endpoint": "/admin/ui-options/bonus-definitions",
+                            "method": "GET",
+                            "valueField": "bonus_key",
+                            "labelField": "name",
+                            "brandVia": "X-Brand",
+                        },
+                    },
+                    "reward_id": {
+                        "widget": "remote_select",
+                        "datasource": {
+                            "endpoint": "/admin/ui-options/rewards",
+                            "method": "GET",
+                            "valueField": "id",
+                            "labelField": "name",
+                            "brandVia": "X-Brand",
+                        },
+                        "placeholder": "Optional override",
+                    },
+                },
+                "semantics": {
+                    "atomicity": "Per-rule: all actions rollback if one fails.",
+                    "idempotent": True,
+                    "sideEffects": ["Creates a bonus award record (ledger)", "Creates customer reward"],
+                    "commonErrors": [
+                        "bonusKey missing",
+                        "bonusKey unknown",
+                        "bonusKey brand mismatch",
+                        "reward_id missing and bonus definition has no reward_id configured",
+                    ],
+                },
+            },
+            {
+                "type": "grant_bonus_status",
+                "title": "Attribuer un bonus (statut client)",
+                "description": "Enregistre l'attribution du bonus (idempotence selon award_policy) puis met à jour le statut du client.",
+                "params": {"bonusKey": "str", "status": "str (optional override)"},
+                "jsonSchema": _model_json_schema(GrantBonusStatusAction),
+                "examples": [
+                    {"type": "grant_bonus_status", "bonusKey": "VIP_STATUS"},
+                    {"type": "grant_bonus_status", "bonusKey": "VIP_STATUS", "status": "VIP"},
+                ],
+                "uiHints": {
+                    "bonusKey": {
+                        "widget": "remote_select",
+                        "datasource": {
+                            "endpoint": "/admin/ui-options/bonus-definitions",
+                            "method": "GET",
+                            "valueField": "bonus_key",
+                            "labelField": "name",
+                            "brandVia": "X-Brand",
+                        },
+                    },
+                    "status": {
+                        "widget": "select",
+                        "options": ["ACTIVE", "INACTIVE", "VIP", "BANNED"],
+                        "placeholder": "Optional override",
+                    },
+                },
+                "semantics": {
+                    "atomicity": "Per-rule: all actions rollback if one fails.",
+                    "idempotent": True,
+                    "sideEffects": ["Creates a bonus award record (ledger)", "Updates customer.status"],
+                    "commonErrors": [
+                        "bonusKey missing",
+                        "bonusKey unknown",
+                        "bonusKey brand mismatch",
+                        "status missing and bonus definition has no status configured",
+                    ],
                 },
             },
             {
@@ -499,3 +652,80 @@ def list_rule_conditions_catalog():
 @router.get("/bonus-award-policies")
 def list_bonus_award_policies_catalog():
     return get_bonus_award_policies_catalog()
+
+
+@router.get("/bonus-policy-params-catalog")
+def get_bonus_policy_params_catalog(
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    rewards_count = db.query(Reward.id).filter(Reward.brand == brand).count()
+
+    return {
+        "brand": brand,
+        "selection": {
+            "mode": "single",
+            "description": "Choisissez un seul effet à configurer pour policy_params.",
+        },
+        "effects": [
+            {
+                "key": "points",
+                "title": "Points",
+                "description": "Définit le nombre de points par défaut pour l'action grant_bonus.",
+                "enabled": True,
+                "jsonSchema": {
+                    "type": "object",
+                    "properties": {"points": {"type": "integer", "minimum": 0}},
+                    "required": ["points"],
+                    "additionalProperties": True,
+                },
+                "uiHints": {"points": {"widget": "number", "min": 0}},
+                "examples": [{"points": 200}],
+            },
+            {
+                "key": "reward_id",
+                "title": "Récompense",
+                "description": "Définit la reward par défaut pour l'action grant_bonus_reward.",
+                "enabled": bool(rewards_count),
+                "disabledReason": None if rewards_count else "Aucune récompense n'est disponible pour cette marque.",
+                "jsonSchema": {
+                    "type": "object",
+                    "properties": {"reward_id": {"type": "string"}},
+                    "required": ["reward_id"],
+                    "additionalProperties": True,
+                },
+                "uiHints": {
+                    "reward_id": {
+                        "widget": "remote_select",
+                        "datasource": {
+                            "endpoint": "/admin/ui-options/rewards",
+                            "method": "GET",
+                            "valueField": "id",
+                            "labelField": "name",
+                            "brandVia": "X-Brand",
+                        },
+                    }
+                },
+                "examples": [{"reward_id": "<uuid>"}],
+            },
+            {
+                "key": "status",
+                "title": "Statut client",
+                "description": "Définit le statut par défaut pour l'action grant_bonus_status.",
+                "enabled": True,
+                "jsonSchema": {
+                    "type": "object",
+                    "properties": {"status": {"type": "string"}},
+                    "required": ["status"],
+                    "additionalProperties": True,
+                },
+                "uiHints": {
+                    "status": {
+                        "widget": "select",
+                        "options": ["ACTIVE", "INACTIVE", "VIP", "BANNED"],
+                    }
+                },
+                "examples": [{"status": "VIP"}],
+            },
+        ],
+    }
