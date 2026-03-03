@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from typing import Any, Dict
+
 
 class CustomerCreate(BaseModel):
     gender: Optional[str] = None
@@ -12,8 +14,10 @@ class CustomerCreate(BaseModel):
 
 
 class CustomerUpsert(BaseModel):
-    brand: str
+    brand: Optional[str] = None
     profileId: str
+
+    properties: Optional[Dict[str, Any]] = None
 
     gender: Optional[str] = None
     birthdate: Optional[date] = None
@@ -29,6 +33,7 @@ class CustomerOut(BaseModel):
     
     status: str
     loyalty_status: Optional[str] = None
+    loyalty_status_name: Optional[str] = None
     lifetime_points: int
 
     created_at: Optional[datetime] = None

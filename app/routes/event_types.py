@@ -12,6 +12,23 @@ from app.schemas.event_type import EventTypeCreate, EventTypeOut, EventTypeUpdat
 router = APIRouter(prefix="/admin/event-types", tags=["admin-event-types"])
 
 
+def _slug_key(value: str) -> str:
+    s = (value or "").strip().lower()
+    out = []
+    prev_us = False
+    for ch in s:
+        ok = ("a" <= ch <= "z") or ("0" <= ch <= "9")
+        if ok:
+            out.append(ch)
+            prev_us = False
+        else:
+            if not prev_us:
+                out.append("_")
+                prev_us = True
+    key = "".join(out).strip("_")
+    return key or "event"
+
+
 @router.get("", response_model=list[EventTypeOut])
 def list_event_types(
     active_brand: str = Depends(get_active_brand),
@@ -43,19 +60,23 @@ def create_event_type(
 ):
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
-    existing = (
+    key_in = (payload.key or "").strip() or None
+    key = key_in or _slug_key(payload.name)
+    base = key
+    i = 1
+    while (
         db.query(EventType.id)
-        .filter(EventType.key == payload.key)
+        .filter(EventType.key == key)
         .filter(EventType.brand == active_brand)
         .filter(EventType.origin == payload.origin)
         .first()
-    )
-    if existing:
-        raise HTTPException(status_code=400, detail="Event type key already exists")
+    ):
+        i += 1
+        key = f"{base}_{i}"
 
     obj = EventType(
         brand=active_brand,
-        key=payload.key,
+        key=key,
         origin=payload.origin,
         name=payload.name,
         description=payload.description,

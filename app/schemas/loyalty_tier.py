@@ -9,7 +9,7 @@ from pydantic import BaseModel
 class LoyaltyTierCreate(BaseModel):
     brand: Optional[str] = None
 
-    key: str
+    key: Optional[str] = None
     name: str
 
     min_status_points: int

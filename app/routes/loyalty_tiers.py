@@ -22,6 +22,23 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _slug_key(value: str) -> str:
+    s = (value or "").strip().lower()
+    out = []
+    prev_us = False
+    for ch in s:
+        ok = ("a" <= ch <= "z") or ("0" <= ch <= "9")
+        if ok:
+            out.append(ch)
+            prev_us = False
+        else:
+            if not prev_us:
+                out.append("_")
+                prev_us = True
+    key = "".join(out).strip("_")
+    return key or "tier"
+
+
 def _recompute_customers(db: Session, brand: str) -> dict:
     customers = db.query(Customer).filter(Customer.brand == brand).all()
     updated = 0
@@ -121,27 +138,31 @@ def create_loyalty_tier(
 ):
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
-    existing = (
+    key_in = (payload.key or "").strip() or None
+    key = key_in or _slug_key(payload.name)
+    base = key
+    i = 1
+    while (
         db.query(LoyaltyTier.id)
         .filter(LoyaltyTier.brand == active_brand)
-        .filter(LoyaltyTier.key == payload.key)
+        .filter(LoyaltyTier.key == key)
         .first()
-    )
-    if existing:
-        raise HTTPException(status_code=400, detail="Tier key already exists for brand")
+    ):
+        i += 1
+        key = f"{base}_{i}"
 
     _validate_tier_payload(
         db=db,
         brand=active_brand,
         tier_id=None,
-        key=payload.key,
+        key=key,
         rank=payload.rank,
         min_status_points=payload.min_status_points,
     )
 
     obj = LoyaltyTier(
         brand=active_brand,
-        key=payload.key,
+        key=key,
         name=payload.name,
         min_status_points=payload.min_status_points,
         rank=payload.rank,
