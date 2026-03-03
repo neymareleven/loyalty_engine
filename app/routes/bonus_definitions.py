@@ -33,6 +33,30 @@ def _slug_key(value: str) -> str:
     return key or "bonus"
 
 
+def _validate_policy_params_single_effect(policy_params):
+    if policy_params is None:
+        return
+    if not isinstance(policy_params, dict):
+        raise HTTPException(status_code=400, detail="policy_params must be an object")
+
+    effect_keys = []
+    if policy_params.get("points") is not None:
+        effect_keys.append("points")
+    if policy_params.get("reward_id") is not None or policy_params.get("rewardId") is not None:
+        effect_keys.append("reward_id")
+    if policy_params.get("status") is not None:
+        effect_keys.append("status")
+
+    if len(effect_keys) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "policy_params can only define one bonus effect at a time. "
+                "Please provide only one of: points, reward_id, status."
+            ),
+        )
+
+
 @router.get("/ui-catalog")
 def get_bonus_definitions_ui_catalog():
 
@@ -98,6 +122,8 @@ def create_bonus_definition(
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
 
+    _validate_policy_params_single_effect(payload.policy_params)
+
     key_in = (payload.bonus_key or "").strip() or None
     bonus_key = key_in or _slug_key(payload.name)
     base = bonus_key
@@ -155,6 +181,9 @@ def update_bonus_definition(
         )
         if existing:
             raise HTTPException(status_code=400, detail="bonus_key already exists")
+
+    if "policy_params" in data:
+        _validate_policy_params_single_effect(data.get("policy_params"))
 
     for k, v in data.items():
         if k == "brand":

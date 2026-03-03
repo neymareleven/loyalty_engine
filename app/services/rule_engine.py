@@ -529,6 +529,254 @@ def _execute_actions(db: Session, customer, transaction, actions):
                 }
             )
 
+        elif action_type == "grant_bonus":
+            bonus_key = action.get("bonusKey") or action.get("bonus_key")
+            if not bonus_key:
+                raise ValueError("grant_bonus requires bonusKey")
+
+            definition = (
+                db.query(BonusDefinition)
+                .filter(BonusDefinition.bonus_key == bonus_key)
+                .filter(BonusDefinition.active.is_(True))
+                .filter(BonusDefinition.brand == transaction.brand)
+                .first()
+            )
+            if not definition:
+                definition = (
+                    db.query(BonusDefinition)
+                    .filter(BonusDefinition.bonus_key == bonus_key)
+                    .filter(BonusDefinition.active.is_(True))
+                    .filter(BonusDefinition.brand.is_(None))
+                    .first()
+                )
+            if not definition:
+                raise ValueError(f"Unknown bonusKey: {bonus_key}")
+
+            if definition.brand and definition.brand != transaction.brand:
+                raise ValueError("bonusKey brand mismatch")
+
+            points = action.get("points")
+            if points is None:
+                policy_params = definition.policy_params or {}
+                if isinstance(policy_params, dict):
+                    points = policy_params.get("points")
+
+            points = _as_int(points)
+            if points is None:
+                raise ValueError("grant_bonus requires points or BonusDefinition.policy_params.points")
+
+            now = datetime.utcnow()
+            period_key = _compute_period_key(definition.award_policy, now)
+
+            q = (
+                db.query(BonusAward.id)
+                .filter(BonusAward.bonus_key == bonus_key)
+                .filter(BonusAward.brand == transaction.brand)
+                .filter(BonusAward.profile_id == transaction.profile_id)
+            )
+            if period_key is None:
+                q = q.filter(BonusAward.period_key.is_(None))
+            else:
+                q = q.filter(BonusAward.period_key == period_key)
+
+            existing = q.first()
+            granted = False
+            if not existing:
+                award = BonusAward(
+                    bonus_key=bonus_key,
+                    brand=transaction.brand,
+                    profile_id=transaction.profile_id,
+                    period_key=period_key,
+                    event_id=transaction.event_id,
+                    transaction_id=transaction.id,
+                    meta={"eventType": transaction.event_type, "points": points},
+                )
+                db.add(award)
+
+                depth = _as_int(_get_by_path(transaction.payload or {}, "_ruleDepth")) or 0
+                fake_tx = type(
+                    "FakeTx",
+                    (),
+                    {"id": transaction.id, "payload": {"amount": points, "_ruleDepth": depth}},
+                )
+                earn_points(db, customer, fake_tx)
+                granted = True
+
+            executed.append(
+                {
+                    "type": action_type,
+                    "bonusKey": bonus_key,
+                    "points": points,
+                    "awardPolicy": definition.award_policy,
+                    "periodKey": period_key,
+                    "idempotent": bool(existing),
+                    "granted": granted,
+                }
+            )
+
+        elif action_type == "grant_bonus_reward":
+            bonus_key = action.get("bonusKey") or action.get("bonus_key")
+            if not bonus_key:
+                raise ValueError("grant_bonus_reward requires bonusKey")
+
+            definition = (
+                db.query(BonusDefinition)
+                .filter(BonusDefinition.bonus_key == bonus_key)
+                .filter(BonusDefinition.active.is_(True))
+                .filter(BonusDefinition.brand == transaction.brand)
+                .first()
+            )
+            if not definition:
+                definition = (
+                    db.query(BonusDefinition)
+                    .filter(BonusDefinition.bonus_key == bonus_key)
+                    .filter(BonusDefinition.active.is_(True))
+                    .filter(BonusDefinition.brand.is_(None))
+                    .first()
+                )
+            if not definition:
+                raise ValueError(f"Unknown bonusKey: {bonus_key}")
+
+            if definition.brand and definition.brand != transaction.brand:
+                raise ValueError("bonusKey brand mismatch")
+
+            reward_id = action.get("reward_id") or action.get("rewardId") or action.get("rewardID")
+            if isinstance(reward_id, dict):
+                reward_id = reward_id.get("id") or reward_id.get("rewardId") or reward_id.get("reward_id")
+            if reward_id is None:
+                policy_params = definition.policy_params or {}
+                if isinstance(policy_params, dict):
+                    reward_id = policy_params.get("reward_id") or policy_params.get("rewardId")
+
+            if reward_id is not None:
+                reward_id = str(reward_id)
+            if not reward_id:
+                raise ValueError("grant_bonus_reward requires reward_id or BonusDefinition.policy_params.reward_id")
+
+            now = datetime.utcnow()
+            period_key = _compute_period_key(definition.award_policy, now)
+
+            q = (
+                db.query(BonusAward.id)
+                .filter(BonusAward.bonus_key == bonus_key)
+                .filter(BonusAward.brand == transaction.brand)
+                .filter(BonusAward.profile_id == transaction.profile_id)
+            )
+            if period_key is None:
+                q = q.filter(BonusAward.period_key.is_(None))
+            else:
+                q = q.filter(BonusAward.period_key == period_key)
+
+            existing = q.first()
+            granted = False
+            if not existing:
+                award = BonusAward(
+                    bonus_key=bonus_key,
+                    brand=transaction.brand,
+                    profile_id=transaction.profile_id,
+                    period_key=period_key,
+                    event_id=transaction.event_id,
+                    transaction_id=transaction.id,
+                    meta={"eventType": transaction.event_type, "rewardId": reward_id},
+                )
+                db.add(award)
+
+                issue_reward(db, customer, transaction, reward_id=reward_id)
+                granted = True
+
+            executed.append(
+                {
+                    "type": action_type,
+                    "bonusKey": bonus_key,
+                    "rewardId": reward_id,
+                    "awardPolicy": definition.award_policy,
+                    "periodKey": period_key,
+                    "idempotent": bool(existing),
+                    "granted": granted,
+                }
+            )
+
+        elif action_type == "grant_bonus_status":
+            bonus_key = action.get("bonusKey") or action.get("bonus_key")
+            if not bonus_key:
+                raise ValueError("grant_bonus_status requires bonusKey")
+
+            definition = (
+                db.query(BonusDefinition)
+                .filter(BonusDefinition.bonus_key == bonus_key)
+                .filter(BonusDefinition.active.is_(True))
+                .filter(BonusDefinition.brand == transaction.brand)
+                .first()
+            )
+            if not definition:
+                definition = (
+                    db.query(BonusDefinition)
+                    .filter(BonusDefinition.bonus_key == bonus_key)
+                    .filter(BonusDefinition.active.is_(True))
+                    .filter(BonusDefinition.brand.is_(None))
+                    .first()
+                )
+            if not definition:
+                raise ValueError(f"Unknown bonusKey: {bonus_key}")
+
+            if definition.brand and definition.brand != transaction.brand:
+                raise ValueError("bonusKey brand mismatch")
+
+            status = action.get("status")
+            if status is None:
+                policy_params = definition.policy_params or {}
+                if isinstance(policy_params, dict):
+                    status = policy_params.get("status")
+
+            if status is not None:
+                status = str(status)
+            if not status:
+                raise ValueError("grant_bonus_status requires status or BonusDefinition.policy_params.status")
+
+            now = datetime.utcnow()
+            period_key = _compute_period_key(definition.award_policy, now)
+
+            q = (
+                db.query(BonusAward.id)
+                .filter(BonusAward.bonus_key == bonus_key)
+                .filter(BonusAward.brand == transaction.brand)
+                .filter(BonusAward.profile_id == transaction.profile_id)
+            )
+            if period_key is None:
+                q = q.filter(BonusAward.period_key.is_(None))
+            else:
+                q = q.filter(BonusAward.period_key == period_key)
+
+            existing = q.first()
+            granted = False
+            if not existing:
+                award = BonusAward(
+                    bonus_key=bonus_key,
+                    brand=transaction.brand,
+                    profile_id=transaction.profile_id,
+                    period_key=period_key,
+                    event_id=transaction.event_id,
+                    transaction_id=transaction.id,
+                    meta={"eventType": transaction.event_type, "status": status},
+                )
+                db.add(award)
+
+                customer.status = status
+                db.flush()
+                granted = True
+
+            executed.append(
+                {
+                    "type": action_type,
+                    "bonusKey": bonus_key,
+                    "status": status,
+                    "awardPolicy": definition.award_policy,
+                    "periodKey": period_key,
+                    "idempotent": bool(existing),
+                    "granted": granted,
+                }
+            )
+
         elif action_type == "reset_status_points":
             customer.status_points = 0
             db.flush()
