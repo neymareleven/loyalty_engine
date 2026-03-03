@@ -13,7 +13,7 @@ def compute_loyalty_status_from_tiers(db: Session, brand: str, status_points: in
         .filter(LoyaltyTier.brand == brand)
         .filter(LoyaltyTier.active.is_(True))
         .filter(LoyaltyTier.min_status_points <= points)
-        .order_by(LoyaltyTier.min_status_points.desc(), LoyaltyTier.rank.desc())
+        .order_by(LoyaltyTier.min_status_points.desc())
         .first()
     )
     if tier:
