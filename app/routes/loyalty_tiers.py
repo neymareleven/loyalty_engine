@@ -15,6 +15,36 @@ from app.services.loyalty_status_service import compute_loyalty_status_from_tier
 router = APIRouter(prefix="/admin/loyalty-tiers", tags=["admin-loyalty-tiers"])
 
 
+@router.get("/ui-catalog")
+def get_loyalty_tiers_ui_catalog():
+
+    def _model_json_schema(model_cls):
+        fn = getattr(model_cls, "model_json_schema", None)
+        if callable(fn):
+            return fn()
+        return model_cls.schema()
+
+    return {
+        "jsonSchema": _model_json_schema(LoyaltyTierCreate),
+        "uiHints": {
+            "brand": {"widget": "hidden"},
+            "key": {"widget": "hidden"},
+            "name": {"widget": "text"},
+            "min_status_points": {"widget": "number", "min": 0},
+            "rank": {"widget": "number", "min": 0},
+            "active": {"widget": "switch"},
+        },
+        "examples": [
+            {
+                "name": "Silver",
+                "min_status_points": 0,
+                "rank": 0,
+                "active": True,
+            }
+        ],
+    }
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
     if v is None:

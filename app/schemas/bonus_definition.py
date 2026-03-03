@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class BonusDefinitionCreate(BaseModel):
-    bonus_key: str
+    bonus_key: Optional[str] = None
     brand: Optional[str] = None
 
     name: str

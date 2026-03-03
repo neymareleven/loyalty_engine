@@ -16,6 +16,23 @@ from app.schemas.bonus_definition import (
 router = APIRouter(prefix="/admin/bonus-definitions", tags=["admin-bonus-definitions"])
 
 
+def _slug_key(value: str) -> str:
+    s = (value or "").strip().lower()
+    out = []
+    prev_us = False
+    for ch in s:
+        ok = ("a" <= ch <= "z") or ("0" <= ch <= "9")
+        if ok:
+            out.append(ch)
+            prev_us = False
+        else:
+            if not prev_us:
+                out.append("_")
+                prev_us = True
+    key = "".join(out).strip("_")
+    return key or "bonus"
+
+
 @router.get("/ui-catalog")
 def get_bonus_definitions_ui_catalog():
 
@@ -28,7 +45,7 @@ def get_bonus_definitions_ui_catalog():
     return {
         "jsonSchema": _model_json_schema(BonusDefinitionCreate),
         "uiHints": {
-            "bonus_key": {"widget": "text", "placeholder": "ex: BIRTHDAY_200"},
+            "bonus_key": {"widget": "hidden"},
             "name": {"widget": "text"},
             "description": {"widget": "textarea"},
             "award_policy": {
@@ -80,16 +97,17 @@ def create_bonus_definition(
 ):
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
-    existing = (
-        db.query(BonusDefinition.id)
-        .filter(BonusDefinition.bonus_key == payload.bonus_key)
-        .first()
-    )
-    if existing:
-        raise HTTPException(status_code=400, detail="bonus_key already exists")
+
+    key_in = (payload.bonus_key or "").strip() or None
+    bonus_key = key_in or _slug_key(payload.name)
+    base = bonus_key
+    i = 1
+    while db.query(BonusDefinition.id).filter(BonusDefinition.bonus_key == bonus_key).first():
+        i += 1
+        bonus_key = f"{base}_{i}"
 
     obj = BonusDefinition(
-        bonus_key=payload.bonus_key,
+        bonus_key=bonus_key,
         brand=active_brand,
         name=payload.name,
         description=payload.description,
