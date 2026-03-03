@@ -31,7 +31,7 @@ def get_loyalty_tiers_ui_catalog():
             "key": {"widget": "hidden"},
             "name": {"widget": "text"},
             "min_status_points": {"widget": "number", "min": 0},
-            "rank": {"widget": "number", "min": 0},
+            "rank": {"widget": "hidden"},
             "active": {"widget": "switch"},
         },
         "examples": [
@@ -82,38 +82,46 @@ def _recompute_customers(db: Session, brand: str) -> dict:
     return {"brand": brand, "customers": len(customers), "updated": updated}
 
 
+def _recompute_tier_ranks(db: Session, brand: str) -> None:
+    tiers = (
+        db.query(LoyaltyTier)
+        .filter(LoyaltyTier.brand == brand)
+        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
+        .all()
+    )
+    for i, t in enumerate(tiers):
+        t.rank = i
+    db.flush()
+
+
 def _validate_tier_payload(
     *,
     db: Session,
     brand: str,
     tier_id: UUID | None,
     key: str,
+    name: str,
     rank: int,
     min_status_points: int,
 ):
-    if rank is None:
-        raise HTTPException(status_code=400, detail="rank is required")
+    if not (name and str(name).strip()):
+        raise HTTPException(status_code=400, detail="Level name is required")
     if min_status_points is None:
-        raise HTTPException(status_code=400, detail="min_status_points is required")
+        raise HTTPException(status_code=400, detail="Minimum status points is required")
 
     try:
-        rank_i = int(rank)
         min_i = int(min_status_points)
     except Exception:
-        raise HTTPException(status_code=400, detail="rank and min_status_points must be integers")
+        raise HTTPException(status_code=400, detail="Minimum status points must be a whole number")
 
-    if rank_i < 0:
-        raise HTTPException(status_code=400, detail="rank must be >= 0")
     if min_i < 0:
-        raise HTTPException(status_code=400, detail="min_status_points must be >= 0")
-    if rank_i == 0 and min_i != 0:
-        raise HTTPException(status_code=400, detail="rank=0 tier must have min_status_points=0")
+        raise HTTPException(status_code=400, detail="Minimum status points must be 0 or more")
 
-    dup_rank_q = db.query(LoyaltyTier.id).filter(LoyaltyTier.brand == brand).filter(LoyaltyTier.rank == rank_i)
+    dup_name_q = db.query(LoyaltyTier.id).filter(LoyaltyTier.brand == brand).filter(LoyaltyTier.name == name)
     if tier_id is not None:
-        dup_rank_q = dup_rank_q.filter(LoyaltyTier.id != tier_id)
-    if dup_rank_q.first():
-        raise HTTPException(status_code=400, detail="Tier rank already exists for brand")
+        dup_name_q = dup_name_q.filter(LoyaltyTier.id != tier_id)
+    if dup_name_q.first():
+        raise HTTPException(status_code=400, detail="A level with this name already exists for this brand")
 
     dup_min_q = (
         db.query(LoyaltyTier.id)
@@ -123,24 +131,27 @@ def _validate_tier_payload(
     if tier_id is not None:
         dup_min_q = dup_min_q.filter(LoyaltyTier.id != tier_id)
     if dup_min_q.first():
-        raise HTTPException(status_code=400, detail="Tier min_status_points already exists for brand")
+        raise HTTPException(
+            status_code=400,
+            detail="You've already used this minimum status points value for another level in this brand",
+        )
 
     tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).all()
     simulated = []
     for t in tiers:
         if tier_id is not None and t.id == tier_id:
-            simulated.append({"rank": rank_i, "min": min_i, "key": key})
+            simulated.append({"min": min_i, "key": key})
         else:
-            simulated.append({"rank": int(t.rank), "min": int(t.min_status_points), "key": t.key})
+            simulated.append({"min": int(t.min_status_points), "key": t.key})
     if tier_id is None:
-        simulated.append({"rank": rank_i, "min": min_i, "key": key})
+        simulated.append({"min": min_i, "key": key})
 
-    simulated.sort(key=lambda x: x["rank"])
+    simulated.sort(key=lambda x: x["min"])
     for prev, cur in zip(simulated, simulated[1:]):
         if cur["min"] <= prev["min"]:
             raise HTTPException(
                 status_code=400,
-                detail="Invalid tiers configuration: min_status_points must strictly increase as rank increases",
+                detail="Invalid levels configuration: minimum status points must be unique and strictly increasing",
             )
 
 
@@ -157,7 +168,7 @@ def list_loyalty_tiers(
     q = q.filter(LoyaltyTier.brand == active_brand)
     if active is not None:
         q = q.filter(LoyaltyTier.active.is_(active))
-    return q.order_by(LoyaltyTier.brand.asc(), LoyaltyTier.rank.asc()).all()
+    return q.order_by(LoyaltyTier.brand.asc(), LoyaltyTier.min_status_points.asc()).all()
 
 
 @router.post("", response_model=LoyaltyTierOut)
@@ -186,7 +197,8 @@ def create_loyalty_tier(
         brand=active_brand,
         tier_id=None,
         key=key,
-        rank=payload.rank,
+        name=payload.name,
+        rank=0,
         min_status_points=payload.min_status_points,
     )
 
@@ -195,10 +207,12 @@ def create_loyalty_tier(
         key=key,
         name=payload.name,
         min_status_points=payload.min_status_points,
-        rank=payload.rank,
+        rank=0,
         active=payload.active,
     )
     db.add(obj)
+    db.flush()
+    _recompute_tier_ranks(db, active_brand)
     db.commit()
     db.refresh(obj)
 
@@ -246,22 +260,27 @@ def update_loyalty_tier(
             raise HTTPException(status_code=400, detail="Tier key already exists for brand")
 
     final_key = data.get("key", obj.key)
-    final_rank = data.get("rank", obj.rank)
+    final_name = data.get("name", obj.name)
     final_min = data.get("min_status_points", obj.min_status_points)
     _validate_tier_payload(
         db=db,
         brand=active_brand,
         tier_id=tier_id,
         key=final_key,
-        rank=final_rank,
+        name=final_name,
+        rank=0,
         min_status_points=final_min,
     )
 
     for k, v in data.items():
         if k == "brand":
             continue
+        if k == "rank":
+            continue
         setattr(obj, k, v)
 
+    db.flush()
+    _recompute_tier_ranks(db, active_brand)
     db.commit()
     db.refresh(obj)
 
