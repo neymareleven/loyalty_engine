@@ -49,7 +49,7 @@ async def import_customers_csv(
             if not brand_in:
                 raise ValueError("brand is required")
             if brand_in != active_brand:
-                raise ValueError("brand does not match active brand context")
+                raise ValueError(f"brand mismatch: expected '{active_brand}' got '{brand_in}'")
 
             profile_id = (row.get("profileId") or row.get("profile_id") or "").strip()
             if not profile_id:
@@ -61,11 +61,19 @@ async def import_customers_csv(
             errors.append({"line": idx, "error": str(e), "row": row})
 
     if errors:
+        brand_missing = sum(1 for e in errors if e.get("error") == "brand is required")
+        brand_mismatch = sum(1 for e in errors if isinstance(e.get("error"), str) and e.get("error", "").startswith("brand mismatch:"))
+        profile_missing = sum(1 for e in errors if e.get("error") == "profileId is required")
         raise HTTPException(
             status_code=400,
             detail={
                 "message": "Import rejected: CSV validation failed. No customers were imported.",
                 "processed": processed,
+                "summary": {
+                    "brandMissing": brand_missing,
+                    "brandMismatch": brand_mismatch,
+                    "profileIdMissing": profile_missing,
+                },
                 "errors": errors,
             },
         )

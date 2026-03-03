@@ -5,7 +5,7 @@ from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
-from app.schemas.event import EventCreate
+from app.schemas.event import EventCreate, UnomiEventCreate
 from app.schemas.transaction import TransactionOut
 from app.schemas.execution import RuleExecutionOut
 from app.services.transaction_service import create_transaction
@@ -16,10 +16,28 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 @router.post("")
 def ingest_transaction(
-    event: EventCreate,
+    event: UnomiEventCreate,
     db: Session = Depends(get_db),
 ):
-    transaction = create_transaction(db, event)
+    if not (event.brand or "").strip():
+        raise HTTPException(status_code=400, detail="brand is required")
+    if not (event.profileId or "").strip():
+        raise HTTPException(status_code=400, detail="profileId is required")
+    if not (event.itemId or "").strip():
+        raise HTTPException(status_code=400, detail="itemId is required")
+    if not (event.eventType or "").strip():
+        raise HTTPException(status_code=400, detail="eventType is required")
+
+    mapped = EventCreate(
+        brand=event.brand,
+        profileId=event.profileId,
+        eventType=event.eventType,
+        eventId=event.itemId,
+        source="UNOMI",
+        payload=(event.properties or {}),
+    )
+
+    transaction = create_transaction(db, mapped)
     return {
         "transactionId": str(transaction.id),
         "status": transaction.status,

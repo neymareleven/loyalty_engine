@@ -41,7 +41,7 @@ def get_internal_jobs_ui_catalog():
         "job": {
             "jsonSchema": _model_json_schema(InternalJobCreate),
             "uiHints": {
-                "job_key": {"widget": "text", "placeholder": "ex: BIRTHDAY_2026"},
+                "job_key": {"widget": "hidden"},
                 "brand": {"widget": "hidden"},
                 "event_type": {
                     "widget": "remote_select",
@@ -134,6 +134,23 @@ def get_internal_jobs_ui_catalog():
             },
         },
     }
+
+
+def _slug_key(value: str) -> str:
+    s = (value or "").strip().lower()
+    out = []
+    prev_us = False
+    for ch in s:
+        ok = ("a" <= ch <= "z") or ("0" <= ch <= "9")
+        if ok:
+            out.append(ch)
+            prev_us = False
+        else:
+            if not prev_us:
+                out.append("_")
+                prev_us = True
+    key = "".join(out).strip("_")
+    return key or "job"
 
 
 @router.get("/selector-catalog")
@@ -318,11 +335,24 @@ def create_internal_job(
 
     schedule_dict = payload.schedule.model_dump() if payload.schedule is not None else None
 
+    job_key_in = (payload.job_key or "").strip() or None
+    job_key = job_key_in or _slug_key(payload.event_type)
+    base = job_key
+    i = 1
+    while (
+        db.query(InternalJob.id)
+        .filter(InternalJob.brand == active_brand)
+        .filter(InternalJob.job_key == job_key)
+        .first()
+    ):
+        i += 1
+        job_key = f"{base}_{i}"
+
     job = InternalJob(
-        job_key=payload.job_key,
+        job_key=job_key,
         brand=active_brand,
         event_type=payload.event_type,
-        selector=payload.selector,
+        selector=payload.selector or {},
         payload_template=payload.payload_template,
         active=payload.active,
         schedule=schedule_dict,
