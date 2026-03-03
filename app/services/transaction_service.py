@@ -167,23 +167,28 @@ def create_transaction(db: Session, event_data):
     if existing:
         return existing
 
-    # ------------------------------------------------------------
-    # Option 1 (strict): customer profile events must not go through /events.
-    # ------------------------------------------------------------
-    if (event_data.eventType or "").upper() in {"CUSTOMER_PROFILE", "CONTACT", "CUSTOMER_UPSERT"}:
-        raise HTTPException(
-            status_code=400,
-            detail="Customer profile events must use /customers/upsert (no rules executed).",
-        )
+    blocked_customer_profile_event = (event_data.eventType or "").upper() in {
+        "CUSTOMER_PROFILE",
+        "CONTACT",
+        "CUSTOMER_UPSERT",
+        "CONTACTINFOSUBMITTED",
+        "SOCIALCONTACTS",
+    }
 
-    # validation minimale métier
-    is_blocked = not all([
-        event_data.brand and event_data.brand.strip(),
-        event_data.profileId and event_data.profileId.strip(),
-        event_data.eventType and event_data.eventType.strip(),
-    ])
+    # validation minimale métier (strict)
+    if not (event_data.brand and event_data.brand.strip()):
+        raise HTTPException(status_code=400, detail="brand is required")
+    if not (event_data.profileId and event_data.profileId.strip()):
+        raise HTTPException(status_code=400, detail="profileId is required")
+    if not (event_data.eventType and event_data.eventType.strip()):
+        raise HTTPException(status_code=400, detail="eventType is required")
+    if not (event_data.eventId and event_data.eventId.strip()):
+        raise HTTPException(status_code=400, detail="eventId is required")
 
-    status = "BLOCKED" if is_blocked else "PENDING"
+    status = "PENDING"
+
+    if blocked_customer_profile_event:
+        status = "BLOCKED"
 
     transaction = Transaction(
         event_id=event_data.eventId,   # 🔐 clé d'idempotence
@@ -194,6 +199,11 @@ def create_transaction(db: Session, event_data):
         payload=event_data.payload,
         status=status,
     )
+
+    if status == "BLOCKED":
+        transaction.error_code = "WRONG_INGESTION_ROUTE"
+        transaction.error_message = "Customer profile events must use /customers/upsert (no rules executed)."
+        transaction.processed_at = datetime.utcnow()
 
     if status != "PENDING":
         transaction.processed_at = datetime.utcnow()
@@ -252,8 +262,14 @@ def create_transaction(db: Session, event_data):
             transaction.processed_at = datetime.utcnow()
             db.commit()
         except Exception as e:
-            transaction.status = "FAILED"
-            transaction.error_message = str(e)
+            msg = str(e)
+            if "Customer not found" in msg:
+                transaction.status = "BLOCKED"
+                transaction.error_code = "CUSTOMER_NOT_FOUND"
+                transaction.error_message = msg
+            else:
+                transaction.status = "FAILED"
+                transaction.error_message = msg
             transaction.processed_at = datetime.utcnow()
             db.commit()
 

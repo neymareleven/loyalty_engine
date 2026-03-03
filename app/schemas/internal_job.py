@@ -13,7 +13,7 @@ class InternalJobScheduleCron(BaseModel):
 
 
 class InternalJobCreate(BaseModel):
-    job_key: str
+    job_key: Optional[str] = None
     brand: Optional[str] = None
     event_type: str
 

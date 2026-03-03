@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -53,10 +54,23 @@ def list_customers(
         .all()
     )
 
+    tiers = (
+        db.query(LoyaltyTier.key, LoyaltyTier.name)
+        .filter(LoyaltyTier.brand == active_brand)
+        .all()
+    )
+    tier_name_by_key = {row[0]: row[1] for row in tiers}
+
+    out_items = []
+    for c in items:
+        data = CustomerOut.model_validate(c).model_dump()
+        data["loyalty_status_name"] = tier_name_by_key.get(c.loyalty_status)
+        out_items.append(data)
+
     return {
         "brand": active_brand,
         "count": int(total),
-        "items": items,
+        "items": out_items,
         "limit": limit,
         "offset": offset,
     }
@@ -78,7 +92,18 @@ def get_customer(
     )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
-    return customer
+
+    tier_name = (
+        db.query(LoyaltyTier.name)
+        .filter(LoyaltyTier.brand == brand)
+        .filter(LoyaltyTier.key == customer.loyalty_status)
+        .scalar()
+        if customer.loyalty_status
+        else None
+    )
+    data = CustomerOut.model_validate(customer).model_dump()
+    data["loyalty_status_name"] = tier_name
+    return data
 
 
 @router.post("/upsert", response_model=CustomerOut)
@@ -86,21 +111,45 @@ def upsert_customer(
     payload: CustomerUpsert,
     db: Session = Depends(get_db),
 ):
-    brand = (payload.brand or "").strip() or None
+    props = payload.properties or {}
+    brand = (payload.brand or props.get("brand") or "").strip() or None
     if not brand:
         raise HTTPException(status_code=400, detail="brand is required")
     profile_id = (payload.profileId or "").strip() or None
     if not profile_id:
         raise HTTPException(status_code=400, detail="profileId is required")
+
+    if "gender" in props and props.get("gender") not in (None, "") and not isinstance(props.get("gender"), str):
+        raise HTTPException(status_code=400, detail="properties.gender must be a string")
+    gender = payload.gender or (props.get("gender") if isinstance(props.get("gender"), str) else None)
+    birthdate = payload.birthdate
+    if not birthdate:
+        bd = props.get("birthDate")
+        if "birthDate" in props and bd not in (None, "") and not isinstance(bd, (int, float)):
+            raise HTTPException(status_code=400, detail="properties.birthDate must be an epoch millisecond number")
+        if isinstance(bd, (int, float)):
+            birthdate = datetime.utcfromtimestamp(float(bd) / 1000.0).date()
+
     customer = get_or_create_customer(
         db,
         brand,
         profile_id,
-        {"gender": payload.gender, "birthdate": payload.birthdate},
+        {"gender": gender, "birthdate": birthdate},
     )
     db.commit()
     db.refresh(customer)
-    return customer
+
+    tier_name = (
+        db.query(LoyaltyTier.name)
+        .filter(LoyaltyTier.brand == brand)
+        .filter(LoyaltyTier.key == customer.loyalty_status)
+        .scalar()
+        if customer.loyalty_status
+        else None
+    )
+    data = CustomerOut.model_validate(customer).model_dump()
+    data["loyalty_status_name"] = tier_name
+    return data
 
 
 @router.get("/{brand}/{profile_id}/wallet")

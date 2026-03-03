@@ -9,3 +9,11 @@ class EventCreate(BaseModel):
     eventId: str
     source: Optional[str] = "API"
     payload: Optional[Dict[str, Any]] = None
+
+
+class UnomiEventCreate(BaseModel):
+    itemId: str
+    brand: str
+    eventType: str
+    profileId: str
+    properties: Optional[Dict[str, Any]] = None
