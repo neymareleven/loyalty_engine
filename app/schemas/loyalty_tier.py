@@ -13,7 +13,7 @@ class LoyaltyTierCreate(BaseModel):
     name: str
 
     min_status_points: int
-    rank: int
+    rank: Optional[int] = None
 
     active: bool = True
 
