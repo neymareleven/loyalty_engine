@@ -33,6 +33,30 @@ class RecordBonusAwardAction(BaseModel):
     bonusKey: str
 
 
+class GrantBonusAction(BaseModel):
+    type: Literal["grant_bonus"] = "grant_bonus"
+    bonusKey: str
+    points: Optional[int] = None
+
+
+class GrantBonusRewardAction(BaseModel):
+    type: Literal["grant_bonus_reward"] = "grant_bonus_reward"
+    bonusKey: str
+    reward_id: Optional[str] = Field(
+        default=None,
+        description="Optional override. If omitted, the engine will use BonusDefinition.policy_params.reward_id.",
+    )
+
+
+class GrantBonusStatusAction(BaseModel):
+    type: Literal["grant_bonus_status"] = "grant_bonus_status"
+    bonusKey: str
+    status: Optional[str] = Field(
+        default=None,
+        description="Optional override. If omitted, the engine will use BonusDefinition.policy_params.status.",
+    )
+
+
 class ResetStatusPointsAction(BaseModel):
     type: Literal["reset_status_points"] = "reset_status_points"
 
