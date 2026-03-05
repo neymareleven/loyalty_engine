@@ -81,7 +81,7 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
         job = InternalJob(
             job_key="MAINT_EXPIRE_REWARDS",
             brand=brand,
-            event_type="MAINTENANCE",
+            transaction_type="MAINTENANCE",
             selector={},
             payload_template=None,
             active=True,

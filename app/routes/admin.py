@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
-from app.models.event_type import EventType
+from app.models.event_type import TransactionType
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.reward import Reward
 from app.services.reward_service import expire_rewards
@@ -57,19 +57,19 @@ def list_ui_options_rewards(
     }
 
 
-@router.get("/ui-options/event-types")
-def list_ui_options_event_types(
+@router.get("/ui-options/transaction-types")
+def list_ui_options_transaction_types(
     brand: str = Depends(get_active_brand),
     active: bool | None = True,
     origin: str | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(EventType).filter(EventType.brand == brand)
+    q = db.query(TransactionType).filter(TransactionType.brand == brand)
     if active is not None:
-        q = q.filter(EventType.active.is_(active))
+        q = q.filter(TransactionType.active.is_(active))
     if origin:
-        q = q.filter(EventType.origin == origin)
-    items = q.order_by(EventType.key.asc()).all()
+        q = q.filter(TransactionType.origin == origin)
+    items = q.order_by(TransactionType.key.asc()).all()
     return {
         "brand": brand,
         "items": [
@@ -127,7 +127,7 @@ def list_rule_actions_catalog():
             "requiresPayloadSchema": {
                 "meaning": "Dépend de la structure des données de l’événement (payload_schema) pour permettre une configuration guidée (sélecteur de champs) et/ou une exécution correcte.",
                 "uiRecommendation": {
-                    "ifEventTypeHasNoPayloadSchema": {
+                    "ifTransactionTypeHasNoPayloadSchema": {
                         "disableActions": "Désactiver toute action qui a requiresPayloadSchema=true au niveau de l’action.",
                         "disableFields": "Désactiver tout champ dont uiHints.<field>.requiresPayloadSchema=true.",
                     }
@@ -255,10 +255,10 @@ def get_rules_ui_catalog():
             "jsonSchema": _model_json_schema(RuleCreate),
             "uiHints": {
                 "brand": {"widget": "hidden"},
-                "event_type": {
+                "transaction_type": {
                     "widget": "remote_select",
                     "datasource": {
-                        "endpoint": "/admin/ui-options/event-types",
+                        "endpoint": "/admin/ui-options/transaction-types",
                         "method": "GET",
                         "query": {"origin": "EXTERNAL", "active": True},
                         "valueField": "key",
@@ -280,7 +280,7 @@ def get_rules_ui_catalog():
             "examples": [
                 {
                     "name": "Example rule: purchase >= 100 gives points",
-                    "event_type": "PURCHASE",
+                    "transaction_type": "PURCHASE",
                     "priority": 0,
                     "active": True,
                     "conditions": {"and": [{"field": "payload.amount", "operator": "gte", "value": 100}]},
@@ -306,8 +306,8 @@ def get_rules_ui_catalog():
         "dependencies": {
             "ruleActionsCatalog": {"endpoint": "/admin/rule-actions", "method": "GET"},
             "ruleConditionsCatalog": {"endpoint": "/admin/rule-conditions", "method": "GET"},
-            "eventTypesOptions": {
-                "endpoint": "/admin/ui-options/event-types",
+            "transactionTypesOptions": {
+                "endpoint": "/admin/ui-options/transaction-types",
                 "method": "GET",
                 "brandVia": "X-Brand",
             },
@@ -321,7 +321,7 @@ def get_rules_ui_bundle(
     db: Session = Depends(get_db),
 ):
     rewards = db.query(Reward).filter(Reward.brand == brand).order_by(Reward.name.asc()).all()
-    event_types = db.query(EventType).filter(EventType.brand == brand).order_by(EventType.key.asc()).all()
+    event_types = db.query(TransactionType).filter(TransactionType.brand == brand).order_by(TransactionType.key.asc()).all()
     tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
     return {
         "brand": brand,
@@ -342,7 +342,7 @@ def get_rules_ui_bundle(
                     for r in rewards
                 ],
             },
-            "eventTypes": {
+            "transactionTypes": {
                 "brand": brand,
                 "items": [
                     {

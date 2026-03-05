@@ -14,8 +14,8 @@ class Transaction(Base):
 
     brand = Column(String(50), nullable=False)
     profile_id = Column(String(100), nullable=False)
-    event_type = Column(String(50), nullable=False)
-    event_id = Column(String(100), nullable=False)
+    transaction_type = Column(String(50), nullable=False)
+    transaction_id = Column("event_id", String(100), nullable=False)
 
     source = Column(String(20))
     payload = Column(JSON)

@@ -373,7 +373,7 @@ def process_transaction_rules(db: Session, transaction):
         db.query(Rule)
         .filter(
             Rule.brand == transaction.brand,
-            Rule.event_type == transaction.event_type,
+            Rule.transaction_type == transaction.transaction_type,
             Rule.active == True,
         )
         .order_by(asc(Rule.priority), asc(Rule.id))
@@ -384,9 +384,9 @@ def process_transaction_rules(db: Session, transaction):
         if not transaction.error_code:
             transaction.error_code = "NO_RULES"
         if not transaction.error_message:
-            transaction.error_message = "No active rules matched this event."
+            transaction.error_message = "No active rules matched this transaction."
         else:
-            transaction.error_message = f"{transaction.error_message} No active rules matched this event."
+            transaction.error_message = f"{transaction.error_message} No active rules matched this transaction."
 
         transaction.status = "PROCESSED"
         return

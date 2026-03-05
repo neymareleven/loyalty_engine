@@ -9,7 +9,7 @@ from app.models.point_movement import PointMovement
 from app.models.reward import Reward
 from app.models.customer_reward import CustomerReward
 from app.models.internal_job import InternalJob
-from app.models.event_type import EventType
+from app.models.event_type import TransactionType
 from app.models.loyalty_tier import LoyaltyTier
 
 from app.routes.wallet import router as wallet_router
@@ -20,7 +20,7 @@ from app.routes.rewards import router as rewards_router
 from app.routes.imports import router as imports_router
 from app.routes.admin import router as admin_router
 from app.routes.internal_jobs import router as internal_jobs_router
-from app.routes.event_types import router as event_types_router
+from app.routes.event_types import router as transaction_types_router
 from app.routes.loyalty_tiers import router as loyalty_tiers_router
 
 app = FastAPI(title="Loyalty Engine")
@@ -39,7 +39,7 @@ app.include_router(rewards_router)
 app.include_router(imports_router)
 app.include_router(admin_router)
 app.include_router(internal_jobs_router)
-app.include_router(event_types_router)
+app.include_router(transaction_types_router)
 app.include_router(loyalty_tiers_router)
 
 

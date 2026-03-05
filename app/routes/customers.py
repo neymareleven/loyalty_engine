@@ -306,15 +306,15 @@ def redeem_catalog_reward(
     tx = (
         db.query(Transaction)
         .filter(Transaction.brand == brand)
-        .filter(Transaction.event_id == event_id)
+        .filter(Transaction.transaction_id == event_id)
         .first()
     )
     if not tx:
         tx = Transaction(
             brand=brand,
             profile_id=profile_id,
-            event_type="CATALOG_REDEMPTION",
-            event_id=event_id,
+            transaction_type="CATALOG_REDEMPTION",
+            transaction_id=event_id,
             source="CATALOG",
             payload={"reward_id": str(payload.reward_id)},
             status="PROCESSED",
@@ -455,7 +455,7 @@ def get_customer_loyalty_history(
         db.query(Transaction)
         .filter(Transaction.brand == brand)
         .filter(Transaction.profile_id == profile_id)
-        .filter(Transaction.event_type.in_(tier_event_types))
+        .filter(Transaction.transaction_type.in_(tier_event_types))
     )
 
     total = q.count()
@@ -473,8 +473,8 @@ def get_customer_loyalty_history(
         "items": [
             {
                 "id": str(tx.id),
-                "eventType": tx.event_type,
-                "eventId": tx.event_id,
+                "transactionType": tx.transaction_type,
+                "transactionId": tx.transaction_id,
                 "status": tx.status,
                 "source": tx.source,
                 "createdAt": tx.created_at,

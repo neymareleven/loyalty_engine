@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class EventTypeCreate(BaseModel):
+class TransactionTypeCreate(BaseModel):
     brand: Optional[str] = None
     key: Optional[str] = None
     origin: str
@@ -49,7 +49,7 @@ class EventTypeCreate(BaseModel):
     active: bool = True
 
 
-class EventTypeUpdate(BaseModel):
+class TransactionTypeUpdate(BaseModel):
     brand: Optional[str] = None
     key: Optional[str] = None
     origin: Optional[str] = None
@@ -75,7 +75,7 @@ class EventTypeUpdate(BaseModel):
     active: Optional[bool] = None
 
 
-class EventTypeOut(BaseModel):
+class TransactionTypeOut(BaseModel):
     id: UUID
     brand: Optional[str] = None
     key: str
