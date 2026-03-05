@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from uuid import UUID
 
@@ -19,5 +19,14 @@ class CustomerRewardOut(BaseModel):
 
     source_transaction_id: Optional[UUID] = None
 
+    rule_id: Optional[UUID] = None
+    rule_execution_id: Optional[UUID] = None
+
+    payload: Optional[Dict[str, Any]] = None
+
     class Config:
         from_attributes = True
+
+
+class RedeemCatalogRewardIn(BaseModel):
+    reward_id: UUID

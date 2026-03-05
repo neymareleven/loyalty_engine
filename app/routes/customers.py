@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -8,15 +9,14 @@ from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.customer_reward import CustomerReward
 from app.models.point_movement import PointMovement
+from app.models.transaction import Transaction
 from app.schemas.customer import CustomerOut, CustomerUpsert
-from app.schemas.customer_reward import CustomerRewardOut
+from app.schemas.customer_reward import CustomerRewardOut, RedeemCatalogRewardIn
 from app.schemas.point_movement import PointMovementOut
 from app.services.contact_service import get_or_create_customer
-from app.services.reward_service import use_reward
+from app.services.reward_service import use_reward, redeem_reward
 from app.services.wallet_service import get_points_balance
 from app.models.loyalty_tier import LoyaltyTier
-from app.models.transaction import Transaction
-from app.models.customer_tag import CustomerTag
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -268,12 +268,73 @@ def use_customer_reward(
         db.query(CustomerReward)
         .filter(CustomerReward.id == customer_reward_id)
         .filter(CustomerReward.customer_id == customer.id)
+        .with_for_update()
         .first()
     )
     if not cr:
         raise HTTPException(status_code=404, detail="Customer reward not found")
 
     use_reward(db, cr)
+    db.commit()
+    db.refresh(cr)
+    return cr
+
+
+@router.post("/{brand}/{profile_id}/rewards/redeem", response_model=CustomerRewardOut)
+def redeem_catalog_reward(
+    brand: str,
+    profile_id: str,
+    payload: RedeemCatalogRewardIn,
+    active_brand: str = Depends(get_active_brand),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+
+    # Lock customer row to serialize balance check + burn.
+    customer = (
+        db.query(Customer)
+        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
+        .with_for_update()
+        .first()
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    event_id = idempotency_key or str(uuid.uuid4())
+    tx = (
+        db.query(Transaction)
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.event_id == event_id)
+        .first()
+    )
+    if not tx:
+        tx = Transaction(
+            brand=brand,
+            profile_id=profile_id,
+            event_type="CATALOG_REDEMPTION",
+            event_id=event_id,
+            source="CATALOG",
+            payload={"reward_id": str(payload.reward_id)},
+            status="PROCESSED",
+            idempotency_key=idempotency_key,
+        )
+        db.add(tx)
+        db.flush()
+
+    cr_idem = None
+    if idempotency_key:
+        cr_idem = f"catalog_redeem:{tx.id}:{payload.reward_id}"
+
+    cr = redeem_reward(
+        db,
+        customer,
+        tx,
+        reward_id=str(payload.reward_id),
+        idempotency_key=cr_idem,
+    )
+
     db.commit()
     db.refresh(cr)
     return cr
@@ -424,31 +485,3 @@ def get_customer_loyalty_history(
     }
 
 
-@router.get("/{brand}/{profile_id}/tags")
-def list_customer_tags(
-    brand: str,
-    profile_id: str,
-    active_brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer.id)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    tags = (
-        db.query(CustomerTag.tag)
-        .filter(CustomerTag.customer_id == customer.id)
-        .order_by(CustomerTag.tag.asc())
-        .all()
-    )
-    return {
-        "brand": brand,
-        "profileId": profile_id,
-        "tags": [t[0] for t in tags],
-    }

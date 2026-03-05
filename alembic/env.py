@@ -20,7 +20,7 @@ from app.db import Base
 # Import models so Base.metadata is populated
 from app.models.customer import Customer  # noqa: F401
 from app.models.loyalty_tier import LoyaltyTier  # noqa: F401
-from app.models.customer_tag import CustomerTag  # noqa: F401
+from app.models.rule import Rule  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

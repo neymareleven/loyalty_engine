@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Integer, Boolean, TIMESTAMP
+from sqlalchemy import Column, String, Integer, Boolean, TIMESTAMP, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
@@ -23,6 +23,12 @@ class Reward(Base):
 
     # durée de validité après attribution (en jours)
     validity_days = Column(Integer, nullable=True)
+
+    # rich reward types fields
+    currency = Column(String(3), nullable=True)
+    value_amount = Column(Integer, nullable=True)
+    value_percent = Column(Integer, nullable=True)
+    params = Column(JSON, nullable=True)
 
     active = Column(Boolean, default=True)
 

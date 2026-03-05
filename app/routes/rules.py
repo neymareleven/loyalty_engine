@@ -51,6 +51,8 @@ def create_rule(
 
     rule = Rule(
         brand=active_brand,
+        name=payload.name,
+        description=payload.description,
         event_type=payload.event_type,
         priority=payload.priority,
         conditions=payload.conditions,
