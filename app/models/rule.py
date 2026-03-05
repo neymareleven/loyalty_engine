@@ -10,6 +10,9 @@ class Rule(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
+    name = Column(String(255), nullable=False)
+    description = Column(String)
+
     brand = Column(String(50), nullable=False)
     event_type = Column(String(50), nullable=False)
     priority = Column(Integer, default=0)

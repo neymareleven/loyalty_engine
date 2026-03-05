@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
-from app.models.customer_tag import CustomerTag
 from app.models.event_type import EventType
 from app.models.internal_job import InternalJob
 from app.models.loyalty_tier import LoyaltyTier
@@ -26,6 +25,182 @@ router = APIRouter(prefix="/admin/internal-jobs", tags=["admin-internal-jobs"])
 
 def _is_system_managed_job(job: InternalJob) -> bool:
     return job.job_key == "MAINT_EXPIRE_REWARDS"
+
+
+def _selector_literal(value):
+    from sqlalchemy import literal
+
+    return literal(value)
+
+
+def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
+    if not isinstance(field, str) or not field:
+        raise HTTPException(status_code=400, detail="Selector leaf requires non-empty 'field'")
+
+    if field.startswith("customer."):
+        key = field[len("customer.") :]
+        if key == "status":
+            return Customer.status
+        if key == "loyalty_status":
+            return Customer.loyalty_status
+        if key == "lifetime_points":
+            return Customer.lifetime_points
+        if key == "created_at":
+            return Customer.created_at
+        if key == "last_activity_at":
+            return Customer.last_activity_at
+        if key == "birthdate":
+            return Customer.birthdate
+
+        if key == "birthdate_month":
+            return extract("month", Customer.birthdate)
+        if key == "birthdate_day":
+            return extract("day", Customer.birthdate)
+        if key == "created_at_month":
+            return extract("month", Customer.created_at)
+        if key == "created_at_day":
+            return extract("day", Customer.created_at)
+
+        raise HTTPException(status_code=400, detail=f"Unknown selector customer field: {field}")
+
+    if field.startswith("system."):
+        key = field[len("system.") :]
+        if key == "today_month":
+            return _selector_literal(today.month)
+        if key == "today_day":
+            return _selector_literal(today.day)
+        if key == "now":
+            return _selector_literal(now_utc)
+
+        raise HTTPException(status_code=400, detail=f"Unknown selector system field: {field}")
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unsupported selector field namespace: {field}. Use customer.* or system.*",
+    )
+
+
+def _selector_compare(*, op: str, expr, value):
+    op = (op or "").lower()
+
+    if op in {"eq", "="}:
+        return expr == value
+    if op in {"neq", "!=", "ne"}:
+        return expr != value
+
+    if op == "exists":
+        # exists true => is not null, exists false => is null
+        if value is None:
+            return expr.isnot(None)
+        return expr.isnot(None) if bool(value) else expr.is_(None)
+
+    if op == "in":
+        if not isinstance(value, list) or not value:
+            raise HTTPException(status_code=400, detail="Selector operator 'in' requires non-empty list value")
+        return expr.in_(value)
+
+    if op == "between":
+        if not isinstance(value, list) or len(value) != 2:
+            raise HTTPException(status_code=400, detail="Selector operator 'between' requires [lo, hi]")
+        return expr.between(value[0], value[1])
+
+    if op in {"gt", "gte", "lt", "lte"}:
+        if op == "gt":
+            return expr > value
+        if op == "gte":
+            return expr >= value
+        if op == "lt":
+            return expr < value
+        if op == "lte":
+            return expr <= value
+
+    if op == "contains":
+        if value is None:
+            raise HTTPException(status_code=400, detail="Selector operator 'contains' requires a value")
+        return expr.ilike(f"%{value}%")
+
+    raise HTTPException(status_code=400, detail=f"Unsupported selector operator: {op}")
+
+
+def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime):
+    if selector is None:
+        return None
+    if selector == {}:
+        return None
+    if not isinstance(selector, dict):
+        raise HTTPException(status_code=400, detail="Invalid selector format: expected object")
+
+    # Strict AST combinators
+    if "and" in selector:
+        from sqlalchemy import and_
+
+        items = selector.get("and")
+        if not isinstance(items, list):
+            raise HTTPException(status_code=400, detail="Invalid selector 'and': expected list")
+        parts = []
+        for s in items:
+            c = _selector_ast_to_criterion(s, today=today, now_utc=now_utc)
+            if c is not None:
+                parts.append(c)
+        if not parts:
+            return None
+        return and_(*parts)
+
+    if "or" in selector:
+        from sqlalchemy import or_
+
+        items = selector.get("or")
+        if not isinstance(items, list):
+            raise HTTPException(status_code=400, detail="Invalid selector 'or': expected list")
+        parts = []
+        for s in items:
+            c = _selector_ast_to_criterion(s, today=today, now_utc=now_utc)
+            if c is not None:
+                parts.append(c)
+        if not parts:
+            return None
+        return or_(*parts)
+
+    if "not" in selector:
+        from sqlalchemy import not_
+
+        inner = _selector_ast_to_criterion(selector.get("not"), today=today, now_utc=now_utc)
+        if inner is None:
+            return None
+        return not_(inner)
+
+    # Leaf
+    if "field" in selector:
+        field = selector.get("field")
+        op = selector.get("operator")
+        if op is None:
+            op = selector.get("op")
+        if not op:
+            raise HTTPException(status_code=400, detail="Selector leaf requires 'operator' (or alias 'op')")
+        value = selector.get("value")
+
+        expr = _resolve_selector_field(field=field, today=today, now_utc=now_utc)
+        return _selector_compare(op=op, expr=expr, value=value)
+
+    # Legacy guard (explicit)
+    legacy_keys = {
+        "all",
+        "any",
+        "birthdate_today",
+        "created_anniversary_today",
+        "inactive_days_gte",
+        "status_in",
+        "loyalty_status_in",
+        "lifetime_points_gte",
+    }
+    found = [k for k in legacy_keys if k in selector]
+    if found:
+        raise HTTPException(status_code=400, detail=f"Legacy selector keys not supported: {found}")
+
+    raise HTTPException(
+        status_code=400,
+        detail="Invalid selector format: expected {'and':[...]}, {'or':[...]}, {'not':...} or leaf {'field':..., 'operator':..., 'value':...}",
+    )
 
 
 @router.get("/ui-catalog")
@@ -171,14 +346,6 @@ def get_internal_jobs_ui_bundle(
         .all()
     )
     tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
-    tags_q = (
-        db.query(CustomerTag.tag)
-        .join(Customer, Customer.id == CustomerTag.customer_id)
-        .filter(Customer.brand == brand)
-        .distinct()
-        .order_by(CustomerTag.tag.asc())
-    )
-
     return {
         "brand": brand,
         "uiCatalog": get_internal_jobs_ui_catalog(),
@@ -210,89 +377,16 @@ def get_internal_jobs_ui_bundle(
                     for t in tiers
                 ],
             },
-            "customerTags": {
-                "brand": brand,
-                "items": [{"tag": row[0]} for row in tags_q.all()],
-            },
         },
     }
-
-
-def _selector_to_criterion(selector: dict, today: date):
-    if not selector:
-        return None
-
-    if "all" in selector:
-        from sqlalchemy import and_
-
-        parts = []
-        for s in selector.get("all") or []:
-            c = _selector_to_criterion(s, today)
-            if c is not None:
-                parts.append(c)
-        if not parts:
-            return None
-        return and_(*parts)
-
-    if "any" in selector:
-        from sqlalchemy import or_
-
-        parts = []
-        for s in selector.get("any") or []:
-            c = _selector_to_criterion(s, today)
-            if c is not None:
-                parts.append(c)
-        if not parts:
-            return None
-        return or_(*parts)
-
-    if selector.get("birthdate_today") is True:
-        return (
-            Customer.birthdate.isnot(None)
-            & (extract("month", Customer.birthdate) == today.month)
-            & (extract("day", Customer.birthdate) == today.day)
-        )
-
-    if selector.get("created_anniversary_today") is True:
-        return (
-            Customer.created_at.isnot(None)
-            & (extract("month", Customer.created_at) == today.month)
-            & (extract("day", Customer.created_at) == today.day)
-        )
-
-    inactive_days_gte = selector.get("inactive_days_gte")
-    if inactive_days_gte is not None:
-        try:
-            days = int(inactive_days_gte)
-        except Exception:
-            raise HTTPException(status_code=400, detail="inactive_days_gte must be an integer")
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        return Customer.last_activity_at.isnot(None) & (Customer.last_activity_at <= cutoff)
-
-    status_in = selector.get("status_in")
-    if status_in is not None:
-        if not isinstance(status_in, list) or not status_in:
-            raise HTTPException(status_code=400, detail="status_in must be a non-empty list")
-        return Customer.status.in_(status_in)
-
-    loyalty_in = selector.get("loyalty_status_in")
-    if loyalty_in is not None:
-        if not isinstance(loyalty_in, list) or not loyalty_in:
-            raise HTTPException(status_code=400, detail="loyalty_status_in must be a non-empty list")
-        return Customer.loyalty_status.in_(loyalty_in)
-
-    lifetime_gte = selector.get("lifetime_points_gte")
-    if lifetime_gte is not None:
-        return Customer.lifetime_points >= int(lifetime_gte)
-
-    return None
 
 
 def _apply_selector(q, selector: dict, today: date):
     if not selector:
         return q
 
-    criterion = _selector_to_criterion(selector, today)
+    now_utc = datetime.utcnow()
+    criterion = _selector_ast_to_criterion(selector, today=today, now_utc=now_utc)
     if criterion is None:
         return q
     return q.filter(criterion)

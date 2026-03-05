@@ -1,66 +1,51 @@
 def get_internal_job_selector_catalog():
     return {
-        "combinators": ["all", "any"],
+        "combinators": ["and", "or", "not"],
+        "uiHints": {
+            "operator": {
+                "widget": "select",
+                "options": ["eq", "neq", "gt", "gte", "lt", "lte", "between", "in", "contains", "exists"],
+            },
+            "field": {
+                "widget": "select",
+                "options": [
+                    "customer.status",
+                    "customer.loyalty_status",
+                    "customer.lifetime_points",
+                    "customer.birthdate_month",
+                    "customer.birthdate_day",
+                    "customer.created_at_month",
+                    "customer.created_at_day",
+                    "customer.last_activity_at",
+                    "system.today_month",
+                    "system.today_day",
+                ],
+                "allowCreate": True,
+            },
+            "value": {"widget": "json"},
+        },
         "leaf": [
             {
-                "type": "birthdate_today",
-                "title": "Anniversaire aujourd'hui",
-                "description": "Cible les clients dont l'anniversaire est aujourd'hui.",
-                "value": True,
-            },
-            {
-                "type": "created_anniversary_today",
-                "title": "Anniversaire d'inscription aujourd'hui",
-                "description": "Cible les clients dont la date d'inscription a un anniversaire aujourd'hui.",
-                "value": True,
-            },
-            {
-                "type": "inactive_days_gte",
-                "title": "Inactivité (jours)",
-                "description": "Cible les clients dont la dernière activité date d'au moins N jours.",
-                "value": 30,
-            },
-            {
-                "type": "status_in",
-                "title": "Statut client",
-                "description": "Cible les clients dont le statut est dans une liste (ACTIVE/VIP/etc.).",
-                "value": ["ACTIVE"],
-            },
-            {
-                "type": "loyalty_status_in",
-                "title": "Tier de fidélité",
-                "description": "Cible les clients appartenant à un ou plusieurs tiers de fidélité.",
-                "value": [],
-            },
-            {
-                "type": "lifetime_points_gte",
-                "title": "Points cumulés minimum",
-                "description": "Cible les clients dont les points cumulés (lifetime) dépassent un seuil.",
-                "value": 1000,
-            },
+                "type": "leaf",
+                "title": "Selector leaf (field/operator/value)",
+                "description": "Feuille AST: compare un champ customer.* ou system.* via un opérateur.",
+                "value": {"field": "customer.status", "operator": "in", "value": ["ACTIVE"]},
+            }
         ],
-        "uiHints": {
-            "inactive_days_gte": {"widget": "number", "min": 0},
-            "status_in": {
-                "widget": "multi_select",
-                "options": ["ACTIVE", "INACTIVE", "VIP", "BANNED"],
-            },
-            "loyalty_status_in": {
-                "widget": "remote_multi_select",
-                "datasource": {
-                    "endpoint": "/admin/ui-options/loyalty-tiers",
-                    "method": "GET",
-                    "valueField": "key",
-                    "labelField": "name",
-                    "brandVia": "X-Brand",
-                },
-            },
-            "lifetime_points_gte": {"widget": "number", "min": 0},
-            "birthdate_today": {"widget": "switch"},
-            "created_anniversary_today": {"widget": "switch"},
-        },
         "examples": [
-            {"all": [{"birthdate_today": True}, {"status_in": ["ACTIVE"]}]},
-            {"any": [{"inactive_days_gte": 60}, {"loyalty_status_in": ["GOLD", "PLATINUM"]}]},
+            {
+                "and": [
+                    {"field": "customer.status", "operator": "in", "value": ["ACTIVE"]},
+                    {"field": "customer.birthdate_month", "operator": "eq", "value": 3},
+                    {"field": "customer.birthdate_day", "operator": "eq", "value": 4},
+                ]
+            },
+            {
+                "and": [
+                    {"field": "customer.status", "operator": "in", "value": ["ACTIVE"]},
+                    {"field": "customer.last_activity_at", "operator": "lte", "value": "2026-01-01T00:00:00"},
+                ]
+            },
+            {"or": [{"field": "customer.lifetime_points", "operator": "gte", "value": 1000}, {"field": "customer.loyalty_status", "operator": "in", "value": ["GOLD", "PLATINUM"]}]},
         ],
     }
