@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 class RuleCreate(BaseModel):
     brand: Optional[str] = None
+    name: str
+    description: Optional[str] = None
     event_type: str
     priority: int = 0
 
@@ -18,6 +20,8 @@ class RuleCreate(BaseModel):
 
 
 class RuleUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
     priority: Optional[int] = None
 
     conditions: Optional[Dict[str, Any]] = None
@@ -29,6 +33,8 @@ class RuleUpdate(BaseModel):
 class RuleOut(BaseModel):
     id: UUID
     brand: str
+    name: str
+    description: Optional[str] = None
     event_type: str
     priority: int
 

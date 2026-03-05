@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from uuid import UUID
 
@@ -13,6 +13,10 @@ class RewardCreate(BaseModel):
     cost_points: Optional[int] = None
     type: str = "POINTS"
     validity_days: Optional[int] = None
+    currency: Optional[str] = None
+    value_amount: Optional[int] = None
+    value_percent: Optional[int] = None
+    params: Optional[Dict[str, Any]] = None
     active: bool = True
 
 
@@ -22,6 +26,10 @@ class RewardUpdate(BaseModel):
     cost_points: Optional[int] = None
     type: Optional[str] = None
     validity_days: Optional[int] = None
+    currency: Optional[str] = None
+    value_amount: Optional[int] = None
+    value_percent: Optional[int] = None
+    params: Optional[Dict[str, Any]] = None
     active: Optional[bool] = None
 
 
@@ -33,6 +41,10 @@ class RewardOut(BaseModel):
     cost_points: Optional[int] = None
     type: str
     validity_days: Optional[int] = None
+    currency: Optional[str] = None
+    value_amount: Optional[int] = None
+    value_percent: Optional[int] = None
+    params: Optional[Dict[str, Any]] = None
     active: bool
     created_at: Optional[datetime] = None
 

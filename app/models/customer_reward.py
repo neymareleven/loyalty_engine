@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, TIMESTAMP, ForeignKey
+from sqlalchemy import Column, String, TIMESTAMP, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
@@ -25,3 +25,14 @@ class CustomerReward(Base):
         ForeignKey("transactions.id"),
         nullable=True,
     )
+
+    rule_id = Column(UUID(as_uuid=True), ForeignKey("rules.id", ondelete="SET NULL"), nullable=True)
+    rule_execution_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("transaction_rule_execution.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    idempotency_key = Column(String(255), nullable=True)
+
+    payload = Column(JSON, nullable=True)

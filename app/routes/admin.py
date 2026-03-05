@@ -4,29 +4,18 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
-from app.models.customer_tag import CustomerTag
-from app.models.bonus_definition import BonusDefinition
 from app.models.event_type import EventType
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.reward import Reward
 from app.services.reward_service import expire_rewards
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
 from app.schemas.rule import RuleCreate, RuleUpdate
-from app.schemas.bonus_policy_catalog import get_bonus_award_policies_catalog
 from app.schemas.rule_action_catalog import (
-    AddCustomerTagAction,
     BurnPointsAction,
-    BurnStatusPointsAction,
-    DowngradeOneTierAction,
     EarnPointsAction,
-    GrantBonusAction,
-    GrantBonusRewardAction,
-    GrantBonusStatusAction,
     IssueRewardAction,
-    RecordBonusAwardAction,
-    RedeemRewardAction,
     ResetStatusPointsAction,
-    SetCustomerStatusAction,
+    SetRankAction,
 )
 
 
@@ -97,32 +86,6 @@ def list_ui_options_event_types(
     }
 
 
-@router.get("/ui-options/bonus-definitions")
-def list_ui_options_bonus_definitions(
-    brand: str = Depends(get_active_brand),
-    active: bool | None = True,
-    db: Session = Depends(get_db),
-):
-    q = db.query(BonusDefinition).filter(BonusDefinition.brand == brand)
-    if active is not None:
-        q = q.filter(BonusDefinition.active.is_(active))
-    items = q.order_by(BonusDefinition.name.asc()).all()
-    return {
-        "brand": brand,
-        "items": [
-            {
-                "id": str(bd.id),
-                "bonus_key": bd.bonus_key,
-                "name": bd.name,
-                "active": bd.active,
-                "award_policy": bd.award_policy,
-                "policy_params": bd.policy_params,
-            }
-            for bd in items
-        ],
-    }
-
-
 @router.get("/ui-options/loyalty-tiers")
 def list_ui_options_loyalty_tiers(
     brand: str = Depends(get_active_brand),
@@ -146,24 +109,6 @@ def list_ui_options_loyalty_tiers(
             }
             for t in items
         ],
-    }
-
-
-@router.get("/ui-options/customer-tags")
-def list_ui_options_customer_tags(
-    brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    q = (
-        db.query(CustomerTag.tag)
-        .join(Customer, Customer.id == CustomerTag.customer_id)
-        .filter(Customer.brand == brand)
-        .distinct()
-        .order_by(CustomerTag.tag.asc())
-    )
-    return {
-        "brand": brand,
-        "items": [{"tag": row[0]} for row in q.all()],
     }
 
 
@@ -195,9 +140,16 @@ def list_rule_actions_catalog():
                 "type": "earn_points",
                 "title": "Ajouter des points",
                 "description": "Crédite un nombre de points au client.",
-                "params": {"points": "int"},
+                "params": {"points": "int", "multiplier": "int (optional)"},
                 "jsonSchema": _model_json_schema(EarnPointsAction),
-                "examples": [{"type": "earn_points", "points": 50}],
+                "examples": [
+                    {"type": "earn_points", "points": 50},
+                    {"type": "earn_points", "points": 50, "multiplier": 3},
+                ],
+                "uiHints": {
+                    "points": {"widget": "number", "min": 0},
+                    "multiplier": {"widget": "number", "min": 1, "placeholder": "Optional"},
+                },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": False,
@@ -217,46 +169,6 @@ def list_rule_actions_catalog():
                     "idempotent": False,
                     "sideEffects": ["Creates point movement"],
                     "commonErrors": ["points missing/invalid", "not enough points", "customer not found"],
-                },
-            },
-            {
-                "type": "burn_status_points",
-                "title": "Retirer des points de statut",
-                "description": "Diminue status_points (points de statut) et peut déclencher un TIER_DOWNGRADED si un seuil est franchi.",
-                "params": {"points": "int"},
-                "jsonSchema": _model_json_schema(BurnStatusPointsAction),
-                "examples": [{"type": "burn_status_points", "points": 50}],
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": False,
-                    "sideEffects": ["Updates customer.status_points", "May update loyalty status"],
-                    "commonErrors": ["points missing/invalid", "customer not found"],
-                },
-            },
-            {
-                "type": "redeem_reward",
-                "title": "Utiliser une récompense",
-                "description": "Consomme une récompense (et peut débiter des points selon la config de la récompense).",
-                "params": {"reward_id": "uuid"},
-                "jsonSchema": _model_json_schema(RedeemRewardAction),
-                "examples": [{"type": "redeem_reward", "reward_id": "<uuid>"}],
-                "uiHints": {
-                    "reward_id": {
-                        "widget": "remote_select",
-                        "datasource": {
-                            "endpoint": "/admin/ui-options/rewards",
-                            "method": "GET",
-                            "valueField": "id",
-                            "labelField": "name",
-                            "brandVia": "X-Brand",
-                        },
-                    }
-                },
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": False,
-                    "sideEffects": ["Creates customer reward", "May burn points if reward has cost_points"],
-                    "commonErrors": ["reward_id missing", "reward not found", "not enough points"],
                 },
             },
             {
@@ -286,140 +198,29 @@ def list_rule_actions_catalog():
                 },
             },
             {
-                "type": "record_bonus_award",
-                "title": "Enregistrer l'attribution d'un bonus",
-                "description": "Enregistre qu'un bonus a été attribué au client (utile pour l'idempotence selon la policy).",
-                "params": {"bonusKey": "str"},
-                "jsonSchema": _model_json_schema(RecordBonusAwardAction),
-                "examples": [{"type": "record_bonus_award", "bonusKey": "BIRTHDAY_200"}],
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": True,
-                    "sideEffects": ["Creates a bonus award record if not already awarded in period"],
-                    "commonErrors": ["bonusKey missing", "bonusKey unknown", "brand mismatch"],
-                },
-            },
-            {
-                "type": "grant_bonus",
-                "title": "Attribuer un bonus (points)",
-                "description": "Enregistre l'attribution du bonus (idempotence selon award_policy) puis crédite des points au client.",
-                "params": {"bonusKey": "str", "points": "int (optional override)"},
-                "jsonSchema": _model_json_schema(GrantBonusAction),
-                "examples": [
-                    {"type": "grant_bonus", "bonusKey": "BIRTHDAY_200"},
-                    {"type": "grant_bonus", "bonusKey": "BIRTHDAY_200", "points": 200},
-                ],
+                "type": "set_rank",
+                "title": "Définir un niveau (tier)",
+                "description": "Place le client sur un tier cible en ajustant automatiquement ses points de statut au minimum du tier.",
+                "params": {"tier_key": "str"},
+                "jsonSchema": _model_json_schema(SetRankAction),
+                "examples": [{"type": "set_rank", "tier_key": "GOLD"}],
                 "uiHints": {
-                    "bonusKey": {
+                    "tier_key": {
                         "widget": "remote_select",
                         "datasource": {
-                            "endpoint": "/admin/ui-options/bonus-definitions",
+                            "endpoint": "/admin/ui-options/loyalty-tiers",
                             "method": "GET",
-                            "valueField": "bonus_key",
+                            "valueField": "key",
                             "labelField": "name",
                             "brandVia": "X-Brand",
                         },
-                    },
-                    "points": {"widget": "number", "min": 0, "placeholder": "Optional override"},
+                    }
                 },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": True,
-                    "sideEffects": [
-                        "Creates a bonus award record (ledger)",
-                        "Credits points to customer",
-                        "May update loyalty status",
-                    ],
-                    "commonErrors": [
-                        "bonusKey missing",
-                        "bonusKey unknown",
-                        "bonusKey brand mismatch",
-                        "points missing and bonus definition has no points configured",
-                    ],
-                },
-            },
-            {
-                "type": "grant_bonus_reward",
-                "title": "Attribuer un bonus (récompense)",
-                "description": "Enregistre l'attribution du bonus (idempotence selon award_policy) puis attribue une récompense au client.",
-                "params": {"bonusKey": "str", "reward_id": "uuid (optional override)"},
-                "jsonSchema": _model_json_schema(GrantBonusRewardAction),
-                "examples": [
-                    {"type": "grant_bonus_reward", "bonusKey": "WELCOME_REWARD"},
-                    {"type": "grant_bonus_reward", "bonusKey": "WELCOME_REWARD", "reward_id": "<uuid>"},
-                ],
-                "uiHints": {
-                    "bonusKey": {
-                        "widget": "remote_select",
-                        "datasource": {
-                            "endpoint": "/admin/ui-options/bonus-definitions",
-                            "method": "GET",
-                            "valueField": "bonus_key",
-                            "labelField": "name",
-                            "brandVia": "X-Brand",
-                        },
-                    },
-                    "reward_id": {
-                        "widget": "remote_select",
-                        "datasource": {
-                            "endpoint": "/admin/ui-options/rewards",
-                            "method": "GET",
-                            "valueField": "id",
-                            "labelField": "name",
-                            "brandVia": "X-Brand",
-                        },
-                        "placeholder": "Optional override",
-                    },
-                },
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": True,
-                    "sideEffects": ["Creates a bonus award record (ledger)", "Creates customer reward"],
-                    "commonErrors": [
-                        "bonusKey missing",
-                        "bonusKey unknown",
-                        "bonusKey brand mismatch",
-                        "reward_id missing and bonus definition has no reward_id configured",
-                    ],
-                },
-            },
-            {
-                "type": "grant_bonus_status",
-                "title": "Attribuer un bonus (statut client)",
-                "description": "Enregistre l'attribution du bonus (idempotence selon award_policy) puis met à jour le statut du client.",
-                "params": {"bonusKey": "str", "status": "str (optional override)"},
-                "jsonSchema": _model_json_schema(GrantBonusStatusAction),
-                "examples": [
-                    {"type": "grant_bonus_status", "bonusKey": "VIP_STATUS"},
-                    {"type": "grant_bonus_status", "bonusKey": "VIP_STATUS", "status": "VIP"},
-                ],
-                "uiHints": {
-                    "bonusKey": {
-                        "widget": "remote_select",
-                        "datasource": {
-                            "endpoint": "/admin/ui-options/bonus-definitions",
-                            "method": "GET",
-                            "valueField": "bonus_key",
-                            "labelField": "name",
-                            "brandVia": "X-Brand",
-                        },
-                    },
-                    "status": {
-                        "widget": "select",
-                        "options": ["ACTIVE", "INACTIVE", "VIP", "BANNED"],
-                        "placeholder": "Optional override",
-                    },
-                },
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": True,
-                    "sideEffects": ["Creates a bonus award record (ledger)", "Updates customer.status"],
-                    "commonErrors": [
-                        "bonusKey missing",
-                        "bonusKey unknown",
-                        "bonusKey brand mismatch",
-                        "status missing and bonus definition has no status configured",
-                    ],
+                    "idempotent": False,
+                    "sideEffects": ["Adjusts customer.status_points", "Updates loyalty status"],
+                    "commonErrors": ["tier_key missing/invalid", "tier not found"],
                 },
             },
             {
@@ -434,67 +235,6 @@ def list_rule_actions_catalog():
                     "idempotent": True,
                     "sideEffects": ["Sets customer.status_points=0", "May update loyalty status and emit internal tier event"],
                     "commonErrors": ["customer not found"],
-                },
-            },
-            {
-                "type": "downgrade_one_tier",
-                "title": "Rétrograder d'un niveau",
-                "description": "Fait reculer le client d'un tier de fidélité (selon la configuration des tiers).",
-                "params": {},
-                "jsonSchema": _model_json_schema(DowngradeOneTierAction),
-                "examples": [{"type": "downgrade_one_tier"}],
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": False,
-                    "sideEffects": ["Adjusts customer.status_points to previous tier", "Updates loyalty status and emits internal tier event"],
-                    "commonErrors": ["current tier not found", "no lower tier"],
-                },
-            },
-            {
-                "type": "set_customer_status",
-                "title": "Définir le statut client",
-                "description": "Met à jour le champ status du client (ex: VIP).",
-                "params": {"status": "str"},
-                "jsonSchema": _model_json_schema(SetCustomerStatusAction),
-                "examples": [{"type": "set_customer_status", "status": "VIP"}],
-                "uiHints": {
-                    "status": {
-                        "widget": "select",
-                        "options": ["ACTIVE", "INACTIVE", "VIP", "BANNED"],
-                    }
-                },
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": True,
-                    "sideEffects": ["Sets customer.status"],
-                    "commonErrors": ["status missing"],
-                },
-            },
-            {
-                "type": "add_customer_tag",
-                "title": "Ajouter un tag client",
-                "description": "Ajoute un tag au client (et peut créer le tag s'il n'existe pas).",
-                "params": {"tag": "str"},
-                "jsonSchema": _model_json_schema(AddCustomerTagAction),
-                "examples": [{"type": "add_customer_tag", "tag": "birthday"}],
-                "uiHints": {
-                    "tag": {
-                        "widget": "remote_select",
-                        "allowCreate": True,
-                        "datasource": {
-                            "endpoint": "/admin/ui-options/customer-tags",
-                            "method": "GET",
-                            "valueField": "tag",
-                            "labelField": "tag",
-                            "brandVia": "X-Brand",
-                        },
-                    }
-                },
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": True,
-                    "sideEffects": ["Creates customer tag if not existing"],
-                    "commonErrors": ["tag missing"],
                 },
             },
         ]
@@ -539,10 +279,11 @@ def get_rules_ui_catalog():
             },
             "examples": [
                 {
+                    "name": "Example rule: purchase >= 100 gives points",
                     "event_type": "PURCHASE",
                     "priority": 0,
                     "active": True,
-                    "conditions": {"all": [{"amount_gte": 100}]},
+                    "conditions": {"and": [{"field": "payload.amount", "operator": "gte", "value": 100}]},
                     "actions": [{"type": "earn_points", "points": 10}],
                 }
             ],
@@ -582,14 +323,6 @@ def get_rules_ui_bundle(
     rewards = db.query(Reward).filter(Reward.brand == brand).order_by(Reward.name.asc()).all()
     event_types = db.query(EventType).filter(EventType.brand == brand).order_by(EventType.key.asc()).all()
     tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
-    tags_q = (
-        db.query(CustomerTag.tag)
-        .join(Customer, Customer.id == CustomerTag.customer_id)
-        .filter(Customer.brand == brand)
-        .distinct()
-        .order_by(CustomerTag.tag.asc())
-    )
-
     return {
         "brand": brand,
         "rules": {"uiCatalog": get_rules_ui_catalog()},
@@ -636,10 +369,6 @@ def get_rules_ui_bundle(
                     for t in tiers
                 ],
             },
-            "customerTags": {
-                "brand": brand,
-                "items": [{"tag": row[0]} for row in tags_q.all()],
-            },
         },
     }
 
@@ -647,85 +376,3 @@ def get_rules_ui_bundle(
 @router.get("/rule-conditions")
 def list_rule_conditions_catalog():
     return get_rule_conditions_catalog()
-
-
-@router.get("/bonus-award-policies")
-def list_bonus_award_policies_catalog():
-    return get_bonus_award_policies_catalog()
-
-
-@router.get("/bonus-policy-params-catalog")
-def get_bonus_policy_params_catalog(
-    brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    rewards_count = db.query(Reward.id).filter(Reward.brand == brand).count()
-
-    return {
-        "brand": brand,
-        "selection": {
-            "mode": "single",
-            "description": "Choisissez un seul effet à configurer pour policy_params.",
-        },
-        "effects": [
-            {
-                "key": "points",
-                "title": "Points",
-                "description": "Définit le nombre de points par défaut pour l'action grant_bonus.",
-                "enabled": True,
-                "jsonSchema": {
-                    "type": "object",
-                    "properties": {"points": {"type": "integer", "minimum": 0}},
-                    "required": ["points"],
-                    "additionalProperties": True,
-                },
-                "uiHints": {"points": {"widget": "number", "min": 0}},
-                "examples": [{"points": 200}],
-            },
-            {
-                "key": "reward_id",
-                "title": "Récompense",
-                "description": "Définit la reward par défaut pour l'action grant_bonus_reward.",
-                "enabled": bool(rewards_count),
-                "disabledReason": None if rewards_count else "Aucune récompense n'est disponible pour cette marque.",
-                "jsonSchema": {
-                    "type": "object",
-                    "properties": {"reward_id": {"type": "string"}},
-                    "required": ["reward_id"],
-                    "additionalProperties": True,
-                },
-                "uiHints": {
-                    "reward_id": {
-                        "widget": "remote_select",
-                        "datasource": {
-                            "endpoint": "/admin/ui-options/rewards",
-                            "method": "GET",
-                            "valueField": "id",
-                            "labelField": "name",
-                            "brandVia": "X-Brand",
-                        },
-                    }
-                },
-                "examples": [{"reward_id": "<uuid>"}],
-            },
-            {
-                "key": "status",
-                "title": "Statut client",
-                "description": "Définit le statut par défaut pour l'action grant_bonus_status.",
-                "enabled": True,
-                "jsonSchema": {
-                    "type": "object",
-                    "properties": {"status": {"type": "string"}},
-                    "required": ["status"],
-                    "additionalProperties": True,
-                },
-                "uiHints": {
-                    "status": {
-                        "widget": "select",
-                        "options": ["ACTIVE", "INACTIVE", "VIP", "BANNED"],
-                    }
-                },
-                "examples": [{"status": "VIP"}],
-            },
-        ],
-    }
