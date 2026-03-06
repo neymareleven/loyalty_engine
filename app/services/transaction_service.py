@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
-from app.models.event_type import EventType
+from app.models.event_type import TransactionType
 from app.models.transaction import Transaction
 from app.services.rule_engine import process_transaction_rules
 
@@ -79,12 +79,12 @@ def _merge_json_schemas(a: dict | None, b: dict | None) -> dict | None:
     return out
 
 
-def _find_event_type(db: Session, *, brand: str, key: str):
+def _find_transaction_type(db: Session, *, brand: str, key: str):
     return (
-        db.query(EventType)
-        .filter(EventType.key == key)
-        .filter(EventType.active.is_(True))
-        .filter(EventType.brand == brand)
+        db.query(TransactionType)
+        .filter(TransactionType.key == key)
+        .filter(TransactionType.active.is_(True))
+        .filter(TransactionType.brand == brand)
         .first()
     )
 
@@ -94,8 +94,8 @@ def create_internal_transaction(
     *,
     brand: str,
     profile_id: str,
-    event_type: str,
-    event_id: str,
+    transaction_type: str,
+    transaction_id: str,
     payload: dict | None = None,
     source: str = "SYSTEM",
     depth: int = 0,
@@ -107,7 +107,7 @@ def create_internal_transaction(
 
     existing = (
         db.query(Transaction)
-        .filter(Transaction.event_id == event_id)
+        .filter(Transaction.transaction_id == transaction_id)
         .filter(Transaction.brand == brand)
         .first()
     )
@@ -115,10 +115,10 @@ def create_internal_transaction(
         return existing
 
     transaction = Transaction(
-        event_id=event_id,
+        transaction_id=transaction_id,
         brand=brand,
         profile_id=profile_id,
-        event_type=event_type,
+        transaction_type=transaction_type,
         source=source,
         payload=payload or {"_ruleDepth": depth + 1},
         status="PENDING",
@@ -159,7 +159,7 @@ def create_transaction(db: Session, event_data):
     # 🔐 IDPOTENCE — vérifier si l'événement existe déjà
     existing = (
         db.query(Transaction)
-        .filter(Transaction.event_id == event_data.eventId)
+        .filter(Transaction.transaction_id == event_data.eventId)
         .filter(Transaction.brand == event_data.brand)
         .first()
     )
@@ -191,10 +191,10 @@ def create_transaction(db: Session, event_data):
         status = "BLOCKED"
 
     transaction = Transaction(
-        event_id=event_data.eventId,   # 🔐 clé d'idempotence
+        transaction_id=event_data.eventId,   # 🔐 clé d'idempotence
         brand=event_data.brand,
         profile_id=event_data.profileId,
-        event_type=event_data.eventType,
+        transaction_type=event_data.eventType,
         source=event_data.source,
         payload=event_data.payload,
         status=status,
@@ -212,40 +212,40 @@ def create_transaction(db: Session, event_data):
     db.commit()
     db.refresh(transaction)
 
-    et = _find_event_type(db, brand=transaction.brand, key=transaction.event_type)
-    if not et:
+    tt = _find_transaction_type(db, brand=transaction.brand, key=transaction.transaction_type)
+    if not tt:
         inferred_schema = _infer_json_schema_from_payload(transaction.payload) if transaction.payload is not None else None
-        et = EventType(
+        tt = TransactionType(
             brand=transaction.brand,
-            key=transaction.event_type,
+            key=transaction.transaction_type,
             origin="EXTERNAL",
-            name=transaction.event_type,
+            name=transaction.transaction_type,
             description="Auto-created from inbound event",
             payload_schema=inferred_schema,
             active=True,
         )
-        db.add(et)
+        db.add(tt)
         db.commit()
 
-        transaction.error_code = "EVENT_TYPE_CREATED"
-        transaction.error_message = "EventType was missing in catalog and was created."
+        transaction.error_code = "TRANSACTION_TYPE_CREATED"
+        transaction.error_message = "TransactionType was missing in catalog and was created."
         db.commit()
 
-    auto_update_schema = (os.getenv("AUTO_UPDATE_EVENTTYPE_PAYLOAD_SCHEMA", "true") or "true").strip().lower() in {
+    auto_update_schema = (os.getenv("AUTO_UPDATE_TRANSACTIONTYPE_PAYLOAD_SCHEMA", "true") or "true").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
-    if auto_update_schema and et and et.origin == "EXTERNAL":
+    if auto_update_schema and tt and tt.origin == "EXTERNAL":
         inferred_schema = _infer_json_schema_from_payload(transaction.payload) if transaction.payload is not None else None
         if inferred_schema:
-            merged = _merge_json_schemas(et.payload_schema, inferred_schema)
-            if merged != et.payload_schema:
-                et.payload_schema = merged
+            merged = _merge_json_schemas(tt.payload_schema, inferred_schema)
+            if merged != tt.payload_schema:
+                tt.payload_schema = merged
                 db.commit()
 
-    if et and et.origin == "EXTERNAL":
+    if tt and tt.origin == "EXTERNAL":
         customer = (
             db.query(Customer)
             .filter(Customer.brand == transaction.brand, Customer.profile_id == transaction.profile_id)

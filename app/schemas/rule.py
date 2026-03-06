@@ -10,7 +10,7 @@ class RuleCreate(BaseModel):
     brand: Optional[str] = None
     name: str
     description: Optional[str] = None
-    event_type: str
+    transaction_type: str
     priority: int = 0
 
     conditions: Optional[Dict[str, Any]] = None
@@ -35,7 +35,7 @@ class RuleOut(BaseModel):
     brand: str
     name: str
     description: Optional[str] = None
-    event_type: str
+    transaction_type: str
     priority: int
 
     conditions: Optional[Dict[str, Any]] = None

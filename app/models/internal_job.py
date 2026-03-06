@@ -15,7 +15,7 @@ class InternalJob(Base):
     job_key = Column(String(100), nullable=False)
     brand = Column(String(50), nullable=True)
 
-    event_type = Column(String(50), nullable=False)
+    transaction_type = Column("event_type", String(50), nullable=False)
 
     selector = Column(JSON, nullable=False, default=dict)
     payload_template = Column(JSON, nullable=True)

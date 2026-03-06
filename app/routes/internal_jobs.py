@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
-from app.models.event_type import EventType
+from app.models.event_type import TransactionType
 from app.models.internal_job import InternalJob
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.transaction import Transaction
@@ -39,6 +39,8 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
 
     if field.startswith("customer."):
         key = field[len("customer.") :]
+        if key == "gender":
+            return Customer.gender
         if key == "status":
             return Customer.status
         if key == "loyalty_status":
@@ -213,15 +215,15 @@ def get_internal_jobs_ui_catalog():
         return model_cls.schema()
 
     return {
-        "job": {
+        "create": {
             "jsonSchema": _model_json_schema(InternalJobCreate),
             "uiHints": {
                 "job_key": {"widget": "hidden"},
                 "brand": {"widget": "hidden"},
-                "event_type": {
+                "transaction_type": {
                     "widget": "remote_select",
                     "datasource": {
-                        "endpoint": "/admin/ui-options/event-types",
+                        "endpoint": "/admin/ui-options/transaction-types",
                         "method": "GET",
                         "query": {"origin": "INTERNAL", "active": True},
                         "valueField": "key",
@@ -229,10 +231,7 @@ def get_internal_jobs_ui_catalog():
                         "brandVia": "X-Brand",
                     },
                 },
-                "selector": {
-                    "widget": "internal_job_selector_builder",
-                    "catalog": {"path": "$.selector"},
-                },
+                "selector": {"widget": "internal_job_selector_builder", "catalog": {"endpoint": "/admin/internal-jobs/selector-catalog"}},
                 "payload_template": {
                     "widget": "json_object",
                 },
@@ -339,10 +338,10 @@ def get_internal_jobs_ui_bundle(
     db: Session = Depends(get_db),
 ):
     event_types = (
-        db.query(EventType)
-        .filter(EventType.brand == brand)
-        .filter(EventType.origin == "INTERNAL")
-        .order_by(EventType.key.asc())
+        db.query(TransactionType)
+        .filter(TransactionType.brand == brand)
+        .filter(TransactionType.origin == "INTERNAL")
+        .order_by(TransactionType.key.asc())
         .all()
     )
     tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
@@ -350,7 +349,7 @@ def get_internal_jobs_ui_bundle(
         "brand": brand,
         "uiCatalog": get_internal_jobs_ui_catalog(),
         "uiOptions": {
-            "eventTypes": {
+            "transactionTypes": {
                 "brand": brand,
                 "items": [
                     {
@@ -415,22 +414,22 @@ def create_internal_job(
     if payload.job_key == "MAINT_EXPIRE_REWARDS":
         raise HTTPException(status_code=400, detail="This internal job is system-managed")
     q = (
-        db.query(EventType.id)
+        db.query(TransactionType.id)
         .filter(
-            EventType.key == payload.event_type,
-            EventType.active.is_(True),
-            EventType.origin == "INTERNAL",
+            TransactionType.key == payload.transaction_type,
+            TransactionType.active.is_(True),
+            TransactionType.origin == "INTERNAL",
         )
     )
-    q = q.filter(EventType.brand == active_brand)
+    q = q.filter(TransactionType.brand == active_brand)
     exists = q.first()
     if not exists:
-        raise HTTPException(status_code=400, detail="Unknown/inactive event_type or not INTERNAL. Create it in /admin/event-types first.")
+        raise HTTPException(status_code=400, detail="Unknown/inactive transaction_type or not INTERNAL. Create it in /admin/transaction-types first.")
 
     schedule_dict = payload.schedule.model_dump() if payload.schedule is not None else None
 
     job_key_in = (payload.job_key or "").strip() or None
-    job_key = job_key_in or _slug_key(payload.event_type)
+    job_key = job_key_in or _slug_key(payload.transaction_type)
     base = job_key
     i = 1
     while (
@@ -445,7 +444,7 @@ def create_internal_job(
     job = InternalJob(
         job_key=job_key,
         brand=active_brand,
-        event_type=payload.event_type,
+        transaction_type=payload.transaction_type,
         selector=payload.selector or {},
         payload_template=payload.payload_template,
         active=payload.active,
@@ -503,19 +502,19 @@ def update_internal_job(
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
 
-    if "event_type" in data and data["event_type"]:
+    if "transaction_type" in data and data["transaction_type"]:
         q = (
-            db.query(EventType.id)
+            db.query(TransactionType.id)
             .filter(
-                EventType.key == data["event_type"],
-                EventType.active.is_(True),
-                EventType.origin == "INTERNAL",
+                TransactionType.key == data["transaction_type"],
+                TransactionType.active.is_(True),
+                TransactionType.origin == "INTERNAL",
             )
         )
-        q = q.filter(EventType.brand == active_brand)
+        q = q.filter(TransactionType.brand == active_brand)
         exists = q.first()
         if not exists:
-            raise HTTPException(status_code=400, detail="Unknown/inactive event_type or not INTERNAL. Create it in /admin/event-types first.")
+            raise HTTPException(status_code=400, detail="Unknown/inactive transaction_type or not INTERNAL. Create it in /admin/transaction-types first.")
 
     for k, v in data.items():
         if k == "brand":
@@ -595,7 +594,7 @@ def preview_internal_job(
         "jobId": str(job.id),
         "jobKey": job.job_key,
         "brand": job.brand,
-        "eventType": job.event_type,
+        "transactionType": job.transaction_type,
         "date": today.isoformat(),
         "count": total,
         "sample": [{"brand": c.brand, "profileId": c.profile_id} for c in sample],
@@ -636,7 +635,7 @@ def run_internal_job(
         "jobId": str(job.id),
         "jobKey": job.job_key,
         "brand": job.brand,
-        "eventType": job.event_type,
+        "transactionType": job.transaction_type,
         "date": now.date().isoformat(),
         "targetCustomers": stats.processed,
         "created": stats.created,

@@ -10,8 +10,8 @@ class TransactionOut(BaseModel):
     id: UUID
     brand: str
     profile_id: str
-    event_type: str
-    event_id: str
+    transaction_type: str
+    transaction_id: str
 
     source: Optional[str] = None
     payload: Optional[Dict[str, Any]] = None

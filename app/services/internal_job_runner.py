@@ -116,11 +116,11 @@ def run_internal_job_once(
 
     for c in customers:
         processed += 1
-        event_id = f"job_{job.id}_{bucket_key}_{c.brand}_{c.profile_id}"
+        transaction_id = f"job_{job.id}_{bucket_key}_{c.brand}_{c.profile_id}"
 
         already_exists = (
             db.query(Transaction.id)
-            .filter(Transaction.event_id == event_id)
+            .filter(Transaction.transaction_id == transaction_id)
             .filter(Transaction.brand == c.brand)
             .first()
         )
@@ -132,8 +132,8 @@ def run_internal_job_once(
         event = EventCreate(
             brand=c.brand,
             profileId=c.profile_id,
-            eventType=job.event_type,
-            eventId=event_id,
+            eventType=job.transaction_type,
+            eventId=transaction_id,
             source="INTERNAL_JOB",
             payload=payload,
         )
