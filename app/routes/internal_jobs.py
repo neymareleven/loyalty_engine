@@ -39,6 +39,8 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
 
     if field.startswith("customer."):
         key = field[len("customer.") :]
+        if key == "gender":
+            return Customer.gender
         if key == "status":
             return Customer.status
         if key == "loyalty_status":
