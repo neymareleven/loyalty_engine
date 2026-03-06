@@ -7,6 +7,7 @@ from app.models.loyalty_tier import LoyaltyTier
 from app.models.rule import Rule
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.point_movement import PointMovement
+from app.models.customer_reward import CustomerReward
 from app.services.contact_service import get_customer
 from app.services.loyalty_service import earn_points, burn_points
 from app.services.reward_service import issue_reward
@@ -59,7 +60,7 @@ def _as_datetime(value):
     return None
 
 
-def _resolve_field_value(*, field: str, customer, transaction):
+def _resolve_field_value(*, db: Session, field: str, customer, transaction):
     if not isinstance(field, str) or not field:
         raise ValueError("Condition leaf requires non-empty 'field'")
 
@@ -68,6 +69,11 @@ def _resolve_field_value(*, field: str, customer, transaction):
         return _get_by_path(payload, field[len("payload.") :])
 
     if field.startswith("customer."):
+        if field == "customer.rewards":
+            if not getattr(customer, "id", None):
+                return []
+            rows = db.query(CustomerReward.reward_id).filter(CustomerReward.customer_id == customer.id).all()
+            return [str(r[0]) for r in rows if r and r[0] is not None]
         return _get_by_path(customer, field[len("customer.") :])
 
     if field.startswith("system."):
@@ -120,6 +126,8 @@ def _compare(*, op: str, actual, expected) -> bool:
     if op == "in":
         if not isinstance(expected, list):
             raise ValueError("Operator 'in' requires list value")
+        if isinstance(actual, list):
+            return any(a in expected for a in actual)
         return actual in expected
 
     if op == "contains":
@@ -177,7 +185,7 @@ def _compare(*, op: str, actual, expected) -> bool:
     raise ValueError(f"Unsupported operator: {op}")
 
 
-def _evaluate_ast_condition(*, customer, transaction, node) -> bool:
+def _evaluate_ast_condition(*, db: Session, customer, transaction, node) -> bool:
     if node is None:
         return True
 
@@ -188,16 +196,16 @@ def _evaluate_ast_condition(*, customer, transaction, node) -> bool:
         items = node.get("and")
         if not isinstance(items, list):
             raise ValueError("Invalid 'and' condition: expected list")
-        return all(_evaluate_ast_condition(customer=customer, transaction=transaction, node=i) for i in items)
+        return all(_evaluate_ast_condition(db=db, customer=customer, transaction=transaction, node=i) for i in items)
 
     if "or" in node:
         items = node.get("or")
         if not isinstance(items, list):
             raise ValueError("Invalid 'or' condition: expected list")
-        return any(_evaluate_ast_condition(customer=customer, transaction=transaction, node=i) for i in items)
+        return any(_evaluate_ast_condition(db=db, customer=customer, transaction=transaction, node=i) for i in items)
 
     if "not" in node:
-        return not _evaluate_ast_condition(customer=customer, transaction=transaction, node=node.get("not"))
+        return not _evaluate_ast_condition(db=db, customer=customer, transaction=transaction, node=node.get("not"))
 
     if "field" in node:
         field = node.get("field")
@@ -207,7 +215,7 @@ def _evaluate_ast_condition(*, customer, transaction, node) -> bool:
         if not op:
             raise ValueError("Condition leaf requires 'operator' (or alias 'op')")
         value = node.get("value")
-        actual = _resolve_field_value(field=field, customer=customer, transaction=transaction)
+        actual = _resolve_field_value(db=db, field=field, customer=customer, transaction=transaction)
         return _compare(op=op, actual=actual, expected=value)
 
     raise ValueError(
@@ -216,8 +224,7 @@ def _evaluate_ast_condition(*, customer, transaction, node) -> bool:
 
 
 def _evaluate_condition_block(db: Session, customer, transaction, conditions) -> bool:
-    _ = db
-    return _evaluate_ast_condition(customer=customer, transaction=transaction, node=conditions)
+    return _evaluate_ast_condition(db=db, customer=customer, transaction=transaction, node=conditions)
 
 
 def _execute_actions(db: Session, customer, transaction, actions):
@@ -373,7 +380,7 @@ def process_transaction_rules(db: Session, transaction):
         db.query(Rule)
         .filter(
             Rule.brand == transaction.brand,
-            Rule.event_type == transaction.event_type,
+            Rule.transaction_type == transaction.transaction_type,
             Rule.active == True,
         )
         .order_by(asc(Rule.priority), asc(Rule.id))
@@ -384,9 +391,9 @@ def process_transaction_rules(db: Session, transaction):
         if not transaction.error_code:
             transaction.error_code = "NO_RULES"
         if not transaction.error_message:
-            transaction.error_message = "No active rules matched this event."
+            transaction.error_message = "No active rules matched this transaction."
         else:
-            transaction.error_message = f"{transaction.error_message} No active rules matched this event."
+            transaction.error_message = f"{transaction.error_message} No active rules matched this transaction."
 
         transaction.status = "PROCESSED"
         return

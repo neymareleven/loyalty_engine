@@ -63,23 +63,23 @@ def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS"
 
         old_rank = _get_tier_rank(db, customer.brand, old_status)
         new_rank = _get_tier_rank(db, customer.brand, new_status)
-        event_type = "TIER_UPGRADED" if new_rank > old_rank else "TIER_DOWNGRADED"
+        transaction_type = "TIER_UPGRADED" if new_rank > old_rank else "TIER_DOWNGRADED"
 
-        from app.models.event_type import EventType
+        from app.models.event_type import TransactionType
         from app.services.transaction_service import create_internal_transaction
 
-        # Only emit if the event type exists in the catalog as INTERNAL+active
-        et = (
-            db.query(EventType.id)
-            .filter(EventType.key == event_type)
-            .filter(EventType.active.is_(True))
-            .filter(EventType.origin == "INTERNAL")
-            .filter(EventType.brand == customer.brand)
+        # Only emit if the transaction type exists in the catalog as INTERNAL+active
+        tt = (
+            db.query(TransactionType.id)
+            .filter(TransactionType.key == transaction_type)
+            .filter(TransactionType.active.is_(True))
+            .filter(TransactionType.origin == "INTERNAL")
+            .filter(TransactionType.brand == customer.brand)
             .first()
         )
-        if et:
+        if tt:
             ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-            event_id = f"tier_{customer.brand}_{customer.profile_id}_{event_type}_{ts}"
+            transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
             payload = {
                 "fromTier": old_status,
                 "toTier": new_status,
@@ -92,8 +92,8 @@ def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS"
                 db,
                 brand=customer.brand,
                 profile_id=customer.profile_id,
-                event_type=event_type,
-                event_id=event_id,
+                transaction_type=transaction_type,
+                transaction_id=transaction_id,
                 payload=payload,
                 depth=depth,
                 commit=False,

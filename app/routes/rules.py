@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.transaction_rule_execution import TransactionRuleExecution
-from app.models.event_type import EventType
+from app.models.event_type import TransactionType
 from app.models.rule import Rule
 from app.schemas.rule import RuleCreate, RuleOut, RuleUpdate
 from app.deps.brand import get_active_brand
@@ -19,16 +19,16 @@ router = APIRouter(prefix="/rules", tags=["rules"])
 def list_rules(
     active_brand: str = Depends(get_active_brand),
     brand: str | None = None,
-    event_type: str | None = None,
+    transaction_type: str | None = None,
     db: Session = Depends(get_db),
 ):
     q = db.query(Rule)
     if brand and brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
     q = q.filter(Rule.brand == active_brand)
-    if event_type:
-        q = q.filter(Rule.event_type == event_type)
-    return q.order_by(Rule.brand.asc(), Rule.event_type.asc(), Rule.priority.asc()).all()
+    if transaction_type:
+        q = q.filter(Rule.transaction_type == transaction_type)
+    return q.order_by(Rule.brand.asc(), Rule.transaction_type.asc(), Rule.priority.asc()).all()
 
 
 @router.post("", response_model=RuleOut)
@@ -40,20 +40,20 @@ def create_rule(
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
     exists = (
-        db.query(EventType.id)
-        .filter(EventType.key == payload.event_type)
-        .filter(EventType.active.is_(True))
-        .filter(EventType.brand == active_brand)
+        db.query(TransactionType.id)
+        .filter(TransactionType.key == payload.transaction_type)
+        .filter(TransactionType.active.is_(True))
+        .filter(TransactionType.brand == active_brand)
         .first()
     )
     if not exists:
-        raise HTTPException(status_code=400, detail="Unknown or inactive event_type. Create it in /admin/event-types first.")
+        raise HTTPException(status_code=400, detail="Unknown or inactive transaction_type. Create it in /admin/transaction-types first.")
 
     rule = Rule(
         brand=active_brand,
         name=payload.name,
         description=payload.description,
-        event_type=payload.event_type,
+        transaction_type=payload.transaction_type,
         priority=payload.priority,
         conditions=payload.conditions,
         actions=payload.actions,

@@ -5,11 +5,11 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
-from app.models.event_type import EventType
-from app.schemas.event_type import EventTypeCreate, EventTypeOut, EventTypeUpdate
+from app.models.event_type import TransactionType
+from app.schemas.event_type import TransactionTypeCreate, TransactionTypeOut, TransactionTypeUpdate
 
 
-router = APIRouter(prefix="/admin/event-types", tags=["admin-event-types"])
+router = APIRouter(prefix="/admin/transaction-types", tags=["admin-transaction-types"])
 
 
 def _slug_key(value: str) -> str:
@@ -26,11 +26,11 @@ def _slug_key(value: str) -> str:
                 out.append("_")
                 prev_us = True
     key = "".join(out).strip("_")
-    return key or "event"
+    return key or "transaction"
 
 
-@router.get("", response_model=list[EventTypeOut])
-def list_event_types(
+@router.get("", response_model=list[TransactionTypeOut])
+def list_transaction_types(
     active_brand: str = Depends(get_active_brand),
     brand: str | None = None,
     include_global: bool = False,
@@ -38,23 +38,27 @@ def list_event_types(
     active: bool | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(EventType)
+    q = db.query(TransactionType)
     if brand is not None and brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
     if include_global:
-        q = q.filter((EventType.brand == active_brand) | (EventType.brand.is_(None)))
+        q = q.filter((TransactionType.brand == active_brand) | (TransactionType.brand.is_(None)))
     else:
-        q = q.filter(EventType.brand == active_brand)
+        q = q.filter(TransactionType.brand == active_brand)
     if origin:
-        q = q.filter(EventType.origin == origin)
+        q = q.filter(TransactionType.origin == origin)
     if active is not None:
-        q = q.filter(EventType.active.is_(active))
-    return q.order_by(EventType.origin.asc(), EventType.brand.asc().nullsfirst(), EventType.key.asc()).all()
+        q = q.filter(TransactionType.active.is_(active))
+    return q.order_by(
+        TransactionType.origin.asc(),
+        TransactionType.brand.asc().nullsfirst(),
+        TransactionType.key.asc(),
+    ).all()
 
 
-@router.post("", response_model=EventTypeOut)
-def create_event_type(
-    payload: EventTypeCreate,
+@router.post("", response_model=TransactionTypeOut)
+def create_transaction_type(
+    payload: TransactionTypeCreate,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
@@ -65,16 +69,16 @@ def create_event_type(
     base = key
     i = 1
     while (
-        db.query(EventType.id)
-        .filter(EventType.key == key)
-        .filter(EventType.brand == active_brand)
-        .filter(EventType.origin == payload.origin)
+        db.query(TransactionType.id)
+        .filter(TransactionType.key == key)
+        .filter(TransactionType.brand == active_brand)
+        .filter(TransactionType.origin == payload.origin)
         .first()
     ):
         i += 1
         key = f"{base}_{i}"
 
-    obj = EventType(
+    obj = TransactionType(
         brand=active_brand,
         key=key,
         origin=payload.origin,
@@ -89,30 +93,30 @@ def create_event_type(
     return obj
 
 
-@router.get("/{event_type_id}", response_model=EventTypeOut)
-def get_event_type(
-    event_type_id: UUID,
+@router.get("/{transaction_type_id}", response_model=TransactionTypeOut)
+def get_transaction_type(
+    transaction_type_id: UUID,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    obj = db.query(EventType).filter(EventType.id == event_type_id).first()
+    obj = db.query(TransactionType).filter(TransactionType.id == transaction_type_id).first()
     if not obj or obj.brand != active_brand:
-        raise HTTPException(status_code=404, detail="Event type not found")
+        raise HTTPException(status_code=404, detail="Transaction type not found")
     return obj
 
 
-@router.patch("/{event_type_id}", response_model=EventTypeOut)
-def update_event_type(
-    event_type_id: UUID,
-    payload: EventTypeUpdate,
+@router.patch("/{transaction_type_id}", response_model=TransactionTypeOut)
+def update_transaction_type(
+    transaction_type_id: UUID,
+    payload: TransactionTypeUpdate,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    obj = db.query(EventType).filter(EventType.id == event_type_id).first()
+    obj = db.query(TransactionType).filter(TransactionType.id == transaction_type_id).first()
     if not obj:
-        raise HTTPException(status_code=404, detail="Event type not found")
+        raise HTTPException(status_code=404, detail="Transaction type not found")
     if obj.brand != active_brand:
-        raise HTTPException(status_code=404, detail="Event type not found")
+        raise HTTPException(status_code=404, detail="Transaction type not found")
 
     data = payload.model_dump(exclude_unset=True)
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
@@ -122,15 +126,15 @@ def update_event_type(
     next_origin = data.get("origin", obj.origin)
     if next_key != obj.key or next_brand != obj.brand or next_origin != obj.origin:
         existing = (
-            db.query(EventType.id)
-            .filter(EventType.key == next_key)
-            .filter(EventType.brand == next_brand)
-            .filter(EventType.origin == next_origin)
-            .filter(EventType.id != obj.id)
+            db.query(TransactionType.id)
+            .filter(TransactionType.key == next_key)
+            .filter(TransactionType.brand == next_brand)
+            .filter(TransactionType.origin == next_origin)
+            .filter(TransactionType.id != obj.id)
             .first()
         )
         if existing:
-            raise HTTPException(status_code=400, detail="Event type key already exists")
+            raise HTTPException(status_code=400, detail="Transaction type key already exists")
 
     for k, v in data.items():
         if k == "brand":
@@ -142,17 +146,17 @@ def update_event_type(
     return obj
 
 
-@router.delete("/{event_type_id}")
-def delete_event_type(
-    event_type_id: UUID,
+@router.delete("/{transaction_type_id}")
+def delete_transaction_type(
+    transaction_type_id: UUID,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    obj = db.query(EventType).filter(EventType.id == event_type_id).first()
+    obj = db.query(TransactionType).filter(TransactionType.id == transaction_type_id).first()
     if not obj:
-        raise HTTPException(status_code=404, detail="Event type not found")
+        raise HTTPException(status_code=404, detail="Transaction type not found")
     if obj.brand != active_brand:
-        raise HTTPException(status_code=404, detail="Event type not found")
+        raise HTTPException(status_code=404, detail="Transaction type not found")
 
     db.delete(obj)
     db.commit()

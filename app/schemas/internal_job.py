@@ -15,7 +15,7 @@ class InternalJobScheduleCron(BaseModel):
 class InternalJobCreate(BaseModel):
     job_key: Optional[str] = None
     brand: Optional[str] = None
-    event_type: str
+    transaction_type: str
 
     selector: Dict[str, Any] = Field(default_factory=dict)
     payload_template: Optional[Dict[str, Any]] = None
@@ -30,7 +30,7 @@ class InternalJobCreate(BaseModel):
 class InternalJobUpdate(BaseModel):
     job_key: Optional[str] = None
     brand: Optional[str] = None
-    event_type: Optional[str] = None
+    transaction_type: Optional[str] = None
 
     selector: Optional[Dict[str, Any]] = None
     payload_template: Optional[Dict[str, Any]] = None
@@ -46,7 +46,7 @@ class InternalJobOut(BaseModel):
     id: UUID
     job_key: str
     brand: Optional[str] = None
-    event_type: str
+    transaction_type: str
 
     selector: Dict[str, Any] = Field(default_factory=dict)
     payload_template: Optional[Dict[str, Any]] = None

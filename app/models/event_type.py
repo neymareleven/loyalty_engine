@@ -7,8 +7,8 @@ from sqlalchemy.sql import func
 from app.db import Base
 
 
-class EventType(Base):
-    __tablename__ = "event_types"
+class TransactionType(Base):
+    __tablename__ = "transaction_types"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
