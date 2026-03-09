@@ -7,6 +7,7 @@ from app.models.rule import Rule
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.customer import Customer
 from app.models.point_movement import PointMovement
+from app.models.cash_movement import CashMovement
 from app.models.reward import Reward
 from app.models.customer_reward import CustomerReward
 from app.models.internal_job import InternalJob

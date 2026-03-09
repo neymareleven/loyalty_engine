@@ -13,6 +13,8 @@ class RewardCreate(BaseModel):
     cost_points: Optional[int] = None
     type: str = "POINTS"
     validity_days: Optional[int] = None
+    max_attributions: Optional[int] = None
+    reset_period: Optional[str] = None
     currency: Optional[str] = None
     value_amount: Optional[int] = None
     value_percent: Optional[int] = None
@@ -26,6 +28,8 @@ class RewardUpdate(BaseModel):
     cost_points: Optional[int] = None
     type: Optional[str] = None
     validity_days: Optional[int] = None
+    max_attributions: Optional[int] = None
+    reset_period: Optional[str] = None
     currency: Optional[str] = None
     value_amount: Optional[int] = None
     value_percent: Optional[int] = None
@@ -41,6 +45,8 @@ class RewardOut(BaseModel):
     cost_points: Optional[int] = None
     type: str
     validity_days: Optional[int] = None
+    max_attributions: Optional[int] = None
+    reset_period: Optional[str] = None
     currency: Optional[str] = None
     value_amount: Optional[int] = None
     value_percent: Optional[int] = None

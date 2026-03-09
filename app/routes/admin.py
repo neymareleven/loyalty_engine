@@ -26,6 +26,29 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 def _json_schema_paths(schema: Any, *, prefix: str) -> list[str]:
     out: list[str] = []
 
+    def normalize(node: Any) -> Any:
+        if not isinstance(node, dict):
+            return node
+
+        # Manual format supported by TransactionTypeCreate.payload_schema:
+        # { fieldName: {type, description?}, ... }
+        # Normalize to JSON-Schema-like: {type: object, properties: ...}
+        looks_like_manual_map = (
+            "type" not in node
+            and "properties" not in node
+            and any(
+                isinstance(k, str)
+                and k
+                and isinstance(v, dict)
+                and ("type" in v or "description" in v)
+                for k, v in node.items()
+            )
+        )
+        if looks_like_manual_map:
+            return {"type": "object", "properties": node}
+
+        return node
+
     def walk(node: Any, path: str, depth: int = 0):
         if depth > 12:
             return
@@ -50,7 +73,7 @@ def _json_schema_paths(schema: Any, *, prefix: str) -> list[str]:
                 walk(items, path, depth + 1)
             return
 
-    walk(schema, prefix)
+    walk(normalize(schema), prefix)
     uniq = sorted({p for p in out if isinstance(p, str) and p.startswith(prefix)})
     return uniq
 
@@ -74,6 +97,8 @@ def _reward_type_catalog_item(
         "cost_points": {"type": ["integer", "null"], "minimum": 0},
         "type": {"type": "string", "enum": [reward_type]},
         "validity_days": {"type": ["integer", "null"], "minimum": 0},
+        "max_attributions": {"type": ["integer", "null"], "minimum": 1},
+        "reset_period": {"type": ["string", "null"], "enum": ["DAY", "MONTH", "YEAR", "LIFETIME"]},
         "currency": {"type": ["string", "null"], "minLength": 3, "maxLength": 3},
         "value_amount": {"type": ["integer", "null"], "minimum": 0},
         "value_percent": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
@@ -87,6 +112,12 @@ def _reward_type_catalog_item(
         "description": {"widget": "textarea"},
         "cost_points": {"widget": "number", "min": 0},
         "validity_days": {"widget": "number", "min": 0, "placeholder": "Optional"},
+        "max_attributions": {"widget": "number", "min": 1, "placeholder": "Optional"},
+        "reset_period": {
+            "widget": "select",
+            "options": ["DAY", "MONTH", "YEAR", "LIFETIME"],
+            "placeholder": "Optional",
+        },
         "currency": {"widget": "text", "placeholder": "ISO code (EUR, XAF, ...)"},
         "value_amount": {"widget": "number", "min": 0},
         "value_percent": {"widget": "number", "min": 1, "max": 100},
@@ -130,6 +161,7 @@ def _reward_type_catalog_item(
 @router.get("/rewards/ui-catalog")
 def get_rewards_ui_catalog():
     common = ["name", "description", "type", "cost_points", "validity_days", "active"]
+    limits = ["max_attributions", "reset_period"]
 
     voucher_presets: list[dict[str, Any]] = [
         {
@@ -221,9 +253,11 @@ def get_rewards_ui_catalog():
                 "description": "Description (optionnelle) affichée au support/ops.",
                 "cost_points": "Coût en points si la récompense est achetée via le catalogue. Laisser vide/null pour une récompense gratuite (marketing).",
                 "validity_days": "Durée de validité après attribution (en jours). Laisser vide/null pour illimité.",
+                "max_attributions": "Nombre maximum d'attributions sur une période. Laisser vide/null = illimité.",
+                "reset_period": "Période de réinitialisation de la limite (DAY, MONTH, YEAR, LIFETIME). Requis si max_attributions est renseigné.",
                 "currency": "Devise ISO 3 lettres (XAF, EUR...). Utilisée uniquement si le type utilise un montant.",
-                "value_amount": "Montant (ex: 500 XAF). Utilisé pour CASHBACK et pour DISCOUNT si remise fixe.",
-                "value_percent": "Pourcentage (1..100). Utilisé pour DISCOUNT si remise en %.",
+                "value_amount": "Montant. CASHBACK: à utiliser si cashback fixe (dans ce cas currency est obligatoire). DISCOUNT: à utiliser uniquement si remise fixe (dans ce cas value_percent doit rester vide).",
+                "value_percent": "Pourcentage (1..100). DISCOUNT: à utiliser uniquement si remise en % (dans ce cas value_amount/currency doivent rester vides).",
                 "params": "Paramètres additionnels du type. Pour VOUCHER: utilisez un preset (formulaire guidé) plutôt qu'un JSON brut.",
             },
             "rewardTypes": [
@@ -231,29 +265,29 @@ def get_rewards_ui_catalog():
                     reward_type="POINTS",
                     title="Points",
                     description="A simple reward redeemable with points.",
-                    required=[],
-                    visible=common,
+                    required=["value_amount"],
+                    visible=[*common, *limits, "value_amount"],
                 ),
                 _reward_type_catalog_item(
                     reward_type="DISCOUNT",
                     title="Discount",
-                    description="A discount reward (percentage or fixed amount).",
+                    description="A discount applied by backend: either percentage (value_percent) OR fixed amount (value_amount + currency).",
                     required=[],
-                    visible=[*common, "currency", "value_amount", "value_percent"],
+                    visible=[*common, *limits, "currency", "value_amount", "value_percent"],
                 ),
                 _reward_type_catalog_item(
                     reward_type="CASHBACK",
                     title="Cashback",
-                    description="A cashback reward (fixed amount + currency).",
-                    required=["currency", "value_amount"],
-                    visible=[*common, "currency", "value_amount"],
+                    description="A cashback applied by backend: either percentage (value_percent) OR fixed amount (value_amount + currency).",
+                    required=[],
+                    visible=[*common, *limits, "currency", "value_amount", "value_percent"],
                 ),
                 _reward_type_catalog_item(
                     reward_type="VOUCHER",
                     title="Voucher",
                     description="A voucher reward. Params are entered as key/value pairs.",
                     required=["params"],
-                    visible=[*common, "params"],
+                    visible=[*common, *limits, "params"],
                     voucher_presets=voucher_presets,
                 ),
             ]
