@@ -5,6 +5,7 @@ from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.services.wallet_service import get_points_balance
+from app.services.cash_wallet_service import get_cash_balances
 
 router = APIRouter(prefix="/wallet", tags=["wallet"])
 
@@ -29,9 +30,11 @@ def read_wallet(
         raise HTTPException(status_code=404, detail="Customer not found")
 
     balance = get_points_balance(db, customer.id)
+    cash = get_cash_balances(db, customer.id)
 
     return {
         "brand": brand,
         "profileId": profile_id,
         "pointsBalance": balance,
+        "cashBalances": cash,
     }

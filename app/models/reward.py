@@ -24,6 +24,12 @@ class Reward(Base):
     # durée de validité après attribution (en jours)
     validity_days = Column(Integer, nullable=True)
 
+    # usage limits (frequency)
+    # max_attributions = maximum number of attributions within reset_period.
+    # reset_period: DAY | MONTH | YEAR | LIFETIME
+    max_attributions = Column(Integer, nullable=True)
+    reset_period = Column(String(20), nullable=True)
+
     # rich reward types fields
     currency = Column(String(3), nullable=True)
     value_amount = Column(Integer, nullable=True)
