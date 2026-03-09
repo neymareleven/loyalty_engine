@@ -17,8 +17,29 @@ def _validate_reward_by_type(
     value_amount: int | None,
     value_percent: int | None,
     params,
+    max_attributions: int | None = None,
+    reset_period: str | None = None,
 ):
     rt = (reward_type or "POINTS").strip().upper()
+
+    if max_attributions is not None:
+        try:
+            ma = int(max_attributions)
+        except Exception:
+            raise HTTPException(status_code=400, detail="max_attributions must be an integer")
+        if ma <= 0:
+            raise HTTPException(status_code=400, detail="max_attributions must be >= 1")
+
+    if reset_period is not None:
+        rp = str(reset_period).strip().upper()
+        if rp not in {"DAY", "MONTH", "YEAR", "LIFETIME"}:
+            raise HTTPException(
+                status_code=400,
+                detail="reset_period must be one of DAY, MONTH, YEAR, LIFETIME",
+            )
+
+    if max_attributions is not None and not reset_period:
+        raise HTTPException(status_code=400, detail="reset_period is required when max_attributions is set")
 
     if currency is not None and (not isinstance(currency, str) or len(currency.strip()) != 3):
         raise HTTPException(status_code=400, detail="currency must be a 3-letter ISO code")
@@ -43,14 +64,26 @@ def _validate_reward_by_type(
         has_amount = value_amount is not None
         if not has_percent and not has_amount:
             raise HTTPException(status_code=400, detail="DISCOUNT requires value_percent or value_amount")
+        if has_percent and has_amount:
+            raise HTTPException(
+                status_code=400,
+                detail="DISCOUNT must use either value_percent OR value_amount (not both)",
+            )
         if has_amount and not currency:
             raise HTTPException(status_code=400, detail="DISCOUNT with value_amount requires currency")
 
     if rt == "CASHBACK":
-        if value_amount is None:
-            raise HTTPException(status_code=400, detail="CASHBACK requires value_amount")
-        if not currency:
-            raise HTTPException(status_code=400, detail="CASHBACK requires currency")
+        has_percent = value_percent is not None
+        has_amount = value_amount is not None
+        if not has_percent and not has_amount:
+            raise HTTPException(status_code=400, detail="CASHBACK requires value_percent or value_amount")
+        if has_percent and has_amount:
+            raise HTTPException(
+                status_code=400,
+                detail="CASHBACK must use either value_percent OR value_amount (not both)",
+            )
+        if has_amount and not currency:
+            raise HTTPException(status_code=400, detail="CASHBACK with value_amount requires currency")
 
     if rt == "VOUCHER":
         if params is None:
@@ -90,6 +123,8 @@ def create_reward(
         value_amount=payload.value_amount,
         value_percent=payload.value_percent,
         params=payload.params,
+        max_attributions=payload.max_attributions,
+        reset_period=payload.reset_period,
     )
 
     reward = Reward(
@@ -99,6 +134,8 @@ def create_reward(
         cost_points=payload.cost_points,
         type=payload.type,
         validity_days=payload.validity_days,
+        max_attributions=payload.max_attributions,
+        reset_period=payload.reset_period,
         currency=payload.currency,
         value_amount=payload.value_amount,
         value_percent=payload.value_percent,
@@ -148,6 +185,8 @@ def update_reward(
         value_amount=reward.value_amount,
         value_percent=reward.value_percent,
         params=reward.params,
+        max_attributions=getattr(reward, "max_attributions", None),
+        reset_period=getattr(reward, "reset_period", None),
     )
 
     db.commit()
