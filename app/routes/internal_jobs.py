@@ -33,6 +33,15 @@ def _selector_literal(value):
     return literal(value)
 
 
+def _resolve_selector_value(*, value, today: date, now_utc: datetime):
+    if isinstance(value, dict) and "$system" in value:
+        key = value.get("$system")
+        if key == "now":
+            return now_utc
+        raise HTTPException(status_code=400, detail=f"Unknown system value preset: {key}")
+    return value
+
+
 def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
     if not isinstance(field, str) or not field:
         raise HTTPException(status_code=400, detail="Selector leaf requires non-empty 'field'")
@@ -54,23 +63,10 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
         if key == "birthdate":
             return Customer.birthdate
 
-        if key == "birthdate_month":
-            return extract("month", Customer.birthdate)
-        if key == "birthdate_day":
-            return extract("day", Customer.birthdate)
-        if key == "created_at_month":
-            return extract("month", Customer.created_at)
-        if key == "created_at_day":
-            return extract("day", Customer.created_at)
-
         raise HTTPException(status_code=400, detail=f"Unknown selector customer field: {field}")
 
     if field.startswith("system."):
         key = field[len("system.") :]
-        if key == "today_month":
-            return _selector_literal(today.month)
-        if key == "today_day":
-            return _selector_literal(today.day)
         if key == "now":
             return _selector_literal(now_utc)
 
@@ -179,7 +175,7 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
             op = selector.get("op")
         if not op:
             raise HTTPException(status_code=400, detail="Selector leaf requires 'operator' (or alias 'op')")
-        value = selector.get("value")
+        value = _resolve_selector_value(value=selector.get("value"), today=today, now_utc=now_utc)
 
         expr = _resolve_selector_field(field=field, today=today, now_utc=now_utc)
         return _selector_compare(op=op, expr=expr, value=value)

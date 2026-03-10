@@ -328,14 +328,10 @@ def list_rule_condition_fields(
         "customer.birthdate",
         "customer.rewards",
     ]
-    system_fields = [
-        "system.weekday",
-        "system.customer_created_days",
-        "system.customer_last_activity_days",
-        "system.now",
-    ]
 
-    items = sorted({*payload_fields, *customer_fields, *system_fields})
+    system_fields: list[str] = []
+
+    items = sorted({*payload_fields, *customer_fields})
     return {
         "brand": brand,
         "transaction_type": transaction_type,
@@ -343,6 +339,16 @@ def list_rule_condition_fields(
             "payload": payload_fields,
             "customer": customer_fields,
             "system": system_fields,
+        },
+        "valuePresets": {
+            "datetime": [
+                {"id": "system.now", "label": "Now", "value": {"$system": "now"}},
+            ],
+            "number": [
+                {"id": "system.weekday", "label": "Weekday (0=Mon .. 6=Sun)", "value": {"$system": "weekday"}},
+                {"id": "system.customer_created_days", "label": "Days since customer created", "value": {"$system": "customer_created_days"}},
+                {"id": "system.customer_last_activity_days", "label": "Days since last activity", "value": {"$system": "customer_last_activity_days"}},
+            ],
         },
         "fieldMeta": {
             "customer.loyalty_status": {
@@ -394,22 +400,33 @@ def list_internal_job_selector_fields():
         "customer.status",
         "customer.loyalty_status",
         "customer.lifetime_points",
-        "customer.birthdate_month",
-        "customer.birthdate_day",
-        "customer.created_at_month",
-        "customer.created_at_day",
+        "customer.birthdate",
+        "customer.created_at",
         "customer.last_activity_at",
     ]
-    system_fields = [
-        "system.today_month",
-        "system.today_day",
-        "system.now",
-    ]
+    system_fields: list[str] = []
     items = sorted({*customer_fields, *system_fields})
     return {
         "sources": {
             "customer": customer_fields,
             "system": system_fields,
+        },
+        "fieldMeta": {
+            "customer.gender": {
+                "valueKind": "enum",
+                "ui": {
+                    "widget": "select",
+                    "options": ["M", "F", "OTHER", "UNKNOWN"],
+                },
+            },
+            "customer.birthdate": {"valueKind": "date", "ui": {"widget": "date"}},
+            "customer.created_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
+            "customer.last_activity_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
+        },
+        "valuePresets": {
+            "datetime": [
+                {"id": "system.now", "label": "Now", "value": {"$system": "now"}},
+            ]
         },
         "items": items,
     }
