@@ -27,6 +27,44 @@ def _get_by_path(obj, path: str):
     return current
 
 
+def _resolve_system_value(*, key: str, customer):
+    now = datetime.utcnow()
+
+    if key == "now":
+        return now
+    if key == "weekday":
+        return now.weekday()
+
+    if key == "customer_created_days":
+        created_at = getattr(customer, "created_at", None)
+        if not created_at:
+            return None
+        delta = now - created_at
+        return int(delta.total_seconds() // 86400)
+
+    if key == "customer_last_activity_days":
+        last_activity_at = getattr(customer, "last_activity_at", None)
+        if not last_activity_at:
+            return None
+        delta = now - last_activity_at
+        return int(delta.total_seconds() // 86400)
+
+    raise ValueError(f"Unknown system value preset: {key}")
+
+
+def _resolve_expected_value(*, customer, value):
+    if isinstance(value, dict) and "$system" in value:
+        key = value.get("$system")
+        if not isinstance(key, str) or not key:
+            raise ValueError("Invalid system preset: expected non-empty '$system' string")
+        return _resolve_system_value(key=key, customer=customer)
+
+    if isinstance(value, list):
+        return [_resolve_expected_value(customer=customer, value=v) for v in value]
+
+    return value
+
+
 def _as_int(value):
     try:
         if value is None:
@@ -214,7 +252,7 @@ def _evaluate_ast_condition(*, db: Session, customer, transaction, node) -> bool
             op = node.get("op")
         if not op:
             raise ValueError("Condition leaf requires 'operator' (or alias 'op')")
-        value = node.get("value")
+        value = _resolve_expected_value(customer=customer, value=node.get("value"))
         actual = _resolve_field_value(db=db, field=field, customer=customer, transaction=transaction)
         return _compare(op=op, actual=actual, expected=value)
 
