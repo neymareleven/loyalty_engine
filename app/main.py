@@ -3,12 +3,9 @@ import hmac
 import os
 
 from fastapi import FastAPI
-<<<<<<< HEAD
 from fastapi.middleware.cors import CORSMiddleware
-=======
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
->>>>>>> main
 from app.db import engine, Base
 
 from app.models.transaction import Transaction
@@ -55,6 +52,10 @@ app.add_middleware(
 async def basic_auth_middleware(request: Request, call_next):
     public_paths = {"/", "/docs", "/openapi.json", "/redoc", "/favicon.ico"}
     if request.url.path in public_paths:
+        return await call_next(request)
+
+    # Always allow CORS preflight requests — browsers never send credentials on OPTIONS
+    if request.method == "OPTIONS":
         return await call_next(request)
 
     username = os.getenv("API_BASIC_AUTH_USERNAME", "karaf")
