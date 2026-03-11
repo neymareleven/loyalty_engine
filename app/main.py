@@ -3,6 +3,7 @@ import hmac
 import os
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 from app.db import engine, Base
@@ -32,11 +33,31 @@ from app.routes.loyalty_tiers import router as loyalty_tiers_router
 
 app = FastAPI(title="Loyalty Engine")
 
+# ─── CORS ─────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://127.0.0.1:3000",
+        "https://amplify.qilinsa.com",
+        "https://uat.amplify.qilinsa.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.middleware("http")
 async def basic_auth_middleware(request: Request, call_next):
     public_paths = {"/", "/docs", "/openapi.json", "/redoc", "/favicon.ico"}
     if request.url.path in public_paths:
+        return await call_next(request)
+
+    # Always allow CORS preflight requests — browsers never send credentials on OPTIONS
+    if request.method == "OPTIONS":
         return await call_next(request)
 
     username = os.getenv("API_BASIC_AUTH_USERNAME", "karaf")
@@ -94,3 +115,8 @@ app.include_router(loyalty_tiers_router)
 @app.get("/")
 def read_root():
     return {"message": "Loyalty Engine is running"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8001, reload=True)
