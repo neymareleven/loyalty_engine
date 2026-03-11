@@ -15,6 +15,8 @@ class InternalJobScheduleCron(BaseModel):
 class InternalJobCreate(BaseModel):
     job_key: Optional[str] = None
     brand: Optional[str] = None
+    name: str
+    description: Optional[str] = None
     transaction_type: str
 
     selector: Dict[str, Any] = Field(default_factory=dict)
@@ -30,6 +32,8 @@ class InternalJobCreate(BaseModel):
 class InternalJobUpdate(BaseModel):
     job_key: Optional[str] = None
     brand: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
     transaction_type: Optional[str] = None
 
     selector: Optional[Dict[str, Any]] = None
@@ -46,6 +50,8 @@ class InternalJobOut(BaseModel):
     id: UUID
     job_key: str
     brand: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
     transaction_type: str
 
     selector: Dict[str, Any] = Field(default_factory=dict)

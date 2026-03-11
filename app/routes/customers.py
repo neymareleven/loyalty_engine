@@ -64,6 +64,12 @@ def list_customers(
     out_items = []
     for c in items:
         data = CustomerOut.model_validate(c).model_dump()
+        if getattr(c, "birth_year", None) and getattr(c, "birth_month", None) and getattr(c, "birth_day", None):
+            data["birthdate"] = f"{int(c.birth_year):04d}-{int(c.birth_month):02d}-{int(c.birth_day):02d}"
+        elif getattr(c, "birth_month", None) and getattr(c, "birth_day", None):
+            data["birthdate"] = f"{int(c.birth_month):02d}-{int(c.birth_day):02d}"
+        else:
+            data["birthdate"] = None
         data["loyalty_status_name"] = tier_name_by_key.get(c.loyalty_status)
         out_items.append(data)
 
@@ -102,6 +108,12 @@ def get_customer(
         else None
     )
     data = CustomerOut.model_validate(customer).model_dump()
+    if getattr(customer, "birth_year", None) and getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
+        data["birthdate"] = f"{int(customer.birth_year):04d}-{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
+    elif getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
+        data["birthdate"] = f"{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
+    else:
+        data["birthdate"] = None
     data["loyalty_status_name"] = tier_name
     return data
 
@@ -123,6 +135,12 @@ def upsert_customer(
         raise HTTPException(status_code=400, detail="properties.gender must be a string")
     gender = payload.gender or (props.get("gender") if isinstance(props.get("gender"), str) else None)
     birthdate = payload.birthdate
+
+    if isinstance(birthdate, str):
+        s = birthdate.strip()
+        if s and not ((len(s) == 10 and s[4] == "-" and s[7] == "-") or (len(s) == 5 and s[2] == "-")):
+            raise HTTPException(status_code=400, detail="birthdate must be in format YYYY-MM-DD or MM-DD")
+
     if not birthdate:
         bd = props.get("birthDate")
         if "birthDate" in props and bd not in (None, "") and not isinstance(bd, (int, float)):
@@ -130,12 +148,15 @@ def upsert_customer(
         if isinstance(bd, (int, float)):
             birthdate = datetime.utcfromtimestamp(float(bd) / 1000.0).date()
 
-    customer = get_or_create_customer(
-        db,
-        brand,
-        profile_id,
-        {"gender": gender, "birthdate": birthdate},
-    )
+    try:
+        customer = get_or_create_customer(
+            db,
+            brand,
+            profile_id,
+            {"gender": gender, "birthdate": birthdate},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     db.commit()
     db.refresh(customer)
 
@@ -148,6 +169,12 @@ def upsert_customer(
         else None
     )
     data = CustomerOut.model_validate(customer).model_dump()
+    if getattr(customer, "birth_year", None) and getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
+        data["birthdate"] = f"{int(customer.birth_year):04d}-{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
+    elif getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
+        data["birthdate"] = f"{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
+    else:
+        data["birthdate"] = None
     data["loyalty_status_name"] = tier_name
     return data
 
