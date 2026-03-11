@@ -41,6 +41,8 @@ app.add_middleware(
         "https://localhost:3000",
         "http://127.0.0.1:3000",
         "https://127.0.0.1:3000",
+        "https://amplify.qilinsa.com",
+        "https://uat.amplify.qilinsa.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
