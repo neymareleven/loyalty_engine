@@ -15,6 +15,9 @@ class Customer(Base):
 
     gender = Column(String(10))      # M / F / OTHER / UNKNOWN
     birthdate = Column(Date)
+    birth_month = Column(Integer)
+    birth_day = Column(Integer)
+    birth_year = Column(Integer)
 
     status = Column(String(20), default="ACTIVE")
     loyalty_status = Column(String(20), nullable=True)

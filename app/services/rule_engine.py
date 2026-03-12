@@ -27,6 +27,44 @@ def _get_by_path(obj, path: str):
     return current
 
 
+def _resolve_system_value(*, key: str, customer):
+    now = datetime.utcnow()
+
+    if key == "now":
+        return now
+    if key == "weekday":
+        return now.weekday()
+
+    if key == "customer_created_days":
+        created_at = getattr(customer, "created_at", None)
+        if not created_at:
+            return None
+        delta = now - created_at
+        return int(delta.total_seconds() // 86400)
+
+    if key == "customer_last_activity_days":
+        last_activity_at = getattr(customer, "last_activity_at", None)
+        if not last_activity_at:
+            return None
+        delta = now - last_activity_at
+        return int(delta.total_seconds() // 86400)
+
+    raise ValueError(f"Unknown system value preset: {key}")
+
+
+def _resolve_expected_value(*, customer, value):
+    if isinstance(value, dict) and "$system" in value:
+        key = value.get("$system")
+        if not isinstance(key, str) or not key:
+            raise ValueError("Invalid system preset: expected non-empty '$system' string")
+        return _resolve_system_value(key=key, customer=customer)
+
+    if isinstance(value, list):
+        return [_resolve_expected_value(customer=customer, value=v) for v in value]
+
+    return value
+
+
 def _as_int(value):
     try:
         if value is None:
@@ -60,6 +98,39 @@ def _as_datetime(value):
     return None
 
 
+def _as_mmdd(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return int(value.month) * 100 + int(value.day)
+    if hasattr(value, "month") and hasattr(value, "day"):
+        try:
+            return int(value.month) * 100 + int(value.day)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        s = value.strip()
+        if len(s) == 5 and s[2] == "-":
+            try:
+                mm = int(s[0:2])
+                dd = int(s[3:5])
+            except Exception:
+                return None
+            if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+                return None
+            return mm * 100 + dd
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            try:
+                mm = int(s[5:7])
+                dd = int(s[8:10])
+            except Exception:
+                return None
+            if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+                return None
+            return mm * 100 + dd
+    return None
+
+
 def _resolve_field_value(*, db: Session, field: str, customer, transaction):
     if not isinstance(field, str) or not field:
         raise ValueError("Condition leaf requires non-empty 'field'")
@@ -74,6 +145,19 @@ def _resolve_field_value(*, db: Session, field: str, customer, transaction):
                 return []
             rows = db.query(CustomerReward.reward_id).filter(CustomerReward.customer_id == customer.id).all()
             return [str(r[0]) for r in rows if r and r[0] is not None]
+        if field == "customer.birthdate":
+            yy = getattr(customer, "birth_year", None)
+            mm = getattr(customer, "birth_month", None)
+            dd = getattr(customer, "birth_day", None)
+            if yy and mm and dd:
+                return f"{int(yy):04d}-{int(mm):02d}-{int(dd):02d}"
+            if mm and dd:
+                return f"{int(mm):02d}-{int(dd):02d}"
+            # Fallback to legacy column if present
+            legacy = getattr(customer, "birthdate", None)
+            if legacy is not None and hasattr(legacy, "month") and hasattr(legacy, "day") and hasattr(legacy, "year"):
+                return f"{int(legacy.year):04d}-{int(legacy.month):02d}-{int(legacy.day):02d}"
+            return None
         return _get_by_path(customer, field[len("customer.") :])
 
     if field.startswith("system."):
@@ -115,6 +199,14 @@ def _op_exists(actual, expected):
 def _compare(*, op: str, actual, expected) -> bool:
     op = (op or "").lower()
 
+    # Partial-birthdate-aware comparisons (month/day)
+    a_mmdd = _as_mmdd(actual)
+    e_mmdd = _as_mmdd(expected)
+    if op in {"eq", "="} and (a_mmdd is not None or e_mmdd is not None):
+        return a_mmdd is not None and e_mmdd is not None and a_mmdd == e_mmdd
+    if op in {"neq", "!=", "ne"} and (a_mmdd is not None or e_mmdd is not None):
+        return not (a_mmdd is not None and e_mmdd is not None and a_mmdd == e_mmdd)
+
     if op in {"eq", "="}:
         return actual == expected
     if op in {"neq", "!=", "ne"}:
@@ -126,6 +218,9 @@ def _compare(*, op: str, actual, expected) -> bool:
     if op == "in":
         if not isinstance(expected, list):
             raise ValueError("Operator 'in' requires list value")
+        if a_mmdd is not None and any(_as_mmdd(v) is not None for v in expected):
+            exp_mmdd = {_as_mmdd(v) for v in expected}
+            return a_mmdd in exp_mmdd
         if isinstance(actual, list):
             return any(a in expected for a in actual)
         return actual in expected
@@ -140,6 +235,13 @@ def _compare(*, op: str, actual, expected) -> bool:
     if op == "between":
         if not isinstance(expected, list) or len(expected) != 2:
             raise ValueError("Operator 'between' requires [lo, hi]")
+
+        if a_mmdd is not None and (_as_mmdd(expected[0]) is not None or _as_mmdd(expected[1]) is not None):
+            lo = _as_mmdd(expected[0])
+            hi = _as_mmdd(expected[1])
+            if lo is None or hi is None:
+                return False
+            return lo <= a_mmdd <= hi
 
         a_dt = _as_datetime(actual)
         if a_dt is not None:
@@ -157,6 +259,16 @@ def _compare(*, op: str, actual, expected) -> bool:
         return lo <= a <= hi
 
     if op in {"gt", "gte", "lt", "lte"}:
+        if a_mmdd is not None and e_mmdd is not None:
+            if op == "gt":
+                return a_mmdd > e_mmdd
+            if op == "gte":
+                return a_mmdd >= e_mmdd
+            if op == "lt":
+                return a_mmdd < e_mmdd
+            if op == "lte":
+                return a_mmdd <= e_mmdd
+
         a_dt = _as_datetime(actual)
         b_dt = _as_datetime(expected)
         if a_dt is not None and b_dt is not None:
@@ -214,7 +326,7 @@ def _evaluate_ast_condition(*, db: Session, customer, transaction, node) -> bool
             op = node.get("op")
         if not op:
             raise ValueError("Condition leaf requires 'operator' (or alias 'op')")
-        value = node.get("value")
+        value = _resolve_expected_value(customer=customer, value=node.get("value"))
         actual = _resolve_field_value(db=db, field=field, customer=customer, transaction=transaction)
         return _compare(op=op, actual=actual, expected=value)
 

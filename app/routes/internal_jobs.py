@@ -33,6 +33,46 @@ def _selector_literal(value):
     return literal(value)
 
 
+def _as_mmdd(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if len(s) == 5 and s[2] == "-":
+            try:
+                mm = int(s[0:2])
+                dd = int(s[3:5])
+            except Exception:
+                return None
+            if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+                return None
+            return mm * 100 + dd
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            try:
+                mm = int(s[5:7])
+                dd = int(s[8:10])
+            except Exception:
+                return None
+            if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+                return None
+            return mm * 100 + dd
+    if hasattr(value, "month") and hasattr(value, "day"):
+        try:
+            return int(value.month) * 100 + int(value.day)
+        except Exception:
+            return None
+    return None
+
+
+def _resolve_selector_value(*, value, today: date, now_utc: datetime):
+    if isinstance(value, dict) and "$system" in value:
+        key = value.get("$system")
+        if key == "now":
+            return now_utc
+        raise HTTPException(status_code=400, detail=f"Unknown system value preset: {key}")
+    return value
+
+
 def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
     if not isinstance(field, str) or not field:
         raise HTTPException(status_code=400, detail="Selector leaf requires non-empty 'field'")
@@ -52,25 +92,12 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
         if key == "last_activity_at":
             return Customer.last_activity_at
         if key == "birthdate":
-            return Customer.birthdate
-
-        if key == "birthdate_month":
-            return extract("month", Customer.birthdate)
-        if key == "birthdate_day":
-            return extract("day", Customer.birthdate)
-        if key == "created_at_month":
-            return extract("month", Customer.created_at)
-        if key == "created_at_day":
-            return extract("day", Customer.created_at)
+            return (Customer.birth_month * 100) + Customer.birth_day
 
         raise HTTPException(status_code=400, detail=f"Unknown selector customer field: {field}")
 
     if field.startswith("system."):
         key = field[len("system.") :]
-        if key == "today_month":
-            return _selector_literal(today.month)
-        if key == "today_day":
-            return _selector_literal(today.day)
         if key == "now":
             return _selector_literal(now_utc)
 
@@ -179,7 +206,19 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
             op = selector.get("op")
         if not op:
             raise HTTPException(status_code=400, detail="Selector leaf requires 'operator' (or alias 'op')")
-        value = selector.get("value")
+        value = _resolve_selector_value(value=selector.get("value"), today=today, now_utc=now_utc)
+
+        if field == "customer.birthdate":
+            op_norm = (op or "").lower()
+            if isinstance(value, list):
+                parsed = [_as_mmdd(v) for v in value]
+                if any(v is None for v in parsed):
+                    raise HTTPException(status_code=400, detail="customer.birthdate values must be in format YYYY-MM-DD or MM-DD")
+                value = parsed
+            else:
+                value = _as_mmdd(value)
+                if op_norm != "exists" and value is None:
+                    raise HTTPException(status_code=400, detail="customer.birthdate must be in format YYYY-MM-DD or MM-DD")
 
         expr = _resolve_selector_field(field=field, today=today, now_utc=now_utc)
         return _selector_compare(op=op, expr=expr, value=value)
@@ -428,6 +467,10 @@ def create_internal_job(
 
     schedule_dict = payload.schedule.model_dump() if payload.schedule is not None else None
 
+    name_in = (payload.name or "").strip() or None
+    if not name_in:
+        raise HTTPException(status_code=400, detail="name is required")
+
     job_key_in = (payload.job_key or "").strip() or None
     job_key = job_key_in or _slug_key(payload.transaction_type)
     base = job_key
@@ -441,9 +484,20 @@ def create_internal_job(
         i += 1
         job_key = f"{base}_{i}"
 
+    existing_name = (
+        db.query(InternalJob.id)
+        .filter(InternalJob.brand == active_brand)
+        .filter(InternalJob.name == name_in)
+        .first()
+    )
+    if existing_name:
+        raise HTTPException(status_code=400, detail="Internal job name already exists")
+
     job = InternalJob(
         job_key=job_key,
         brand=active_brand,
+        name=name_in,
+        description=((payload.description or "").strip() or None),
         transaction_type=payload.transaction_type,
         selector=payload.selector or {},
         payload_template=payload.payload_template,
@@ -494,6 +548,21 @@ def update_internal_job(
 
     data = payload.model_dump(exclude_unset=True)
 
+    if "name" in data:
+        name_in = (data.get("name") or "").strip() or None
+        if not name_in:
+            raise HTTPException(status_code=400, detail="name is required")
+        existing_name = (
+            db.query(InternalJob.id)
+            .filter(InternalJob.brand == active_brand)
+            .filter(InternalJob.name == name_in)
+            .filter(InternalJob.id != job.id)
+            .first()
+        )
+        if existing_name:
+            raise HTTPException(status_code=400, detail="Internal job name already exists")
+        data["name"] = name_in
+
     if "schedule" in data and data["schedule"] is not None:
         fn = getattr(data["schedule"], "model_dump", None)
         if callable(fn):
@@ -519,6 +588,8 @@ def update_internal_job(
     for k, v in data.items():
         if k == "brand":
             continue
+        if k in {"name", "description"} and isinstance(v, str):
+            v = v.strip() or None
         setattr(job, k, v)
 
     if "schedule" in data or "active" in data or "first_run_at" in data or "start_in_seconds" in data:

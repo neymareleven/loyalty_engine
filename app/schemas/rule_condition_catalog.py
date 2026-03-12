@@ -18,7 +18,16 @@ def get_rule_conditions_catalog():
                 },
                 "allowCreate": True,
             },
-            "value": {"widget": "json"},
+            "value": {
+                "widget": "json",
+                "presetsDatasource": {
+                    "endpoint": "/admin/rules/ui-options/condition-fields",
+                    "method": "GET",
+                    "brandVia": "X-Brand",
+                    "path": "valuePresets",
+                    "dependsOn": {"transaction_type": "transaction_type"},
+                },
+            },
         },
         "conditions": [
             {

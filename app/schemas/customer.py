@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 class CustomerCreate(BaseModel):
     gender: Optional[str] = None
-    birthdate: Optional[date] = None
+    birthdate: Optional[str] = None
 
 
 class CustomerUpsert(BaseModel):
@@ -20,7 +20,7 @@ class CustomerUpsert(BaseModel):
     properties: Optional[Dict[str, Any]] = None
 
     gender: Optional[str] = None
-    birthdate: Optional[date] = None
+    birthdate: Optional[str] = None
 
 
 class CustomerOut(BaseModel):
@@ -29,7 +29,7 @@ class CustomerOut(BaseModel):
     profile_id: str
 
     gender: Optional[str] = None
-    birthdate: Optional[date] = None
+    birthdate: Optional[date | str] = None
     
     status: str
     loyalty_status: Optional[str] = None

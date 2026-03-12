@@ -16,7 +16,19 @@ router = APIRouter(prefix="/imports", tags=["imports"])
 def _parse_date(value: str | None):
     if not value:
         return None
-    return date.fromisoformat(value)
+    s = str(value).strip()
+    if not s:
+        return None
+
+    # YYYY-MM-DD
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return date.fromisoformat(s)
+
+    # MM-DD (partial birthdate)
+    if len(s) == 5 and s[2] == "-":
+        return s
+
+    raise ValueError("birthdate must be in format YYYY-MM-DD or MM-DD")
 
 
 @router.post("/customers")
