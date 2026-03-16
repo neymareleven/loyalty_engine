@@ -505,7 +505,7 @@ def list_ui_options_loyalty_tiers(
     q = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand)
     if active is not None:
         q = q.filter(LoyaltyTier.active.is_(active))
-    items = q.order_by(LoyaltyTier.rank.asc()).all()
+    items = q.order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc()).all()
     return {
         "brand": brand,
         "items": [
@@ -732,7 +732,7 @@ def get_rules_ui_bundle(
 ):
     rewards = db.query(Reward).filter(Reward.brand == brand).order_by(Reward.name.asc()).all()
     event_types = db.query(TransactionType).filter(TransactionType.brand == brand).order_by(TransactionType.key.asc()).all()
-    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
+    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc()).all()
     return {
         "brand": brand,
         "rules": {"uiCatalog": get_rules_ui_catalog()},

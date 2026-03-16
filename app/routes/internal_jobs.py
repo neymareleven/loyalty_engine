@@ -383,7 +383,12 @@ def get_internal_jobs_ui_bundle(
         .order_by(TransactionType.key.asc())
         .all()
     )
-    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc()).all()
+    tiers = (
+        db.query(LoyaltyTier)
+        .filter(LoyaltyTier.brand == brand)
+        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
+        .all()
+    )
     return {
         "brand": brand,
         "uiCatalog": get_internal_jobs_ui_catalog(),

@@ -388,20 +388,17 @@ def get_customer_loyalty(
         db.query(LoyaltyTier)
         .filter(LoyaltyTier.brand == brand)
         .filter(LoyaltyTier.active.is_(True))
-        .order_by(LoyaltyTier.rank.asc(), LoyaltyTier.min_status_points.asc())
+        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
         .all()
     )
 
     current_key = customer.loyalty_status
     current_tier = next((t for t in tiers if t.key == current_key), None)
-    current_rank = int(current_tier.rank) if current_tier else None
+    current_min = int(current_tier.min_status_points) if current_tier else None
 
     next_tier = None
-    if current_rank is not None:
-        next_tier = next(
-            (t for t in tiers if int(t.rank) > current_rank),
-            None,
-        )
+    if current_min is not None:
+        next_tier = next((t for t in tiers if int(t.min_status_points) > current_min), None)
     elif tiers:
         # If current tier isn't found, best-effort: choose the first tier above current status_points.
         sp = int(customer.status_points or 0)
