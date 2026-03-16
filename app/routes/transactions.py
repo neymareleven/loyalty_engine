@@ -74,6 +74,66 @@ def list_transactions(
     )
 
 
+@router.get("/by-user", response_model=list[TransactionOut])
+def list_transactions_by_user(
+    brand: str,
+    profileId: str,
+    active_brand: str = Depends(get_active_brand),
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+
+    q = (
+        db.query(Transaction)
+        .filter(Transaction.brand == active_brand)
+        .filter(Transaction.profile_id == profileId)
+    )
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    return (
+        q.order_by(Transaction.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get("/by-user-and-type", response_model=list[TransactionOut])
+def list_transactions_by_user_and_type(
+    brand: str,
+    transactionType: str,
+    profileId: str,
+    active_brand: str = Depends(get_active_brand),
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+
+    q = (
+        db.query(Transaction)
+        .filter(Transaction.brand == active_brand)
+        .filter(Transaction.profile_id == profileId)
+        .filter(Transaction.transaction_type == transactionType)
+    )
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    return (
+        q.order_by(Transaction.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
 @router.get("/{transaction_id}", response_model=TransactionOut)
 def get_transaction(
     transaction_id: str,
