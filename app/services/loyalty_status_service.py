@@ -23,21 +23,24 @@ def compute_loyalty_status_from_tiers(db: Session, brand: str, status_points: in
     return None
 
 
-def _get_tier_rank(db: Session, brand: str, tier_key: str) -> int:
+def _get_tier_min_points(db: Session, brand: str, tier_key: str) -> int | None:
     if not tier_key:
-        return 0
+        return None
 
     tier = (
-        db.query(LoyaltyTier)
+        db.query(LoyaltyTier.min_status_points)
         .filter(LoyaltyTier.brand == brand)
         .filter(LoyaltyTier.active.is_(True))
         .filter(LoyaltyTier.key == tier_key)
         .first()
     )
-    if tier:
-        return int(tier.rank)
+    if not tier:
+        return None
 
-    return 0
+    try:
+        return int(tier[0])
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -61,9 +64,9 @@ def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS"
         customer.loyalty_status = new_status
         db.flush()
 
-        old_rank = _get_tier_rank(db, customer.brand, old_status)
-        new_rank = _get_tier_rank(db, customer.brand, new_status)
-        transaction_type = "TIER_UPGRADED" if new_rank > old_rank else "TIER_DOWNGRADED"
+        old_min = _get_tier_min_points(db, customer.brand, old_status)
+        new_min = _get_tier_min_points(db, customer.brand, new_status)
+        transaction_type = "TIER_UPGRADED" if (new_min is not None and (old_min is None or new_min > old_min)) else "TIER_DOWNGRADED"
 
         from app.models.event_type import TransactionType
         from app.services.transaction_service import create_internal_transaction
