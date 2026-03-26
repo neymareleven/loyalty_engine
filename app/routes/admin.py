@@ -19,6 +19,7 @@ from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.reward_service import expire_rewards
 from app.services.loyalty_settings_service import get_or_create_loyalty_settings
+from app.services.loyalty_validity_service import initialize_validity_windows_for_existing_customers
 from app.schemas.loyalty_settings import LoyaltySettingsOut, LoyaltySettingsUpdate
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
 from app.schemas.rule import RuleCreate, RuleUpdate
@@ -56,6 +57,9 @@ def update_loyalty_settings(
 ):
     obj = get_or_create_loyalty_settings(db, brand=brand)
 
+    prev_points_days = obj.points_validity_days
+    prev_status_days = obj.loyalty_status_validity_days
+
     data = payload.model_dump(exclude_unset=True)
     if "points_validity_days" in data and data["points_validity_days"] is not None:
         try:
@@ -78,6 +82,12 @@ def update_loyalty_settings(
         obj.loyalty_status_validity_days = v
     elif "loyalty_status_validity_days" in data and data["loyalty_status_validity_days"] is None:
         obj.loyalty_status_validity_days = None
+
+    should_backfill_points = obj.points_validity_days is not None and prev_points_days is None
+    should_backfill_status = obj.loyalty_status_validity_days is not None and prev_status_days is None
+
+    if should_backfill_points or should_backfill_status:
+        initialize_validity_windows_for_existing_customers(db, brand=brand)
 
     db.commit()
     db.refresh(obj)
