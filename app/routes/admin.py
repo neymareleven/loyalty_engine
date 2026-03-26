@@ -1,14 +1,25 @@
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 from typing import Any
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
+from app.models.customer_reward import CustomerReward
 from app.models.event_type import TransactionType
+from app.models.internal_job import InternalJob
 from app.models.loyalty_tier import LoyaltyTier
+from app.models.point_movement import PointMovement
+from app.models.rule import Rule
 from app.models.reward import Reward
+from app.models.transaction import Transaction
+from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.reward_service import expire_rewards
+from app.services.loyalty_settings_service import get_or_create_loyalty_settings
+from app.schemas.loyalty_settings import LoyaltySettingsOut, LoyaltySettingsUpdate
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
 from app.schemas.rule import RuleCreate, RuleUpdate
 from app.schemas.rule_action_catalog import (
@@ -21,6 +32,384 @@ from app.schemas.rule_action_catalog import (
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/loyalty-settings", response_model=LoyaltySettingsOut)
+def get_loyalty_settings(
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    obj = get_or_create_loyalty_settings(db, brand=brand)
+    db.commit()
+    return {
+        "brand": obj.brand,
+        "points_validity_days": obj.points_validity_days,
+        "loyalty_status_validity_days": obj.loyalty_status_validity_days,
+    }
+
+
+@router.patch("/loyalty-settings", response_model=LoyaltySettingsOut)
+def update_loyalty_settings(
+    payload: LoyaltySettingsUpdate,
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    obj = get_or_create_loyalty_settings(db, brand=brand)
+
+    data = payload.model_dump(exclude_unset=True)
+    if "points_validity_days" in data and data["points_validity_days"] is not None:
+        try:
+            v = int(data["points_validity_days"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="points_validity_days must be an integer")
+        if v < 0:
+            raise HTTPException(status_code=400, detail="points_validity_days must be >= 0")
+        obj.points_validity_days = v
+    elif "points_validity_days" in data and data["points_validity_days"] is None:
+        obj.points_validity_days = None
+
+    if "loyalty_status_validity_days" in data and data["loyalty_status_validity_days"] is not None:
+        try:
+            v = int(data["loyalty_status_validity_days"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="loyalty_status_validity_days must be an integer")
+        if v < 0:
+            raise HTTPException(status_code=400, detail="loyalty_status_validity_days must be >= 0")
+        obj.loyalty_status_validity_days = v
+    elif "loyalty_status_validity_days" in data and data["loyalty_status_validity_days"] is None:
+        obj.loyalty_status_validity_days = None
+
+    db.commit()
+    db.refresh(obj)
+    return {
+        "brand": obj.brand,
+        "points_validity_days": obj.points_validity_days,
+        "loyalty_status_validity_days": obj.loyalty_status_validity_days,
+    }
+
+
+@router.get("/brand-kpis")
+def get_brand_kpis(
+    windowDays: int = 30,
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    try:
+        windowDays = int(windowDays or 30)
+    except Exception:
+        raise HTTPException(status_code=400, detail="windowDays must be an integer")
+    if windowDays not in {7, 30}:
+        raise HTTPException(status_code=400, detail="windowDays must be 7 or 30")
+
+    now = datetime.utcnow()
+    window_from = now - timedelta(days=windowDays)
+
+    total_customers = (
+        db.query(func.count(Customer.id))
+        .filter(Customer.brand == brand)
+        .scalar()
+        or 0
+    )
+    new_customers = (
+        db.query(func.count(Customer.id))
+        .filter(Customer.brand == brand)
+        .filter(Customer.created_at >= window_from)
+        .scalar()
+        or 0
+    )
+    active_customers = (
+        db.query(func.count(Customer.id))
+        .filter(Customer.brand == brand)
+        .filter(Customer.last_activity_at.isnot(None))
+        .filter(Customer.last_activity_at >= window_from)
+        .scalar()
+        or 0
+    )
+    configured_customers = (
+        db.query(func.count(Customer.id))
+        .filter(Customer.brand == brand)
+        .filter(Customer.loyalty_status.isnot(None))
+        .filter(Customer.loyalty_status != "UNCONFIGURED")
+        .scalar()
+        or 0
+    )
+    by_status_rows = (
+        db.query(Customer.loyalty_status, func.count(Customer.id))
+        .filter(Customer.brand == brand)
+        .group_by(Customer.loyalty_status)
+        .all()
+    )
+    customers_by_loyalty_status = [
+        {"key": (row[0] or "UNCONFIGURED"), "count": int(row[1] or 0)} for row in by_status_rows
+    ]
+
+    ingested_in_window = (
+        db.query(func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .scalar()
+        or 0
+    )
+    tx_by_status_rows = (
+        db.query(Transaction.status, func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .group_by(Transaction.status)
+        .all()
+    )
+    tx_by_status = [
+        {"status": (row[0] or "UNKNOWN"), "count": int(row[1] or 0)} for row in tx_by_status_rows
+    ]
+
+    top_types_rows = (
+        db.query(Transaction.transaction_type, func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .group_by(Transaction.transaction_type)
+        .order_by(desc(func.count(Transaction.id)))
+        .limit(10)
+        .all()
+    )
+    top_types = [
+        {"transactionType": (row[0] or "UNKNOWN"), "count": int(row[1] or 0)} for row in top_types_rows
+    ]
+
+    top_error_codes_rows = (
+        db.query(Transaction.error_code, func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .filter(Transaction.error_code.isnot(None))
+        .filter(Transaction.error_code != "TRANSACTION_TYPE_CREATED")
+        .group_by(Transaction.error_code)
+        .order_by(desc(func.count(Transaction.id)))
+        .limit(10)
+        .all()
+    )
+    top_error_codes = [
+        {"errorCode": row[0], "count": int(row[1] or 0)} for row in top_error_codes_rows if row[0]
+    ]
+
+    no_rules_count = (
+        db.query(func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .filter(Transaction.error_code == "NO_RULES")
+        .scalar()
+        or 0
+    )
+    rules_applied_count = max(0, int(ingested_in_window) - int(no_rules_count))
+    blocked_customer_not_found = (
+        db.query(func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .filter(Transaction.error_code == "CUSTOMER_NOT_FOUND")
+        .scalar()
+        or 0
+    )
+
+    active_rules = (
+        db.query(func.count(Rule.id))
+        .filter(Rule.brand == brand)
+        .filter(Rule.active.is_(True))
+        .scalar()
+        or 0
+    )
+
+    exec_window = (
+        db.query(TransactionRuleExecution)
+        .join(Transaction, Transaction.id == TransactionRuleExecution.transaction_id)
+        .filter(Transaction.brand == brand)
+        .filter(TransactionRuleExecution.executed_at >= window_from)
+    )
+    executions_in_window = exec_window.with_entities(func.count(TransactionRuleExecution.id)).scalar() or 0
+    exec_by_result_rows = (
+        exec_window.with_entities(TransactionRuleExecution.result, func.count(TransactionRuleExecution.id))
+        .group_by(TransactionRuleExecution.result)
+        .all()
+    )
+    exec_by_result = [
+        {"result": (row[0] or "UNKNOWN"), "count": int(row[1] or 0)} for row in exec_by_result_rows
+    ]
+    top_failed_rules_rows = (
+        exec_window.with_entities(TransactionRuleExecution.rule_id, func.count(TransactionRuleExecution.id))
+        .filter(TransactionRuleExecution.result == "FAILED")
+        .filter(TransactionRuleExecution.rule_id.isnot(None))
+        .group_by(TransactionRuleExecution.rule_id)
+        .order_by(desc(func.count(TransactionRuleExecution.id)))
+        .limit(10)
+        .all()
+    )
+    top_failed_rules = [
+        {"ruleId": str(row[0]), "count": int(row[1] or 0)} for row in top_failed_rules_rows if row[0]
+    ]
+
+    pm_window = (
+        db.query(PointMovement)
+        .join(Customer, Customer.id == PointMovement.customer_id)
+        .filter(Customer.brand == brand)
+        .filter(PointMovement.created_at >= window_from)
+    )
+    points_issued = (
+        pm_window.with_entities(func.coalesce(func.sum(PointMovement.points), 0))
+        .filter(PointMovement.points > 0)
+        .scalar()
+        or 0
+    )
+    points_burned_signed = (
+        pm_window.with_entities(func.coalesce(func.sum(PointMovement.points), 0))
+        .filter(PointMovement.points < 0)
+        .scalar()
+        or 0
+    )
+    points_burned = abs(int(points_burned_signed or 0))
+    points_net = int(points_issued or 0) - int(points_burned or 0)
+
+    rewards_active_now = (
+        db.query(func.count(CustomerReward.id))
+        .join(Customer, Customer.id == CustomerReward.customer_id)
+        .filter(Customer.brand == brand)
+        .filter(CustomerReward.status == "ISSUED")
+        .scalar()
+        or 0
+    )
+    rewards_issued_in_window = (
+        db.query(func.count(CustomerReward.id))
+        .join(Customer, Customer.id == CustomerReward.customer_id)
+        .filter(Customer.brand == brand)
+        .filter(CustomerReward.issued_at >= window_from)
+        .scalar()
+        or 0
+    )
+    rewards_used_in_window = (
+        db.query(func.count(CustomerReward.id))
+        .join(Customer, Customer.id == CustomerReward.customer_id)
+        .filter(Customer.brand == brand)
+        .filter(CustomerReward.used_at.isnot(None))
+        .filter(CustomerReward.used_at >= window_from)
+        .scalar()
+        or 0
+    )
+    rewards_expired_in_window = (
+        db.query(func.count(CustomerReward.id))
+        .join(Customer, Customer.id == CustomerReward.customer_id)
+        .filter(Customer.brand == brand)
+        .filter(CustomerReward.status == "EXPIRED")
+        .filter(CustomerReward.expires_at.isnot(None))
+        .filter(CustomerReward.expires_at >= window_from)
+        .scalar()
+        or 0
+    )
+
+    tier_upgraded = (
+        db.query(func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .filter(Transaction.transaction_type == "TIER_UPGRADED")
+        .scalar()
+        or 0
+    )
+    tier_downgraded = (
+        db.query(func.count(Transaction.id))
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.created_at >= window_from)
+        .filter(Transaction.transaction_type == "TIER_DOWNGRADED")
+        .scalar()
+        or 0
+    )
+
+    jobs_base = (
+        db.query(InternalJob)
+        .filter(InternalJob.brand == brand)
+        .filter(InternalJob.job_key != "MAINT_EXPIRE_REWARDS")
+    )
+    jobs_active = jobs_base.filter(InternalJob.active.is_(True))
+    active_jobs_count = jobs_active.with_entities(func.count(InternalJob.id)).scalar() or 0
+    failing_jobs_count = (
+        jobs_active.with_entities(func.count(InternalJob.id))
+        .filter(InternalJob.last_status == "FAILED")
+        .scalar()
+        or 0
+    )
+    overdue_jobs_count = (
+        jobs_active.with_entities(func.count(InternalJob.id))
+        .filter(InternalJob.next_run_at.isnot(None))
+        .filter(InternalJob.next_run_at < now)
+        .scalar()
+        or 0
+    )
+    jobs_items = (
+        jobs_active.order_by(InternalJob.next_run_at.asc(), InternalJob.created_at.asc())
+        .limit(20)
+        .all()
+    )
+    jobs_out = [
+        {
+            "id": str(j.id),
+            "name": j.name,
+            "jobKey": j.job_key,
+            "transactionType": j.transaction_type,
+            "active": bool(j.active),
+            "nextRunAt": j.next_run_at,
+            "lastRunAt": j.last_run_at,
+            "lastStatus": j.last_status,
+            "lastError": j.last_error,
+        }
+        for j in jobs_items
+    ]
+
+    return {
+        "brand": brand,
+        "windowDays": windowDays,
+        "window": {
+            "from": window_from,
+            "to": now,
+        },
+        "customers": {
+            "total": int(total_customers),
+            "newInWindow": int(new_customers),
+            "activeInWindow": int(active_customers),
+            "withLoyaltyStatusConfigured": int(configured_customers),
+            "byLoyaltyStatus": customers_by_loyalty_status,
+        },
+        "transactions": {
+            "ingestedInWindow": int(ingested_in_window),
+            "byStatus": tx_by_status,
+            "topTypesInWindow": top_types,
+            "topErrorCodesInWindow": top_error_codes,
+            "noRulesCountInWindow": int(no_rules_count),
+            "rulesAppliedCountInWindow": int(rules_applied_count),
+            "blockedCustomerNotFoundInWindow": int(blocked_customer_not_found),
+        },
+        "rules": {
+            "activeRules": int(active_rules),
+            "executionsInWindow": int(executions_in_window),
+            "byResultInWindow": exec_by_result,
+            "topFailedRulesInWindow": top_failed_rules,
+        },
+        "loyalty": {
+            "points": {
+                "issuedInWindow": int(points_issued),
+                "burnedInWindow": int(points_burned),
+                "netInWindow": int(points_net),
+            },
+            "rewards": {
+                "activeNow": int(rewards_active_now),
+                "issuedInWindow": int(rewards_issued_in_window),
+                "usedInWindow": int(rewards_used_in_window),
+                "expiredInWindow": int(rewards_expired_in_window),
+            },
+            "tierEventsInWindow": {
+                "upgraded": int(tier_upgraded),
+                "downgraded": int(tier_downgraded),
+            },
+        },
+        "internalJobs": {
+            "active": int(active_jobs_count),
+            "failing": int(failing_jobs_count),
+            "overdue": int(overdue_jobs_count),
+            "items": jobs_out,
+        },
+    }
 
 
 def _json_schema_paths(schema: Any, *, prefix: str) -> list[str]:

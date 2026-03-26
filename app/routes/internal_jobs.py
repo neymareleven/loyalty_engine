@@ -24,7 +24,7 @@ router = APIRouter(prefix="/admin/internal-jobs", tags=["admin-internal-jobs"])
 
 
 def _is_system_managed_job(job: InternalJob) -> bool:
-    return job.job_key == "MAINT_EXPIRE_REWARDS"
+    return job.job_key in {"MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"}
 
 
 def _selector_literal(value):
@@ -222,6 +222,45 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
 
         expr = _resolve_selector_field(field=field, today=today, now_utc=now_utc)
         return _selector_compare(op=op, expr=expr, value=value)
+
+    # Legacy selector support (backward compatibility)
+    if selector.get("all") is True or selector.get("any") is True:
+        return None
+
+    if "status_in" in selector:
+        values = selector.get("status_in")
+        if not isinstance(values, list) or not values:
+            raise HTTPException(status_code=400, detail="Legacy selector 'status_in' requires a non-empty list")
+        return Customer.status.in_(values)
+
+    if "loyalty_status_in" in selector:
+        values = selector.get("loyalty_status_in")
+        if not isinstance(values, list) or not values:
+            raise HTTPException(status_code=400, detail="Legacy selector 'loyalty_status_in' requires a non-empty list")
+        return Customer.loyalty_status.in_(values)
+
+    if selector.get("birthdate_today") is True:
+        return ((Customer.birth_month * 100) + Customer.birth_day) == ((today.month * 100) + today.day)
+
+    if selector.get("created_anniversary_today") is True:
+        return (extract("month", Customer.created_at) == today.month) & (extract("day", Customer.created_at) == today.day)
+
+    if "inactive_days_gte" in selector:
+        try:
+            days = int(selector.get("inactive_days_gte"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Legacy selector 'inactive_days_gte' must be an integer")
+        cutoff = now_utc - timedelta(days=days)
+        from sqlalchemy import or_
+
+        return or_(Customer.last_activity_at.is_(None), Customer.last_activity_at <= cutoff)
+
+    if "lifetime_points_gte" in selector:
+        try:
+            pts = int(selector.get("lifetime_points_gte"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Legacy selector 'lifetime_points_gte' must be an integer")
+        return Customer.lifetime_points >= pts
 
     # Legacy guard (explicit)
     legacy_keys = {
@@ -441,7 +480,11 @@ def list_internal_jobs(
     active: bool | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(InternalJob).filter(InternalJob.brand == active_brand).filter(InternalJob.job_key != "MAINT_EXPIRE_REWARDS")
+    q = (
+        db.query(InternalJob)
+        .filter(InternalJob.brand == active_brand)
+        .filter(InternalJob.job_key.notin_(["MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"]))
+    )
     if active is not None:
         q = q.filter(InternalJob.active.is_(active))
     return q.order_by(InternalJob.created_at.desc()).all()
@@ -455,7 +498,7 @@ def create_internal_job(
 ):
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
-    if payload.job_key == "MAINT_EXPIRE_REWARDS":
+    if payload.job_key in {"MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"}:
         raise HTTPException(status_code=400, detail="This internal job is system-managed")
     q = (
         db.query(TransactionType.id)

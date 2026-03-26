@@ -1,10 +1,11 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 
 from app.models.point_movement import PointMovement
 from app.models.customer import Customer
 from app.services.loyalty_status_service import update_customer_status
+from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.wallet_service import get_points_balance
 
 
@@ -28,10 +29,16 @@ def earn_points(
     if points <= 0:
         return None
 
-    expires_at = date.today() + timedelta(days=365)
+    settings = get_loyalty_settings(db, brand=customer.brand)
+    points_days = getattr(settings, "points_validity_days", None) if settings else None
+    expires_at = (date.today() + timedelta(days=int(points_days))) if points_days is not None else None
 
     # 🔹 sécuriser le customer attaché à la session
     customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
+
+    customer.points_expires_at = (
+        (datetime.utcnow() + timedelta(days=int(points_days))) if points_days is not None else None
+    )
 
     movement = PointMovement(
         customer_id=customer.id,

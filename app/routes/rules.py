@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -48,6 +49,15 @@ def create_rule(
     )
     if not exists:
         raise HTTPException(status_code=400, detail="Unknown or inactive transaction_type. Create it in /admin/transaction-types first.")
+
+    dup = (
+        db.query(Rule.id)
+        .filter(Rule.brand == active_brand)
+        .filter(func.lower(Rule.name) == func.lower(payload.name))
+        .first()
+    )
+    if dup:
+        raise HTTPException(status_code=400, detail="A rule with this name already exists for this brand")
 
     rule = Rule(
         brand=active_brand,
@@ -101,6 +111,18 @@ def update_rule(
     data = payload.model_dump(exclude_unset=True)
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
+
+    if "name" in data and data["name"] is not None:
+        new_name = str(data["name"])
+        dup = (
+            db.query(Rule.id)
+            .filter(Rule.brand == active_brand)
+            .filter(func.lower(Rule.name) == func.lower(new_name))
+            .filter(Rule.id != rule_id)
+            .first()
+        )
+        if dup:
+            raise HTTPException(status_code=400, detail="A rule with this name already exists for this brand")
 
     for k, v in data.items():
         if k == "brand":
