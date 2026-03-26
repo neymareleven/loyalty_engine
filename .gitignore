@@ -2,10 +2,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-.venv/
-.venv
-venv/
-env/
+.myvenv/
+.myvenv
+myvenv/
+myenv/
 
 .env
 .env.*
