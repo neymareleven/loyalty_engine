@@ -2,6 +2,7 @@ from uuid import UUID
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -103,6 +104,7 @@ def _validate_tier_payload(
     name: str,
     rank: int,
     min_status_points: int,
+    active: bool,
 ):
     if not (name and str(name).strip()):
         raise HTTPException(status_code=400, detail="Level name is required")
@@ -140,11 +142,11 @@ def _validate_tier_payload(
     simulated = []
     for t in tiers:
         if tier_id is not None and t.id == tier_id:
-            simulated.append({"min": min_i, "key": key})
+            simulated.append({"min": min_i, "key": key, "active": bool(active)})
         else:
-            simulated.append({"min": int(t.min_status_points), "key": t.key})
+            simulated.append({"min": int(t.min_status_points), "key": t.key, "active": bool(t.active)})
     if tier_id is None:
-        simulated.append({"min": min_i, "key": key})
+        simulated.append({"min": min_i, "key": key, "active": bool(active)})
 
     simulated.sort(key=lambda x: x["min"])
     for prev, cur in zip(simulated, simulated[1:]):
@@ -153,6 +155,13 @@ def _validate_tier_payload(
                 status_code=400,
                 detail="Invalid levels configuration: minimum status points must be unique and strictly increasing",
             )
+
+    active_zero = any((t["active"] is True) and int(t["min"]) == 0 for t in simulated)
+    if not active_zero:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid levels configuration: you must have at least one active level with min_status_points=0",
+        )
 
 
 @router.get("", response_model=list[LoyaltyTierOut])
@@ -200,6 +209,7 @@ def create_loyalty_tier(
         name=payload.name,
         rank=0,
         min_status_points=payload.min_status_points,
+        active=payload.active,
     )
 
     obj = LoyaltyTier(
@@ -262,6 +272,7 @@ def update_loyalty_tier(
     final_key = data.get("key", obj.key)
     final_name = data.get("name", obj.name)
     final_min = data.get("min_status_points", obj.min_status_points)
+    final_active = data.get("active", obj.active)
     _validate_tier_payload(
         db=db,
         brand=active_brand,
@@ -270,6 +281,7 @@ def update_loyalty_tier(
         name=final_name,
         rank=0,
         min_status_points=final_min,
+        active=final_active,
     )
 
     for k, v in data.items():
@@ -300,6 +312,22 @@ def delete_loyalty_tier(
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Tier not found")
 
+    if bool(obj.active) and int(obj.min_status_points) == 0:
+        remaining_active_zero = (
+            db.query(func.count(LoyaltyTier.id))
+            .filter(LoyaltyTier.brand == active_brand)
+            .filter(LoyaltyTier.active.is_(True))
+            .filter(LoyaltyTier.min_status_points == 0)
+            .filter(LoyaltyTier.id != obj.id)
+            .scalar()
+            or 0
+        )
+        if int(remaining_active_zero) <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="You cannot delete the last active level with min_status_points=0",
+            )
+
     db.delete(obj)
     db.commit()
 
@@ -315,3 +343,81 @@ def recompute_customers_loyalty_status(
     db: Session = Depends(get_db),
 ):
     return _recompute_customers(db, active_brand)
+
+
+@router.post("/ensure-base-tier", response_model=LoyaltyTierOut)
+def ensure_base_loyalty_tier(
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    existing = (
+        db.query(LoyaltyTier)
+        .filter(LoyaltyTier.brand == active_brand)
+        .filter(LoyaltyTier.min_status_points == 0)
+        .first()
+    )
+    if existing:
+        if not bool(existing.active):
+            _validate_tier_payload(
+                db=db,
+                brand=active_brand,
+                tier_id=existing.id,
+                key=existing.key,
+                name=existing.name,
+                rank=0,
+                min_status_points=0,
+                active=True,
+            )
+            existing.active = True
+            db.flush()
+            _recompute_tier_ranks(db, active_brand)
+            db.commit()
+            db.refresh(existing)
+
+            if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
+                _recompute_customers(db, active_brand)
+
+        return existing
+
+    name = "Base"
+    key = _slug_key(name)
+    base = key
+    i = 1
+    while (
+        db.query(LoyaltyTier.id)
+        .filter(LoyaltyTier.brand == active_brand)
+        .filter(LoyaltyTier.key == key)
+        .first()
+    ):
+        i += 1
+        key = f"{base}_{i}"
+
+    _validate_tier_payload(
+        db=db,
+        brand=active_brand,
+        tier_id=None,
+        key=key,
+        name=name,
+        rank=0,
+        min_status_points=0,
+        active=True,
+    )
+
+    obj = LoyaltyTier(
+        brand=active_brand,
+        key=key,
+        name=name,
+        min_status_points=0,
+        rank=0,
+        active=True,
+    )
+    db.add(obj)
+    db.flush()
+    _recompute_tier_ranks(db, active_brand)
+    db.commit()
+    db.refresh(obj)
+
+    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
+        _recompute_customers(db, active_brand)
+
+    return obj

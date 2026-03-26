@@ -96,6 +96,24 @@ def run_internal_job_once(
         expired = expire_rewards(db, brand=job.brand)
         return MaintenanceJobRunStats(expired=int(expired))
 
+    if job.job_key == "MAINT_EXPIRE_POINTS":
+        if not job.brand:
+            raise ValueError("MAINT_EXPIRE_POINTS requires job.brand")
+
+        from app.services.loyalty_validity_service import expire_points
+
+        expired = expire_points(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(expired))
+
+    if job.job_key == "MAINT_EXPIRE_LOYALTY_STATUS":
+        if not job.brand:
+            raise ValueError("MAINT_EXPIRE_LOYALTY_STATUS requires job.brand")
+
+        from app.services.loyalty_validity_service import expire_loyalty_status
+
+        expired = expire_loyalty_status(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(expired))
+
     today: date = now.date()
 
     q = db.query(Customer)

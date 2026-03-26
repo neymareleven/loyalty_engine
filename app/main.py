@@ -19,6 +19,7 @@ from app.models.customer_reward import CustomerReward
 from app.models.internal_job import InternalJob
 from app.models.event_type import TransactionType
 from app.models.loyalty_tier import LoyaltyTier
+from app.models.brand_loyalty_settings import BrandLoyaltySettings
 
 from app.routes.wallet import router as wallet_router
 from app.routes.customers import router as customers_router

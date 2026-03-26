@@ -27,5 +27,10 @@ class Customer(Base):
     last_activity_at = Column(TIMESTAMP)
     status_points_reset_at = Column(TIMESTAMP)
 
+    points_expires_at = Column(TIMESTAMP)
+
+    loyalty_status_assigned_at = Column(TIMESTAMP)
+    loyalty_status_expires_at = Column(TIMESTAMP)
+
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())

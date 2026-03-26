@@ -227,10 +227,6 @@ def create_transaction(db: Session, event_data):
         db.add(tt)
         db.commit()
 
-        transaction.error_code = "TRANSACTION_TYPE_CREATED"
-        transaction.error_message = "TransactionType was missing in catalog and was created."
-        db.commit()
-
     auto_update_schema = (os.getenv("AUTO_UPDATE_TRANSACTIONTYPE_PAYLOAD_SCHEMA", "true") or "true").strip().lower() in {
         "1",
         "true",

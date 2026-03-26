@@ -67,29 +67,38 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
 
     default_schedule = {"type": "cron", "cron": "0 0 * * *", "timezone": "UTC"}
 
+    job_names = {
+        "MAINT_EXPIRE_REWARDS": "Maintenance: Expire Rewards",
+        "MAINT_EXPIRE_POINTS": "Maintenance: Expire Points",
+        "MAINT_EXPIRE_LOYALTY_STATUS": "Maintenance: Expire Loyalty Status",
+    }
+
     created_any = False
     for brand in brands:
-        exists = (
-            db.query(InternalJob.id)
-            .filter(InternalJob.job_key == "MAINT_EXPIRE_REWARDS")
-            .filter(InternalJob.brand == brand)
-            .first()
-        )
-        if exists:
-            continue
+        for job_key in ["MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"]:
+            exists = (
+                db.query(InternalJob.id)
+                .filter(InternalJob.job_key == job_key)
+                .filter(InternalJob.brand == brand)
+                .first()
+            )
+            if exists:
+                continue
 
-        job = InternalJob(
-            job_key="MAINT_EXPIRE_REWARDS",
-            brand=brand,
-            transaction_type="MAINTENANCE",
-            selector={},
-            payload_template=None,
-            active=True,
-            schedule=default_schedule,
-        )
-        job.next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=default_schedule)
-        db.add(job)
-        created_any = True
+            job = InternalJob(
+                job_key=job_key,
+                brand=brand,
+                name=job_names.get(job_key, job_key),
+                description=None,
+                transaction_type="MAINTENANCE",
+                selector={},
+                payload_template=None,
+                active=True,
+                schedule=default_schedule,
+            )
+            job.next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=default_schedule)
+            db.add(job)
+            created_any = True
 
     if created_any:
         db.flush()
@@ -165,14 +174,24 @@ def run_scheduler_loop(
 
             for job in jobs:
                 run_now = _utcnow()
+                prev_next_run_at = job.next_run_at
+                started_at = time.perf_counter()
                 try:
                     logger.info(
-                        "running internal job",
+                        "running internal job job_id=%s job_key=%s brand=%s name=%s run_now=%s prev_next_run_at=%s",
+                        str(job.id),
+                        job.job_key,
+                        job.brand,
+                        getattr(job, "name", None),
+                        run_now.isoformat(),
+                        (prev_next_run_at.isoformat() if prev_next_run_at else None),
                         extra={
                             "job_id": str(job.id),
                             "job_key": job.job_key,
                             "brand": job.brand,
+                            "job_name": getattr(job, "name", None),
                             "run_now": run_now.isoformat(),
+                            "prev_next_run_at": (prev_next_run_at.isoformat() if prev_next_run_at else None),
                         },
                     )
                     stats = run_internal_job_once(db, job=job, now=run_now)
@@ -183,15 +202,34 @@ def run_scheduler_loop(
                     job.next_run_at = compute_next_run_at_from_schedule(base_utc=run_now, schedule=job.schedule)
 
                     stats_payload = {}
-                    for k in ["processed", "created", "idempotent_existing", "failed", "expired"]:
+                    key_map = {
+                        "processed": "processed_count",
+                        "created": "created_count",
+                        "idempotent_existing": "idempotent_existing_count",
+                        "failed": "failed_count",
+                        "expired": "expired_count",
+                    }
+                    for k, out_k in key_map.items():
                         if hasattr(stats, k):
-                            stats_payload[k] = getattr(stats, k)
+                            stats_payload[out_k] = getattr(stats, k)
+
+                    duration_ms = int((time.perf_counter() - started_at) * 1000)
 
                     logger.info(
-                        "internal job success",
+                        "internal job success job_id=%s job_key=%s brand=%s name=%s duration_ms=%s %s next_run_at=%s",
+                        str(job.id),
+                        job.job_key,
+                        job.brand,
+                        getattr(job, "name", None),
+                        duration_ms,
+                        " ".join([f"{k}={v}" for k, v in stats_payload.items()]),
+                        (job.next_run_at.isoformat() if job.next_run_at else None),
                         extra={
                             "job_id": str(job.id),
                             "job_key": job.job_key,
+                            "brand": job.brand,
+                            "job_name": getattr(job, "name", None),
+                            "duration_ms": duration_ms,
                             **stats_payload,
                             "next_run_at": (job.next_run_at.isoformat() if job.next_run_at else None),
                         },
@@ -201,14 +239,25 @@ def run_scheduler_loop(
                     job.last_status = "FAILED"
                     job.last_error = str(e)
 
+                    duration_ms = int((time.perf_counter() - started_at) * 1000)
+
                     # On failure, keep moving next_run_at forward to avoid a tight retry loop.
                     job.next_run_at = compute_next_run_at_from_schedule(base_utc=run_now, schedule=job.schedule)
 
                     logger.exception(
-                        "internal job failed",
+                        "internal job failed job_id=%s job_key=%s brand=%s name=%s duration_ms=%s next_run_at=%s",
+                        str(job.id),
+                        job.job_key,
+                        job.brand,
+                        getattr(job, "name", None),
+                        duration_ms,
+                        (job.next_run_at.isoformat() if job.next_run_at else None),
                         extra={
                             "job_id": str(job.id),
                             "job_key": job.job_key,
+                            "brand": job.brand,
+                            "job_name": getattr(job, "name", None),
+                            "duration_ms": duration_ms,
                             "next_run_at": (job.next_run_at.isoformat() if job.next_run_at else None),
                         },
                     )
@@ -223,11 +272,19 @@ def run_scheduler_loop(
 
 
 def main():
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        )
+
     batch_size = int(os.getenv("INTERNAL_JOB_BATCH_SIZE") or "5")
     lock_ttl_seconds = int(os.getenv("INTERNAL_JOB_LOCK_TTL_SECONDS") or "600")
     idle_sleep_seconds = int(os.getenv("INTERNAL_JOB_IDLE_SLEEP_SECONDS") or "5")
     max_sleep_seconds = int(os.getenv("INTERNAL_JOB_MAX_SLEEP_SECONDS") or "30")
 
+    logger.info("starting internal job scheduler")
     run_scheduler_loop(
         batch_size=batch_size,
         lock_ttl_seconds=lock_ttl_seconds,

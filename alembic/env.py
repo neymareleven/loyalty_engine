@@ -21,6 +21,7 @@ from app.db import Base
 from app.models.customer import Customer  # noqa: F401
 from app.models.loyalty_tier import LoyaltyTier  # noqa: F401
 from app.models.rule import Rule  # noqa: F401
+from app.models.brand_loyalty_settings import BrandLoyaltySettings  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

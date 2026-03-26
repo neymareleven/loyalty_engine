@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.models.loyalty_tier import LoyaltyTier
+from app.services.loyalty_settings_service import get_loyalty_settings
 
 
 def compute_loyalty_status_from_tiers(db: Session, brand: str, status_points: int) -> str | None:
@@ -46,7 +47,16 @@ def _get_tier_min_points(db: Session, brand: str, tier_key: str) -> int | None:
 # ============================================================
 # Mise à jour du statut client
 # ============================================================
-def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS", source_transaction_id=None, depth: int = 0):
+def update_customer_status(
+    db: Session,
+    customer,
+    *,
+    reason: str = "EARN_POINTS",
+    source_transaction_id=None,
+    depth: int = 0,
+    refresh_window: bool = False,
+    emit_events: bool = True,
+):
     """
     Recalcule et met à jour le statut fidélité du client
     """
@@ -58,6 +68,19 @@ def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS"
             db.flush()
         return customer.loyalty_status
 
+    settings = get_loyalty_settings(db, brand=customer.brand)
+    status_days = getattr(settings, "loyalty_status_validity_days", None) if settings else None
+
+    now = datetime.utcnow()
+    should_refresh_window = bool(refresh_window) or (customer.loyalty_status != new_status)
+    if should_refresh_window:
+        if status_days is not None:
+            customer.loyalty_status_assigned_at = now
+            customer.loyalty_status_expires_at = now + timedelta(days=int(status_days))
+        else:
+            customer.loyalty_status_assigned_at = None
+            customer.loyalty_status_expires_at = None
+
     # éviter des écritures DB inutiles
     if customer.loyalty_status != new_status:
         old_status = customer.loyalty_status
@@ -68,38 +91,39 @@ def update_customer_status(db: Session, customer, *, reason: str = "EARN_POINTS"
         new_min = _get_tier_min_points(db, customer.brand, new_status)
         transaction_type = "TIER_UPGRADED" if (new_min is not None and (old_min is None or new_min > old_min)) else "TIER_DOWNGRADED"
 
-        from app.models.event_type import TransactionType
-        from app.services.transaction_service import create_internal_transaction
+        if emit_events:
+            from app.models.event_type import TransactionType
+            from app.services.transaction_service import create_internal_transaction
 
-        # Only emit if the transaction type exists in the catalog as INTERNAL+active
-        tt = (
-            db.query(TransactionType.id)
-            .filter(TransactionType.key == transaction_type)
-            .filter(TransactionType.active.is_(True))
-            .filter(TransactionType.origin == "INTERNAL")
-            .filter(TransactionType.brand == customer.brand)
-            .first()
-        )
-        if tt:
-            ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-            transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
-            payload = {
-                "fromTier": old_status,
-                "toTier": new_status,
-                "reason": reason,
-                "statusPoints": int(customer.status_points or 0),
-                "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
-                "_ruleDepth": depth + 1,
-            }
-            create_internal_transaction(
-                db,
-                brand=customer.brand,
-                profile_id=customer.profile_id,
-                transaction_type=transaction_type,
-                transaction_id=transaction_id,
-                payload=payload,
-                depth=depth,
-                commit=False,
+            # Only emit if the transaction type exists in the catalog as INTERNAL+active
+            tt = (
+                db.query(TransactionType.id)
+                .filter(TransactionType.key == transaction_type)
+                .filter(TransactionType.active.is_(True))
+                .filter(TransactionType.origin == "INTERNAL")
+                .filter(TransactionType.brand == customer.brand)
+                .first()
             )
+            if tt:
+                ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+                transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
+                payload = {
+                    "fromTier": old_status,
+                    "toTier": new_status,
+                    "reason": reason,
+                    "statusPoints": int(customer.status_points or 0),
+                    "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
+                    "_ruleDepth": depth + 1,
+                }
+                create_internal_transaction(
+                    db,
+                    brand=customer.brand,
+                    profile_id=customer.profile_id,
+                    transaction_type=transaction_type,
+                    transaction_id=transaction_id,
+                    payload=payload,
+                    depth=depth,
+                    commit=False,
+                )
 
     return customer.loyalty_status
