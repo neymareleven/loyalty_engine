@@ -36,6 +36,10 @@ class CustomerOut(BaseModel):
     loyalty_status_name: Optional[str] = None
     lifetime_points: int
 
+    status_points: int
+    status_points_reset_at: Optional[datetime] = None
+    points_balance: Optional[int] = None
+
     points_expires_at: Optional[datetime] = None
     loyalty_status_assigned_at: Optional[datetime] = None
     loyalty_status_expires_at: Optional[datetime] = None
