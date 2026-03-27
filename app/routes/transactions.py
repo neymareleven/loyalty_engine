@@ -28,13 +28,18 @@ def ingest_transaction(
     if not (event.eventType or "").strip():
         raise HTTPException(status_code=400, detail="eventType is required")
 
+    payload = event.properties or {}
+    payload_brand = payload.get("brand")
+    if isinstance(payload_brand, str) and payload_brand.strip() and payload_brand.strip() != event.brand:
+        raise HTTPException(status_code=400, detail="properties.brand must match brand")
+
     mapped = EventCreate(
         brand=event.brand,
         profileId=event.profileId,
         eventType=event.eventType,
         eventId=event.itemId,
         source="UNOMI",
-        payload=(event.properties or {}),
+        payload=payload,
     )
 
     transaction = create_transaction(db, mapped)

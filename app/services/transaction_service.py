@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer
 from app.models.event_type import TransactionType
 from app.models.transaction import Transaction
+from app.services.loyalty_status_service import update_customer_status
 from app.services.rule_engine import process_transaction_rules
 
 
@@ -250,6 +251,21 @@ def create_transaction(db: Session, event_data):
         if customer:
             customer.last_activity_at = datetime.utcnow()
             db.commit()
+
+            # If tiers are configured after some customers were created, they may still be
+            # marked as UNCONFIGURED. Refresh their tier assignment opportunistically on
+            # any external ingestion, even when no rules matched.
+            if (customer.loyalty_status in (None, "UNCONFIGURED")):
+                update_customer_status(
+                    db,
+                    customer,
+                    reason="AUTO_TIER_REFRESH",
+                    source_transaction_id=transaction.id,
+                    depth=0,
+                    refresh_window=True,
+                    emit_events=False,
+                )
+                db.commit()
 
     # ⚠️ lancer le moteur seulement si PENDING
     if transaction.status == "PENDING":

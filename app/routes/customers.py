@@ -14,6 +14,7 @@ from app.schemas.customer import CustomerOut, CustomerUpsert
 from app.schemas.customer_reward import CustomerRewardOut, RedeemCatalogRewardIn
 from app.schemas.point_movement import PointMovementOut
 from app.services.contact_service import get_or_create_customer
+from app.services.loyalty_status_service import update_customer_status
 from app.services.reward_service import use_reward, redeem_reward
 from app.services.wallet_service import get_points_balance
 from app.models.loyalty_tier import LoyaltyTier
@@ -159,6 +160,17 @@ def upsert_customer(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if customer.loyalty_status in (None, "UNCONFIGURED"):
+        update_customer_status(
+            db,
+            customer,
+            reason="AUTO_TIER_REFRESH",
+            source_transaction_id=None,
+            depth=0,
+            refresh_window=True,
+            emit_events=False,
+        )
     db.commit()
     db.refresh(customer)
 

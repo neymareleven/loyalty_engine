@@ -10,7 +10,7 @@ from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.loyalty_tier import LoyaltyTier
 from app.schemas.loyalty_tier import LoyaltyTierCreate, LoyaltyTierOut, LoyaltyTierUpdate
-from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
+from app.services.loyalty_status_service import update_customer_status
 
 
 router = APIRouter(prefix="/admin/loyalty-tiers", tags=["admin-loyalty-tiers"])
@@ -74,10 +74,17 @@ def _recompute_customers(db: Session, brand: str) -> dict:
     customers = db.query(Customer).filter(Customer.brand == brand).all()
     updated = 0
     for c in customers:
-        new_status = compute_loyalty_status_from_tiers(db, brand, c.status_points)
-        new_status = new_status if new_status else "UNCONFIGURED"
-        if c.loyalty_status != new_status:
-            c.loyalty_status = new_status
+        before = c.loyalty_status
+        update_customer_status(
+            db,
+            c,
+            reason="AUTO_TIER_REFRESH",
+            source_transaction_id=None,
+            depth=0,
+            refresh_window=True,
+            emit_events=False,
+        )
+        if c.loyalty_status != before:
             updated += 1
     db.commit()
     return {"brand": brand, "customers": len(customers), "updated": updated}
@@ -226,8 +233,7 @@ def create_loyalty_tier(
     db.commit()
     db.refresh(obj)
 
-    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
-        _recompute_customers(db, active_brand)
+    _recompute_customers(db, active_brand)
 
     return obj
 
@@ -296,8 +302,7 @@ def update_loyalty_tier(
     db.commit()
     db.refresh(obj)
 
-    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
-        _recompute_customers(db, active_brand)
+    _recompute_customers(db, active_brand)
 
     return obj
 
@@ -331,8 +336,7 @@ def delete_loyalty_tier(
     db.delete(obj)
     db.commit()
 
-    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
-        _recompute_customers(db, active_brand)
+    _recompute_customers(db, active_brand)
 
     return {"deleted": True}
 
@@ -374,8 +378,7 @@ def ensure_base_loyalty_tier(
             db.commit()
             db.refresh(existing)
 
-            if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
-                _recompute_customers(db, active_brand)
+            _recompute_customers(db, active_brand)
 
         return existing
 
@@ -417,7 +420,6 @@ def ensure_base_loyalty_tier(
     db.commit()
     db.refresh(obj)
 
-    if _env_bool("AUTO_RECOMPUTE_CUSTOMERS_ON_TIER_CHANGE", default=False):
-        _recompute_customers(db, active_brand)
+    _recompute_customers(db, active_brand)
 
     return obj
