@@ -71,6 +71,7 @@ def list_customers(
         else:
             data["birthdate"] = None
         data["loyalty_status_name"] = tier_name_by_key.get(c.loyalty_status)
+        data["points_balance"] = get_points_balance(db, c.id)
         out_items.append(data)
 
     return {
@@ -115,6 +116,7 @@ def get_customer(
     else:
         data["birthdate"] = None
     data["loyalty_status_name"] = tier_name
+    data["points_balance"] = get_points_balance(db, customer.id)
     return data
 
 
