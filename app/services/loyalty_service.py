@@ -36,10 +36,6 @@ def earn_points(
     # 🔹 sécuriser le customer attaché à la session
     customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
 
-    customer.points_expires_at = (
-        (datetime.utcnow() + timedelta(days=int(points_days))) if points_days is not None else None
-    )
-
     movement = PointMovement(
         customer_id=customer.id,
         points=points,

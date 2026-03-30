@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
+from uuid import UUID
 
 from croniter import croniter
 
@@ -13,6 +14,7 @@ from app.models.internal_job import InternalJob
 from app.models.transaction import Transaction
 from app.schemas.event import EventCreate
 from app.services.transaction_service import create_transaction
+from app.services.loyalty_status_service import update_customer_status
 
 
 @dataclass
@@ -26,6 +28,13 @@ class InternalJobRunStats:
 @dataclass
 class MaintenanceJobRunStats:
     expired: int
+
+
+@dataclass
+class CustomerRecomputeRunStats:
+    processed: int
+    updated: int
+    finished: bool
 
 
 def _as_utc_aware(dt: datetime) -> datetime:
@@ -113,6 +122,62 @@ def run_internal_job_once(
 
         expired = expire_loyalty_status(db, brand=job.brand)
         return MaintenanceJobRunStats(expired=int(expired))
+
+    if job.job_key == "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS":
+        if not job.brand:
+            raise ValueError("MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS requires job.brand")
+
+        selector = job.selector or {}
+        after_id_raw = selector.get("after_id")
+        after_id: UUID | None = None
+        if after_id_raw:
+            try:
+                after_id = UUID(str(after_id_raw))
+            except Exception:
+                after_id = None
+        try:
+            batch_size = int(selector.get("batch_size") or 500)
+        except Exception:
+            batch_size = 500
+        batch_size = max(1, min(batch_size, 5000))
+
+        q = (
+            db.query(Customer)
+            .filter(Customer.brand == job.brand)
+            .order_by(Customer.id.asc())
+        )
+        if after_id:
+            q = q.filter(Customer.id > after_id)
+
+        customers = q.limit(batch_size).all()
+
+        processed = 0
+        updated = 0
+        last_id = None
+        for c in customers:
+            processed += 1
+            before = c.loyalty_status
+            update_customer_status(
+                db,
+                c,
+                reason="AUTO_TIER_REFRESH",
+                source_transaction_id=None,
+                depth=0,
+                refresh_window=True,
+                emit_events=False,
+            )
+            if c.loyalty_status != before:
+                updated += 1
+            last_id = c.id
+
+        finished = len(customers) < batch_size
+        if finished:
+            job.selector = {"batch_size": batch_size}
+        else:
+            job.selector = {"after_id": str(last_id), "batch_size": batch_size}
+
+        db.flush()
+        return CustomerRecomputeRunStats(processed=processed, updated=updated, finished=bool(finished))
 
     today: date = now.date()
 

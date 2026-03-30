@@ -20,6 +20,18 @@ def compute_loyalty_status_from_tiers(db: Session, brand: str, status_points: in
     if tier:
         return tier.key
 
+    # Tiers exist but points don't satisfy any min_status_points (e.g. negative status points).
+    # Fallback to the lowest active tier to avoid leaving customers UNCONFIGURED when tiers are configured.
+    lowest = (
+        db.query(LoyaltyTier)
+        .filter(LoyaltyTier.brand == brand)
+        .filter(LoyaltyTier.active.is_(True))
+        .order_by(LoyaltyTier.min_status_points.asc())
+        .first()
+    )
+    if lowest:
+        return lowest.key
+
     # No tiers configured for this brand: do not update loyalty_status.
     return None
 

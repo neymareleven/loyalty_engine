@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
+from app.models.point_movement import PointMovement
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import update_customer_status
+from app.services.wallet_service import get_points_balance
 
 
 def initialize_validity_windows_for_existing_customers(db: Session, *, brand: str) -> dict[str, int]:
@@ -61,20 +63,35 @@ def expire_points(db: Session, *, brand: str) -> int:
     if points_days is None:
         return 0
 
-    expired_customers = (
-        db.query(Customer)
+    today = date.today()
+    expired_customer_ids = (
+        db.query(PointMovement.customer_id)
+        .join(Customer, Customer.id == PointMovement.customer_id)
         .filter(Customer.brand == brand)
-        .filter(Customer.points_expires_at.isnot(None))
-        .filter(Customer.points_expires_at < now)
+        .filter(PointMovement.expires_at.isnot(None))
+        .filter(PointMovement.expires_at < today)
+        .group_by(PointMovement.customer_id)
+        .all()
+    )
+    customer_ids = [row[0] for row in expired_customer_ids if row and row[0] is not None]
+    if not customer_ids:
+        return 0
+
+    customers = (
+        db.query(Customer)
+        .filter(Customer.id.in_(customer_ids))
+        .with_for_update()
         .all()
     )
 
     updated = 0
-    for c in expired_customers:
-        if int(c.status_points or 0) != 0:
-            c.status_points = 0
+    for c in customers:
+        before = int(c.status_points or 0)
+        balance = max(0, int(get_points_balance(db, c.id) or 0))
+        if balance != before:
+            c.status_points = balance
             c.status_points_reset_at = now
-        c.points_expires_at = None
+
         update_customer_status(
             db,
             c,

@@ -24,7 +24,12 @@ router = APIRouter(prefix="/admin/internal-jobs", tags=["admin-internal-jobs"])
 
 
 def _is_system_managed_job(job: InternalJob) -> bool:
-    return job.job_key in {"MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"}
+    return job.job_key in {
+        "MAINT_EXPIRE_REWARDS",
+        "MAINT_EXPIRE_POINTS",
+        "MAINT_EXPIRE_LOYALTY_STATUS",
+        "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+    }
 
 
 def _selector_literal(value):
@@ -483,7 +488,16 @@ def list_internal_jobs(
     q = (
         db.query(InternalJob)
         .filter(InternalJob.brand == active_brand)
-        .filter(InternalJob.job_key.notin_(["MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"]))
+        .filter(
+            InternalJob.job_key.notin_(
+                [
+                    "MAINT_EXPIRE_REWARDS",
+                    "MAINT_EXPIRE_POINTS",
+                    "MAINT_EXPIRE_LOYALTY_STATUS",
+                    "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+                ]
+            )
+        )
     )
     if active is not None:
         q = q.filter(InternalJob.active.is_(active))
@@ -498,7 +512,12 @@ def create_internal_job(
 ):
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
-    if payload.job_key in {"MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"}:
+    if payload.job_key in {
+        "MAINT_EXPIRE_REWARDS",
+        "MAINT_EXPIRE_POINTS",
+        "MAINT_EXPIRE_LOYALTY_STATUS",
+        "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+    }:
         raise HTTPException(status_code=400, detail="This internal job is system-managed")
     q = (
         db.query(TransactionType.id)

@@ -66,16 +66,23 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
         return
 
     default_schedule = {"type": "cron", "cron": "0 0 * * *", "timezone": "UTC"}
+    on_demand_schedule = {"type": "cron", "cron": "*/1 * * * *", "timezone": "UTC"}
 
     job_names = {
         "MAINT_EXPIRE_REWARDS": "Maintenance: Expire Rewards",
         "MAINT_EXPIRE_POINTS": "Maintenance: Expire Points",
         "MAINT_EXPIRE_LOYALTY_STATUS": "Maintenance: Expire Loyalty Status",
+        "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS": "Maintenance: Recompute Customers Loyalty Status",
     }
 
     created_any = False
     for brand in brands:
-        for job_key in ["MAINT_EXPIRE_REWARDS", "MAINT_EXPIRE_POINTS", "MAINT_EXPIRE_LOYALTY_STATUS"]:
+        for job_key in [
+            "MAINT_EXPIRE_REWARDS",
+            "MAINT_EXPIRE_POINTS",
+            "MAINT_EXPIRE_LOYALTY_STATUS",
+            "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+        ]:
             exists = (
                 db.query(InternalJob.id)
                 .filter(InternalJob.job_key == job_key)
@@ -85,6 +92,16 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
             if exists:
                 continue
 
+            schedule = default_schedule
+            active = True
+            next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=default_schedule)
+            if job_key == "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS":
+                # On-demand job: created inactive and without a next_run_at. It will be enqueued by
+                # setting next_run_at=now (and optionally selector cursor) when tiers change.
+                schedule = on_demand_schedule
+                active = False
+                next_run_at = None
+
             job = InternalJob(
                 job_key=job_key,
                 brand=brand,
@@ -93,10 +110,10 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
                 transaction_type="MAINTENANCE",
                 selector={},
                 payload_template=None,
-                active=True,
-                schedule=default_schedule,
+                active=active,
+                schedule=schedule,
             )
-            job.next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=default_schedule)
+            job.next_run_at = next_run_at
             db.add(job)
             created_any = True
 
@@ -199,7 +216,19 @@ def run_scheduler_loop(
                     job.last_error = None
 
                     job.last_run_at = run_now
-                    job.next_run_at = compute_next_run_at_from_schedule(base_utc=run_now, schedule=job.schedule)
+
+                    # On-demand maintenance jobs can stop themselves when their cursor is exhausted.
+                    finished = bool(getattr(stats, "finished", False))
+                    if job.job_key == "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS":
+                        if finished:
+                            job.active = False
+                            job.next_run_at = None
+                        else:
+                            # Process batches back-to-back without waiting for the cron tick.
+                            job.active = True
+                            job.next_run_at = run_now + timedelta(seconds=2)
+                    else:
+                        job.next_run_at = compute_next_run_at_from_schedule(base_utc=run_now, schedule=job.schedule)
 
                     stats_payload = {}
                     key_map = {
@@ -208,6 +237,8 @@ def run_scheduler_loop(
                         "idempotent_existing": "idempotent_existing_count",
                         "failed": "failed_count",
                         "expired": "expired_count",
+                        "updated": "updated_count",
+                        "finished": "finished",
                     }
                     for k, out_k in key_map.items():
                         if hasattr(stats, k):

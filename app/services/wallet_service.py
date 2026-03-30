@@ -16,4 +16,4 @@ def get_points_balance(db: Session, customer_id):
         .scalar()
     )
 
-    return int(balance or 0)
+    return max(0, int(balance or 0))

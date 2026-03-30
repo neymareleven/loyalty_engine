@@ -2,12 +2,14 @@ from uuid import UUID
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
+from app.models.internal_job import InternalJob
 from app.models.loyalty_tier import LoyaltyTier
 from app.schemas.loyalty_tier import LoyaltyTierCreate, LoyaltyTierOut, LoyaltyTierUpdate
 from app.services.loyalty_status_service import update_customer_status
@@ -88,6 +90,37 @@ def _recompute_customers(db: Session, brand: str) -> dict:
             updated += 1
     db.commit()
     return {"brand": brand, "customers": len(customers), "updated": updated}
+
+
+def _enqueue_recompute_customers_job(db: Session, brand: str) -> None:
+    job = (
+        db.query(InternalJob)
+        .filter(InternalJob.job_key == "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS")
+        .filter(InternalJob.brand == brand)
+        .first()
+    )
+    if not job:
+        job = InternalJob(
+            job_key="MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+            brand=brand,
+            name="Maintenance: Recompute Customers Loyalty Status",
+            description=None,
+            transaction_type="MAINTENANCE",
+            selector={"batch_size": 500},
+            payload_template=None,
+            active=True,
+            schedule={"type": "cron", "cron": "*/1 * * * *", "timezone": "UTC"},
+        )
+        db.add(job)
+        db.flush()
+
+    selector = dict(job.selector or {})
+    selector.pop("after_id", None)
+    selector.setdefault("batch_size", 500)
+    job.selector = selector
+    job.active = True
+    job.next_run_at = datetime.utcnow()
+    db.commit()
 
 
 def _recompute_tier_ranks(db: Session, brand: str) -> None:
@@ -233,7 +266,7 @@ def create_loyalty_tier(
     db.commit()
     db.refresh(obj)
 
-    _recompute_customers(db, active_brand)
+    _enqueue_recompute_customers_job(db, active_brand)
 
     return obj
 
@@ -302,7 +335,7 @@ def update_loyalty_tier(
     db.commit()
     db.refresh(obj)
 
-    _recompute_customers(db, active_brand)
+    _enqueue_recompute_customers_job(db, active_brand)
 
     return obj
 
@@ -336,7 +369,7 @@ def delete_loyalty_tier(
     db.delete(obj)
     db.commit()
 
-    _recompute_customers(db, active_brand)
+    _enqueue_recompute_customers_job(db, active_brand)
 
     return {"deleted": True}
 
@@ -346,7 +379,8 @@ def recompute_customers_loyalty_status(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    return _recompute_customers(db, active_brand)
+    _enqueue_recompute_customers_job(db, active_brand)
+    return {"enqueued": True, "brand": active_brand}
 
 
 @router.post("/ensure-base-tier", response_model=LoyaltyTierOut)
@@ -378,7 +412,7 @@ def ensure_base_loyalty_tier(
             db.commit()
             db.refresh(existing)
 
-            _recompute_customers(db, active_brand)
+            _enqueue_recompute_customers_job(db, active_brand)
 
         return existing
 
@@ -420,6 +454,6 @@ def ensure_base_loyalty_tier(
     db.commit()
     db.refresh(obj)
 
-    _recompute_customers(db, active_brand)
+    _enqueue_recompute_customers_job(db, active_brand)
 
     return obj
