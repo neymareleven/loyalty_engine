@@ -6,6 +6,7 @@ from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
+from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import update_customer_status
@@ -32,7 +33,17 @@ def initialize_validity_windows_for_existing_customers(db: Session, *, brand: st
         )
 
     if status_days is not None:
-        updated_status = (
+        base_row = (
+            db.query(LoyaltyTier.key)
+            .filter(LoyaltyTier.brand == brand)
+            .filter(LoyaltyTier.active.is_(True))
+            .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
+            .first()
+        )
+        base_key = base_row[0] if base_row else None
+
+        # Non-base tiers: initialize assigned+expires.
+        q = (
             db.query(Customer)
             .filter(Customer.brand == brand)
             .filter(Customer.loyalty_status.isnot(None))
@@ -43,13 +54,30 @@ def initialize_validity_windows_for_existing_customers(db: Session, *, brand: st
                     Customer.loyalty_status_expires_at.is_(None),
                 )
             )
-            .update(
+        )
+        if base_key:
+            q = q.filter(Customer.loyalty_status != base_key)
+
+        updated_status = q.update(
+            {
+                Customer.loyalty_status_assigned_at: now,
+                Customer.loyalty_status_expires_at: now + timedelta(days=int(status_days)),
+            }
+        )
+
+        # Base tier: initialize assigned only (no expiration).
+        if base_key:
+            db.query(Customer).filter(Customer.brand == brand).filter(Customer.loyalty_status == base_key).filter(
+                and_(
+                    Customer.loyalty_status_assigned_at.is_(None),
+                    Customer.loyalty_status_expires_at.is_(None),
+                )
+            ).update(
                 {
                     Customer.loyalty_status_assigned_at: now,
-                    Customer.loyalty_status_expires_at: now + timedelta(days=int(status_days)),
+                    Customer.loyalty_status_expires_at: None,
                 }
             )
-        )
 
     db.flush()
     return {"points": int(updated_points or 0), "loyalty_status": int(updated_status or 0)}
@@ -115,13 +143,25 @@ def expire_loyalty_status(db: Session, *, brand: str) -> int:
     if status_days is None:
         return 0
 
-    expired_customers = (
+    base_row = (
+        db.query(LoyaltyTier.key)
+        .filter(LoyaltyTier.brand == brand)
+        .filter(LoyaltyTier.active.is_(True))
+        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
+        .first()
+    )
+    base_key = base_row[0] if base_row else None
+
+    q = (
         db.query(Customer)
         .filter(Customer.brand == brand)
         .filter(Customer.loyalty_status_expires_at.isnot(None))
         .filter(Customer.loyalty_status_expires_at < now)
-        .all()
     )
+    if base_key:
+        q = q.filter(Customer.loyalty_status != base_key)
+
+    expired_customers = q.all()
 
     updated = 0
     for c in expired_customers:

@@ -36,6 +36,19 @@ def compute_loyalty_status_from_tiers(db: Session, brand: str, status_points: in
     return None
 
 
+def _get_base_tier_key(db: Session, brand: str) -> str | None:
+    tier = (
+        db.query(LoyaltyTier.key)
+        .filter(LoyaltyTier.brand == brand)
+        .filter(LoyaltyTier.active.is_(True))
+        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
+        .first()
+    )
+    if not tier:
+        return None
+    return tier[0]
+
+
 def _get_tier_min_points(db: Session, brand: str, tier_key: str) -> int | None:
     if not tier_key:
         return None
@@ -82,16 +95,22 @@ def update_customer_status(
 
     settings = get_loyalty_settings(db, brand=customer.brand)
     status_days = getattr(settings, "loyalty_status_validity_days", None) if settings else None
+    base_tier_key = _get_base_tier_key(db, customer.brand)
+    is_base_tier = bool(base_tier_key) and (new_status == base_tier_key)
 
     now = datetime.utcnow()
     should_refresh_window = bool(refresh_window) or (customer.loyalty_status != new_status)
     if should_refresh_window:
-        if status_days is not None:
+        if is_base_tier:
             customer.loyalty_status_assigned_at = now
-            customer.loyalty_status_expires_at = now + timedelta(days=int(status_days))
-        else:
-            customer.loyalty_status_assigned_at = None
             customer.loyalty_status_expires_at = None
+        else:
+            if status_days is not None:
+                customer.loyalty_status_assigned_at = now
+                customer.loyalty_status_expires_at = now + timedelta(days=int(status_days))
+            else:
+                customer.loyalty_status_assigned_at = None
+                customer.loyalty_status_expires_at = None
 
     # éviter des écritures DB inutiles
     if customer.loyalty_status != new_status:
