@@ -13,6 +13,10 @@ class CustomerCreate(BaseModel):
     birthdate: Optional[str] = None
 
 
+class CustomerSetTierMinOnly(BaseModel):
+    tierKey: str
+
+
 class CustomerUpsert(BaseModel):
     brand: Optional[str] = None
     profileId: str
@@ -34,7 +38,6 @@ class CustomerOut(BaseModel):
     status: str
     loyalty_status: Optional[str] = None
     loyalty_status_name: Optional[str] = None
-    lifetime_points: int
 
     status_points: int
     status_points_reset_at: Optional[datetime] = None

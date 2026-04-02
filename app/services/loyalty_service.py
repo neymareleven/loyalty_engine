@@ -1,12 +1,10 @@
 from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
-from fastapi import HTTPException
 
 from app.models.point_movement import PointMovement
 from app.models.customer import Customer
 from app.services.loyalty_status_service import update_customer_status
 from app.services.loyalty_settings_service import get_loyalty_settings
-from app.services.wallet_service import get_points_balance
 
 
 # ============================================================
@@ -36,10 +34,6 @@ def earn_points(
     # 🔹 sécuriser le customer attaché à la session
     customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
 
-    customer.points_expires_at = (
-        (datetime.utcnow() + timedelta(days=int(points_days))) if points_days is not None else None
-    )
-
     movement = PointMovement(
         customer_id=customer.id,
         points=points,
@@ -49,9 +43,6 @@ def earn_points(
     )
 
     db.add(movement)
-
-    # 🔹 mise à jour lifetime fiable
-    customer.lifetime_points = (customer.lifetime_points or 0) + points
 
     customer.status_points = (customer.status_points or 0) + points
 
@@ -97,14 +88,12 @@ def burn_points(
     # Ensure we operate on the row attached to the current session.
     customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
 
-    balance = get_points_balance(db, customer.id)
-    if balance < points:
-        raise HTTPException(status_code=400, detail="Not enough points")
+    # Status points are not a spendable wallet. We allow deductions and clamp status_points to 0.
 
     movement = PointMovement(
         customer_id=customer.id,
         points=-points,
-        type="BURN",
+        type="DEDUCT",
         source_transaction_id=source_transaction_id,
     )
 
@@ -120,7 +109,7 @@ def burn_points(
     update_customer_status(
         db,
         customer,
-        reason="BURN_POINTS",
+        reason="DEDUCT_STATUS_POINTS",
         source_transaction_id=source_transaction_id,
         depth=depth,
     )

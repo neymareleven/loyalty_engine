@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Integer, Boolean, TIMESTAMP, JSON
+from sqlalchemy import Column, ForeignKey, String, Boolean, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
@@ -12,29 +12,14 @@ class Reward(Base):
 
     brand = Column(String(50), nullable=False)
 
+    reward_category_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("reward_categories.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
     name = Column(String(100), nullable=False)
     description = Column(String(255))
-
-    # NULL = reward gratuite (marketing)
-    cost_points = Column(Integer, nullable=True)
-
-    # type fonctionnel de reward
-    type = Column(String(50), nullable=False, default="POINTS")
-
-    # durée de validité après attribution (en jours)
-    validity_days = Column(Integer, nullable=True)
-
-    # usage limits (frequency)
-    # max_attributions = maximum number of attributions within reset_period.
-    # reset_period: DAY | MONTH | YEAR | LIFETIME
-    max_attributions = Column(Integer, nullable=True)
-    reset_period = Column(String(20), nullable=True)
-
-    # rich reward types fields
-    currency = Column(String(3), nullable=True)
-    value_amount = Column(Integer, nullable=True)
-    value_percent = Column(Integer, nullable=True)
-    params = Column(JSON, nullable=True)
 
     active = Column(Boolean, default=True)
 

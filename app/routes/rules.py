@@ -16,6 +16,30 @@ from app.deps.brand import get_active_brand
 router = APIRouter(prefix="/rules", tags=["rules"])
 
 
+_DEPRECATED_ACTION_TYPES = {"burn_points", "issue_reward", "use_coupon", "set_rank"}
+_ALLOWED_ACTION_TYPES = {"earn_points", "issue_coupon", "reset_status_points"}
+
+
+def _validate_rule_actions(actions):
+    if actions is None:
+        raise HTTPException(status_code=400, detail="Rules must define at least one action")
+    if isinstance(actions, dict):
+        actions = [actions]
+    if not isinstance(actions, list) or len(actions) == 0:
+        raise HTTPException(status_code=400, detail="Rules must define at least one action")
+
+    for a in actions:
+        if not isinstance(a, dict):
+            raise HTTPException(status_code=400, detail="Invalid action: expected object")
+        t = a.get("type")
+        if not isinstance(t, str) or not t:
+            raise HTTPException(status_code=400, detail="Invalid action: missing type")
+        if t in _DEPRECATED_ACTION_TYPES:
+            raise HTTPException(status_code=400, detail=f"Action type '{t}' is deprecated and not allowed")
+        if t not in _ALLOWED_ACTION_TYPES:
+            raise HTTPException(status_code=400, detail=f"Unknown action type: {t}")
+
+
 @router.get("", response_model=list[RuleOut])
 def list_rules(
     active_brand: str = Depends(get_active_brand),
@@ -58,6 +82,8 @@ def create_rule(
     )
     if dup:
         raise HTTPException(status_code=400, detail="A rule with this name already exists for this brand")
+
+    _validate_rule_actions(payload.actions)
 
     rule = Rule(
         brand=active_brand,
@@ -123,6 +149,12 @@ def update_rule(
         )
         if dup:
             raise HTTPException(status_code=400, detail="A rule with this name already exists for this brand")
+
+    if "actions" in data:
+        _validate_rule_actions(data.get("actions"))
+
+    next_actions = data.get("actions") if "actions" in data else rule.actions
+    _validate_rule_actions(next_actions)
 
     for k, v in data.items():
         if k == "brand":

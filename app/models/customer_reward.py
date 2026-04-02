@@ -13,6 +13,12 @@ class CustomerReward(Base):
     customer_id = Column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
     reward_id = Column(UUID(as_uuid=True), ForeignKey("rewards.id"), nullable=False)
 
+    customer_coupon_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("customer_coupons.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     status = Column(String(20), nullable=False, default="ISSUED")
     # ISSUED | USED | EXPIRED | CANCELLED
 

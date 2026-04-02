@@ -49,6 +49,19 @@ def get_internal_job_type_catalog():
                     "active": True,
                 },
             },
+            {
+                "type": "BACKFILL_COUPONS",
+                "name": "Backfill coupons (snapshot rewards)",
+                "description": "Issue a coupon to each customer matching a selector (idempotent). It also snapshots the active rewards in the linked reward category.",
+                "defaults": {
+                    "job_key": "MAINT_BACKFILL_COUPONS",
+                    "transaction_type": "MAINTENANCE",
+                    "selector": {"status_in": ["ACTIVE"], "batch_size": 500},
+                    "payload_template": {"coupon_type_id": "<uuid>", "frequency": "ONCE_PER_CALENDAR_YEAR"},
+                    "schedule": {"type": "cron", "cron": "*/1 * * * *", "timezone": "UTC"},
+                    "active": False,
+                },
+            },
         ],
         "notes": [
             "These are UI presets only. Backend enforcement is done by InternalJobCreate schema + validation.",

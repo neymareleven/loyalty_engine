@@ -21,7 +21,6 @@ class Customer(Base):
 
     status = Column(String(20), default="ACTIVE")
     loyalty_status = Column(String(20), nullable=True)
-    lifetime_points = Column(Integer, nullable=False, default=0)
 
     status_points = Column(Integer, nullable=False, default=0)
     last_activity_at = Column(TIMESTAMP)

@@ -1,17 +1,16 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
-
 from uuid import UUID
 
 from pydantic import BaseModel
 
 
-class CustomerRewardOut(BaseModel):
+class CustomerCouponOut(BaseModel):
     id: UUID
     customer_id: UUID
-    reward_id: UUID
+    coupon_type_id: UUID
 
-    customer_coupon_id: Optional[UUID] = None
+    calendar_year: int
 
     status: str
 
@@ -28,7 +27,3 @@ class CustomerRewardOut(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class RedeemCatalogRewardIn(BaseModel):
-    reward_id: UUID
