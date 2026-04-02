@@ -37,6 +37,15 @@ class CustomerRecomputeRunStats:
     finished: bool
 
 
+@dataclass
+class CouponBackfillRunStats:
+    processed: int
+    created: int
+    idempotent_existing: int
+    failed: int
+    finished: bool
+
+
 def _as_utc_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=ZoneInfo("UTC"))
@@ -103,6 +112,15 @@ def run_internal_job_once(
         from app.services.reward_service import expire_rewards
 
         expired = expire_rewards(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(expired))
+
+    if job.job_key == "MAINT_EXPIRE_COUPONS":
+        if not job.brand:
+            raise ValueError("MAINT_EXPIRE_COUPONS requires job.brand")
+
+        from app.services.coupon_service import expire_coupons
+
+        expired = expire_coupons(db, brand=job.brand)
         return MaintenanceJobRunStats(expired=int(expired))
 
     if job.job_key == "MAINT_EXPIRE_POINTS":
@@ -178,6 +196,115 @@ def run_internal_job_once(
 
         db.flush()
         return CustomerRecomputeRunStats(processed=processed, updated=updated, finished=bool(finished))
+
+    if job.job_key == "MAINT_BACKFILL_COUPONS":
+        if not job.brand:
+            raise ValueError("MAINT_BACKFILL_COUPONS requires job.brand")
+
+        selector = job.selector or {}
+        after_id_raw = selector.get("after_id")
+        after_id: UUID | None = None
+        if after_id_raw:
+            try:
+                after_id = UUID(str(after_id_raw))
+            except Exception:
+                after_id = None
+        try:
+            batch_size = int(selector.get("batch_size") or 500)
+        except Exception:
+            batch_size = 500
+        batch_size = max(1, min(batch_size, 5000))
+
+        payload = job.payload_template or {}
+        coupon_type_id = payload.get("coupon_type_id") or payload.get("couponTypeId")
+        if coupon_type_id is not None:
+            coupon_type_id = str(coupon_type_id)
+        if not coupon_type_id:
+            raise ValueError("MAINT_BACKFILL_COUPONS requires payload_template.coupon_type_id")
+
+        frequency = payload.get("frequency") or "ONCE_PER_CALENDAR_YEAR"
+        frequency = str(frequency)
+
+        q = db.query(Customer).filter(Customer.brand == job.brand).order_by(Customer.id.asc())
+        if after_id:
+            q = q.filter(Customer.id > after_id)
+
+        customers = q.limit(batch_size).all()
+
+        bucket_key = compute_run_bucket_key_from_schedule(now_utc=now, schedule=job.schedule)
+
+        processed = 0
+        created = 0
+        idempotent_existing = 0
+        failed = 0
+        last_id = None
+
+        from app.services.coupon_service import issue_coupon
+
+        for c in customers:
+            processed += 1
+            last_id = c.id
+
+            event_id = f"job_{job.id}_{bucket_key}_backfill_coupon_{c.id}_{coupon_type_id}"
+
+            tx = (
+                db.query(Transaction)
+                .filter(Transaction.brand == c.brand)
+                .filter(Transaction.transaction_id == event_id)
+                .first()
+            )
+            if tx:
+                idempotent_existing += 1
+                continue
+
+            tx = Transaction(
+                brand=c.brand,
+                profile_id=c.profile_id,
+                transaction_type="MAINTENANCE",
+                transaction_id=event_id,
+                source="INTERNAL_JOB",
+                payload={
+                    "job_key": job.job_key,
+                    "job_id": str(job.id),
+                    "coupon_type_id": coupon_type_id,
+                    "frequency": frequency,
+                },
+                status="PROCESSED",
+                idempotency_key=None,
+            )
+            db.add(tx)
+            db.flush()
+
+            idem = f"backfill_coupon:{job.id}:{bucket_key}:{c.id}:{coupon_type_id}"
+            try:
+                issue_coupon(
+                    db,
+                    customer=c,
+                    transaction=tx,
+                    coupon_type_id=coupon_type_id,
+                    frequency=frequency,
+                    rule_id=None,
+                    rule_execution_id=None,
+                    idempotency_key=idem,
+                )
+                created += 1
+            except Exception:
+                failed += 1
+
+        finished = len(customers) < batch_size
+        if finished:
+            job.selector = {"batch_size": batch_size}
+        else:
+            job.selector = {"after_id": str(last_id), "batch_size": batch_size}
+
+        db.flush()
+        return CouponBackfillRunStats(
+            processed=processed,
+            created=created,
+            idempotent_existing=idempotent_existing,
+            failed=failed,
+            finished=bool(finished),
+        )
 
     today: date = now.date()
 

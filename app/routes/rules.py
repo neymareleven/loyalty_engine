@@ -59,6 +59,9 @@ def create_rule(
     if dup:
         raise HTTPException(status_code=400, detail="A rule with this name already exists for this brand")
 
+    if payload.active and not payload.actions:
+        raise HTTPException(status_code=400, detail="Active rules must define at least one action")
+
     rule = Rule(
         brand=active_brand,
         name=payload.name,
@@ -123,6 +126,18 @@ def update_rule(
         )
         if dup:
             raise HTTPException(status_code=400, detail="A rule with this name already exists for this brand")
+
+    # Prevent enabling useless rules (no actions).
+    if data.get("active") is True:
+        next_actions = data.get("actions") if "actions" in data else rule.actions
+        if not next_actions:
+            raise HTTPException(status_code=400, detail="Active rules must define at least one action")
+
+    # If actions are being cleared, the rule must not remain active.
+    if "actions" in data and not data.get("actions"):
+        next_active = data.get("active") if "active" in data else rule.active
+        if next_active:
+            raise HTTPException(status_code=400, detail="Cannot clear actions on an active rule")
 
     for k, v in data.items():
         if k == "brand":

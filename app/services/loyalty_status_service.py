@@ -81,6 +81,7 @@ def update_customer_status(
     depth: int = 0,
     refresh_window: bool = False,
     emit_events: bool = True,
+    allow_downgrade_before_expiry: bool = False,
 ):
     """
     Recalcule et met à jour le statut fidélité du client
@@ -96,9 +97,31 @@ def update_customer_status(
     settings = get_loyalty_settings(db, brand=customer.brand)
     status_days = getattr(settings, "loyalty_status_validity_days", None) if settings else None
     base_tier_key = _get_base_tier_key(db, customer.brand)
+    now = datetime.utcnow()
+
+    # Prevent automatic downgrades before the current loyalty status validity window expires.
+    # Upgrades are still applied immediately.
+    if customer.loyalty_status and customer.loyalty_status != new_status:
+        old_min = _get_tier_min_points(db, customer.brand, customer.loyalty_status)
+        new_min = _get_tier_min_points(db, customer.brand, new_status)
+        is_downgrade = bool(
+            new_min is not None
+            and old_min is not None
+            and int(new_min) < int(old_min)
+        )
+        not_expired = bool(customer.loyalty_status_expires_at is not None and customer.loyalty_status_expires_at > now)
+        if is_downgrade and not allow_downgrade_before_expiry and not_expired:
+            new_status = customer.loyalty_status
+
     is_base_tier = bool(base_tier_key) and (new_status == base_tier_key)
 
-    now = datetime.utcnow()
+    # Safety: base tier must never expire, even if no refresh/status-change happens.
+    # This fixes legacy rows that may already have an expiration set.
+    if is_base_tier:
+        if customer.loyalty_status_expires_at is not None:
+            customer.loyalty_status_expires_at = None
+        if customer.loyalty_status_assigned_at is None:
+            customer.loyalty_status_assigned_at = now
     should_refresh_window = bool(refresh_window) or (customer.loyalty_status != new_status)
     if should_refresh_window:
         if is_base_tier:

@@ -15,20 +15,20 @@ from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.models.rule import Rule
 from app.models.reward import Reward
+from app.models.coupon_type import CouponType
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.reward_service import expire_rewards
+from app.services.coupon_service import expire_coupons
 from app.services.loyalty_settings_service import get_or_create_loyalty_settings
 from app.services.loyalty_validity_service import initialize_validity_windows_for_existing_customers
 from app.schemas.loyalty_settings import LoyaltySettingsOut, LoyaltySettingsUpdate
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
 from app.schemas.rule import RuleCreate, RuleUpdate
 from app.schemas.rule_action_catalog import (
-    BurnPointsAction,
     EarnPointsAction,
-    IssueRewardAction,
+    IssueCouponAction,
     ResetStatusPointsAction,
-    SetRankAction,
 )
 
 
@@ -46,6 +46,38 @@ def get_loyalty_settings(
         "brand": obj.brand,
         "points_validity_days": obj.points_validity_days,
         "loyalty_status_validity_days": obj.loyalty_status_validity_days,
+        "coupon_validity_days": getattr(obj, "coupon_validity_days", None),
+    }
+
+
+@router.get("/ui-options/coupon-types")
+def list_ui_options_coupon_types(
+    brand: str = Depends(get_active_brand),
+    active: bool | None = True,
+    db: Session = Depends(get_db),
+):
+    q = db.query(CouponType).filter(CouponType.brand == brand)
+    if active is not None:
+        q = q.filter(CouponType.active.is_(active))
+    items = q.order_by(CouponType.name.asc()).all()
+    return {
+        "brand": brand,
+        "items": [
+            {
+                "id": str(ct.id),
+                "name": ct.name,
+                "active": ct.active,
+                "rewardCategoryId": str(
+                    (
+                        db.query(RewardCategory.id)
+                        .filter(RewardCategory.brand == brand)
+                        .filter(RewardCategory.coupon_type_id == ct.id)
+                        .scalar()
+                    )
+                ),
+            }
+            for ct in items
+        ],
     }
 
 
@@ -59,6 +91,7 @@ def update_loyalty_settings(
 
     prev_points_days = obj.points_validity_days
     prev_status_days = obj.loyalty_status_validity_days
+    prev_coupon_days = getattr(obj, "coupon_validity_days", None)
 
     data = payload.model_dump(exclude_unset=True)
     if "points_validity_days" in data and data["points_validity_days"] is not None:
@@ -83,10 +116,22 @@ def update_loyalty_settings(
     elif "loyalty_status_validity_days" in data and data["loyalty_status_validity_days"] is None:
         obj.loyalty_status_validity_days = None
 
+    if "coupon_validity_days" in data and data["coupon_validity_days"] is not None:
+        try:
+            v = int(data["coupon_validity_days"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="coupon_validity_days must be an integer")
+        if v < 0:
+            raise HTTPException(status_code=400, detail="coupon_validity_days must be >= 0")
+        obj.coupon_validity_days = v
+    elif "coupon_validity_days" in data and data["coupon_validity_days"] is None:
+        obj.coupon_validity_days = None
+
     should_backfill_points = obj.points_validity_days is not None and prev_points_days is None
     should_backfill_status = obj.loyalty_status_validity_days is not None and prev_status_days is None
+    should_backfill_coupon = getattr(obj, "coupon_validity_days", None) is not None and prev_coupon_days is None
 
-    if should_backfill_points or should_backfill_status:
+    if should_backfill_points or should_backfill_status or should_backfill_coupon:
         initialize_validity_windows_for_existing_customers(db, brand=brand)
 
     db.commit()
@@ -95,6 +140,7 @@ def update_loyalty_settings(
         "brand": obj.brand,
         "points_validity_days": obj.points_validity_days,
         "loyalty_status_validity_days": obj.loyalty_status_validity_days,
+        "coupon_validity_days": getattr(obj, "coupon_validity_days", None),
     }
 
 
@@ -486,61 +532,21 @@ def _reward_type_catalog_item(
     visible: list[str],
     voucher_presets: list[dict[str, Any]] | None = None,
 ):
-    base_required = ["name", "type"]
-    req = sorted({*base_required, *required})
-
     props: dict[str, Any] = {
         "brand": {"type": ["string", "null"]},
         "name": {"type": "string"},
         "description": {"type": ["string", "null"]},
-        "cost_points": {"type": ["integer", "null"], "minimum": 0},
-        "type": {"type": "string", "enum": [reward_type]},
-        "validity_days": {"type": ["integer", "null"], "minimum": 0},
-        "max_attributions": {"type": ["integer", "null"], "minimum": 1},
-        "reset_period": {"type": ["string", "null"], "enum": ["DAY", "MONTH", "YEAR", "LIFETIME"]},
-        "currency": {"type": ["string", "null"], "minLength": 3, "maxLength": 3},
-        "value_amount": {"type": ["integer", "null"], "minimum": 0},
-        "value_percent": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
-        "params": {"type": ["object", "null"]},
         "active": {"type": "boolean"},
     }
 
     ui_hints: dict[str, Any] = {
         "brand": {"widget": "hidden"},
-        "type": {"widget": "select", "options": ["POINTS", "DISCOUNT", "CASHBACK", "VOUCHER"]},
         "description": {"widget": "textarea"},
-        "cost_points": {"widget": "number", "min": 0},
-        "validity_days": {"widget": "number", "min": 0, "placeholder": "Optional"},
-        "max_attributions": {"widget": "number", "min": 1, "placeholder": "Optional"},
-        "reset_period": {
-            "widget": "select",
-            "options": ["DAY", "MONTH", "YEAR", "LIFETIME"],
-            "placeholder": "Optional",
-        },
-        "currency": {"widget": "text", "placeholder": "ISO code (EUR, XAF, ...)"},
-        "value_amount": {"widget": "number", "min": 0},
-        "value_percent": {"widget": "number", "min": 1, "max": 100},
-        "params": {
-            "widget": "kv_object",
-            "keyPlaceholder": "key",
-            "valuePlaceholder": "value",
-        },
         "active": {"widget": "switch"},
         "_ui": {
-            "visibleFields": visible,
+            "visibleFields": ["name", "description", "active"],
         },
     }
-
-    if reward_type == "VOUCHER" and voucher_presets:
-        ui_hints["params"] = {
-            "widget": "voucher_params_builder",
-            "presets": voucher_presets,
-            "serialize": {
-                "target": "params",
-                "format": "object",
-                "note": "Frontend should serialize preset form fields into RewardCreate.params (dict).",
-            },
-        }
 
     return {
         "type": reward_type,
@@ -549,145 +555,29 @@ def _reward_type_catalog_item(
         "jsonSchema": {
             "type": "object",
             "properties": props,
-            "required": req,
+            "required": ["name"],
             "additionalProperties": False,
         },
         "uiHints": ui_hints,
-        "examples": [{"name": "Example", "type": reward_type}],
+        "examples": [{"name": "Example"}],
     }
 
 
 @router.get("/rewards/ui-catalog")
 def get_rewards_ui_catalog():
-    common = ["name", "description", "type", "cost_points", "validity_days", "active"]
-    limits = ["max_attributions", "reset_period"]
-
-    voucher_presets: list[dict[str, Any]] = [
-        {
-            "key": "COUPON_FIXED",
-            "title": "Coupon fixe",
-            "description": "Un code/coupon avec une remise fixe (montant).",
-            "defaultParams": {"kind": "COUPON_FIXED", "amount": 0, "currency": "XAF", "code_mode": "AUTO"},
-            "form": {
-                "jsonSchema": {
-                    "type": "object",
-                    "properties": {
-                        "amount": {"type": "integer", "minimum": 0},
-                        "currency": {"type": "string", "minLength": 3, "maxLength": 3},
-                        "code_mode": {"type": "string", "enum": ["AUTO", "MANUAL"]},
-                        "manual_code": {"type": ["string", "null"]},
-                        "description": {"type": ["string", "null"]},
-                    },
-                    "required": ["amount", "currency", "code_mode"],
-                    "additionalProperties": False,
-                },
-                "uiHints": {
-                    "amount": {"widget": "number", "min": 0},
-                    "currency": {"widget": "text", "placeholder": "ISO (XAF, EUR, ...)"},
-                    "code_mode": {"widget": "select", "options": ["AUTO", "MANUAL"]},
-                    "manual_code": {"widget": "text", "placeholder": "If MANUAL"},
-                    "description": {"widget": "textarea", "placeholder": "Optional"},
-                },
-            },
-            "serialize": {"kind": "COUPON_FIXED"},
-        },
-        {
-            "key": "COUPON_PERCENT",
-            "title": "Coupon %",
-            "description": "Un code/coupon avec une remise en pourcentage.",
-            "defaultParams": {"kind": "COUPON_PERCENT", "percent": 10, "code_mode": "AUTO"},
-            "form": {
-                "jsonSchema": {
-                    "type": "object",
-                    "properties": {
-                        "percent": {"type": "integer", "minimum": 1, "maximum": 100},
-                        "code_mode": {"type": "string", "enum": ["AUTO", "MANUAL"]},
-                        "manual_code": {"type": ["string", "null"]},
-                        "description": {"type": ["string", "null"]},
-                    },
-                    "required": ["percent", "code_mode"],
-                    "additionalProperties": False,
-                },
-                "uiHints": {
-                    "percent": {"widget": "number", "min": 1, "max": 100},
-                    "code_mode": {"widget": "select", "options": ["AUTO", "MANUAL"]},
-                    "manual_code": {"widget": "text", "placeholder": "If MANUAL"},
-                    "description": {"widget": "textarea", "placeholder": "Optional"},
-                },
-            },
-            "serialize": {"kind": "COUPON_PERCENT"},
-        },
-        {
-            "key": "FREE_CODE",
-            "title": "Code libre",
-            "description": "Un voucher qui ne porte pas de valeur calculée ici (ex: cadeau externe, lien, instruction).",
-            "defaultParams": {"kind": "FREE_CODE", "code_mode": "AUTO"},
-            "form": {
-                "jsonSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code_mode": {"type": "string", "enum": ["AUTO", "MANUAL"]},
-                        "manual_code": {"type": ["string", "null"]},
-                        "label": {"type": ["string", "null"]},
-                        "instructions": {"type": ["string", "null"]},
-                    },
-                    "required": ["code_mode"],
-                    "additionalProperties": False,
-                },
-                "uiHints": {
-                    "code_mode": {"widget": "select", "options": ["AUTO", "MANUAL"]},
-                    "manual_code": {"widget": "text", "placeholder": "If MANUAL"},
-                    "label": {"widget": "text", "placeholder": "Optional"},
-                    "instructions": {"widget": "textarea", "placeholder": "Optional"},
-                },
-            },
-            "serialize": {"kind": "FREE_CODE"},
-        },
-    ]
-
     return {
         "create": {
             "fieldHelp": {
                 "name": "Nom lisible de la récompense (affiché dans le backoffice).",
                 "description": "Description (optionnelle) affichée au support/ops.",
-                "cost_points": "Coût en points si la récompense est achetée via le catalogue. Laisser vide/null pour une récompense gratuite (marketing).",
-                "validity_days": "Durée de validité après attribution (en jours). Laisser vide/null pour illimité.",
-                "max_attributions": "Nombre maximum d'attributions sur une période. Laisser vide/null = illimité.",
-                "reset_period": "Période de réinitialisation de la limite (DAY, MONTH, YEAR, LIFETIME). Requis si max_attributions est renseigné.",
-                "currency": "Devise ISO 3 lettres (XAF, EUR...). Utilisée uniquement si le type utilise un montant.",
-                "value_amount": "Montant. CASHBACK: à utiliser si cashback fixe (dans ce cas currency est obligatoire). DISCOUNT: à utiliser uniquement si remise fixe (dans ce cas value_percent doit rester vide).",
-                "value_percent": "Pourcentage (1..100). DISCOUNT: à utiliser uniquement si remise en % (dans ce cas value_amount/currency doivent rester vides).",
-                "params": "Paramètres additionnels du type. Pour VOUCHER: utilisez un preset (formulaire guidé) plutôt qu'un JSON brut.",
             },
             "rewardTypes": [
                 _reward_type_catalog_item(
-                    reward_type="POINTS",
-                    title="Points",
-                    description="A simple reward redeemable with points.",
-                    required=["value_amount"],
-                    visible=[*common, *limits, "value_amount"],
-                ),
-                _reward_type_catalog_item(
-                    reward_type="DISCOUNT",
-                    title="Discount",
-                    description="A discount applied by backend: either percentage (value_percent) OR fixed amount (value_amount + currency).",
+                    reward_type="ENTITLEMENT",
+                    title="Entitlement",
+                    description="Static reward content attached to coupons.",
                     required=[],
-                    visible=[*common, *limits, "currency", "value_amount", "value_percent"],
-                ),
-                _reward_type_catalog_item(
-                    reward_type="CASHBACK",
-                    title="Cashback",
-                    description="A cashback applied by backend: either percentage (value_percent) OR fixed amount (value_amount + currency).",
-                    required=[],
-                    visible=[*common, *limits, "currency", "value_amount", "value_percent"],
-                ),
-                _reward_type_catalog_item(
-                    reward_type="VOUCHER",
-                    title="Voucher",
-                    description="A voucher reward. Params are entered as key/value pairs.",
-                    required=["params"],
-                    visible=[*common, *limits, "params"],
-                    voucher_presets=voucher_presets,
+                    visible=["name", "description", "active"],
                 ),
             ]
         }
@@ -720,7 +610,6 @@ def list_rule_condition_fields(
         "customer.gender",
         "customer.status",
         "customer.loyalty_status",
-        "customer.lifetime_points",
         "customer.status_points",
         "customer.created_at",
         "customer.last_activity_at",
@@ -798,7 +687,6 @@ def list_internal_job_selector_fields():
         "customer.gender",
         "customer.status",
         "customer.loyalty_status",
-        "customer.lifetime_points",
         "customer.birthdate",
         "customer.created_at",
         "customer.last_activity_at",
@@ -841,6 +729,16 @@ def admin_expire_rewards(
     return {"brand": brand, "expired": expired_count}
 
 
+@router.post("/coupons/expire")
+def admin_expire_coupons(
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    expired_count = expire_coupons(db, brand=brand)
+    db.commit()
+    return {"brand": brand, "expired": expired_count}
+
+
 @router.get("/ui-options/rewards")
 def list_ui_options_rewards(
     brand: str = Depends(get_active_brand),
@@ -858,7 +756,6 @@ def list_ui_options_rewards(
                 "id": str(r.id),
                 "name": r.name,
                 "active": r.active,
-                "costPoints": r.cost_points,
                 "type": r.type,
             }
             for r in items
@@ -967,69 +864,39 @@ def list_rule_actions_catalog():
                 },
             },
             {
-                "type": "burn_points",
-                "title": "Retirer des points",
-                "description": "Débite un nombre de points du portefeuille (wallet) du client.",
-                "params": {"points": "int"},
-                "jsonSchema": _model_json_schema(BurnPointsAction),
-                "examples": [{"type": "burn_points", "points": 20}],
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": False,
-                    "sideEffects": ["Creates point movement"],
-                    "commonErrors": ["points missing/invalid", "not enough points", "customer not found"],
-                },
-            },
-            {
-                "type": "issue_reward",
-                "title": "Attribuer une récompense",
-                "description": "Crée une récompense pour le client (sans la consommer).",
-                "params": {"reward_id": "uuid"},
-                "jsonSchema": _model_json_schema(IssueRewardAction),
-                "examples": [{"type": "issue_reward", "reward_id": "<uuid>"}],
+                "type": "issue_coupon",
+                "title": "Attribuer un coupon",
+                "description": "Émet un coupon pour le client et lui attribue toutes les récompenses actives de la catégorie associée (snapshot au moment de l’émission).",
+                "params": {"coupon_type_id": "uuid", "frequency": "ALWAYS | ONCE_PER_CALENDAR_YEAR"},
+                "jsonSchema": _model_json_schema(IssueCouponAction),
+                "examples": [
+                    {"type": "issue_coupon", "coupon_type_id": "<uuid>"},
+                    {"type": "issue_coupon", "coupon_type_id": "<uuid>", "frequency": "ALWAYS"},
+                ],
                 "uiHints": {
-                    "reward_id": {
+                    "coupon_type_id": {
                         "widget": "remote_select",
                         "datasource": {
-                            "endpoint": "/admin/ui-options/rewards",
+                            "endpoint": "/admin/ui-options/coupon-types",
                             "method": "GET",
                             "valueField": "id",
                             "labelField": "name",
                             "brandVia": "X-Brand",
                         },
-                    }
+                    },
+                    "frequency": {
+                        "widget": "select",
+                        "options": [
+                            {"label": "Once per calendar year", "value": "ONCE_PER_CALENDAR_YEAR"},
+                            {"label": "Always", "value": "ALWAYS"},
+                        ],
+                    },
                 },
                 "semantics": {
                     "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": False,
-                    "sideEffects": ["Creates customer reward"],
-                    "commonErrors": ["reward_id missing", "reward not found"],
-                },
-            },
-            {
-                "type": "set_rank",
-                "title": "Définir un niveau (tier)",
-                "description": "Place le client sur un tier cible en ajustant automatiquement ses points de statut au minimum du tier.",
-                "params": {"tier_key": "str"},
-                "jsonSchema": _model_json_schema(SetRankAction),
-                "examples": [{"type": "set_rank", "tier_key": "GOLD"}],
-                "uiHints": {
-                    "tier_key": {
-                        "widget": "remote_select",
-                        "datasource": {
-                            "endpoint": "/admin/ui-options/loyalty-tiers",
-                            "method": "GET",
-                            "valueField": "key",
-                            "labelField": "name",
-                            "brandVia": "X-Brand",
-                        },
-                    }
-                },
-                "semantics": {
-                    "atomicity": "Per-rule: all actions rollback if one fails.",
-                    "idempotent": False,
-                    "sideEffects": ["Adjusts customer.status_points", "Updates loyalty status"],
-                    "commonErrors": ["tier_key missing/invalid", "tier not found"],
+                    "idempotent": True,
+                    "sideEffects": ["Creates customer coupon", "Creates customer rewards snapshot"],
+                    "commonErrors": ["coupon_type_id missing", "coupon type not found", "invalid frequency"],
                 },
             },
             {
@@ -1145,7 +1012,6 @@ def get_rules_ui_bundle(
                         "id": str(r.id),
                         "name": r.name,
                         "active": r.active,
-                        "costPoints": r.cost_points,
                         "type": r.type,
                     }
                     for r in rewards

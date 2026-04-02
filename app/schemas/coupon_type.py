@@ -1,34 +1,31 @@
 from datetime import datetime
 from typing import Optional
-
 from uuid import UUID
 
 from pydantic import BaseModel
 
 
-class RewardCreate(BaseModel):
+class CouponTypeCreate(BaseModel):
     brand: Optional[str] = None
-    reward_category_id: Optional[UUID] = None
     name: str
     description: Optional[str] = None
     active: bool = True
 
 
-class RewardUpdate(BaseModel):
-    reward_category_id: Optional[UUID] = None
+class CouponTypeUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     active: Optional[bool] = None
 
 
-class RewardOut(BaseModel):
+class CouponTypeOut(BaseModel):
     id: UUID
     brand: str
-    reward_category_id: Optional[UUID] = None
     name: str
     description: Optional[str] = None
     active: bool
     created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

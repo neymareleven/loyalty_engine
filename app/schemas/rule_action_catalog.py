@@ -9,19 +9,10 @@ class EarnPointsAction(BaseModel):
     multiplier: Optional[int] = None
 
 
-class BurnPointsAction(BaseModel):
-    type: Literal["burn_points"] = "burn_points"
-    points: int
-
-
-class IssueRewardAction(BaseModel):
-    type: Literal["issue_reward"] = "issue_reward"
-    reward_id: str
-
-
-class SetRankAction(BaseModel):
-    type: Literal["set_rank"] = "set_rank"
-    tier_key: str
+class IssueCouponAction(BaseModel):
+    type: Literal["issue_coupon"] = "issue_coupon"
+    coupon_type_id: str
+    frequency: Literal["ALWAYS", "ONCE_PER_CALENDAR_YEAR"] = "ONCE_PER_CALENDAR_YEAR"
 
 
 class ResetStatusPointsAction(BaseModel):

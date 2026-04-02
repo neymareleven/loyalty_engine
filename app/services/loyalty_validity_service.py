@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
@@ -10,7 +10,7 @@ from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import update_customer_status
-from app.services.wallet_service import get_points_balance
+from app.services.wallet_service import get_status_points_balance
 
 
 def initialize_validity_windows_for_existing_customers(db: Session, *, brand: str) -> dict[str, int]:
@@ -79,6 +79,17 @@ def initialize_validity_windows_for_existing_customers(db: Session, *, brand: st
                 }
             )
 
+            # Safety backfill: legacy base-tier rows might have expires_at set.
+            # Base tier must never expire.
+            db.query(Customer).filter(Customer.brand == brand).filter(Customer.loyalty_status == base_key).filter(
+                Customer.loyalty_status_expires_at.isnot(None)
+            ).update(
+                {
+                    Customer.loyalty_status_expires_at: None,
+                    Customer.loyalty_status_assigned_at: func.coalesce(Customer.loyalty_status_assigned_at, now),
+                }
+            )
+
     db.flush()
     return {"points": int(updated_points or 0), "loyalty_status": int(updated_status or 0)}
 
@@ -115,7 +126,7 @@ def expire_points(db: Session, *, brand: str) -> int:
     updated = 0
     for c in customers:
         before = int(c.status_points or 0)
-        balance = max(0, int(get_points_balance(db, c.id) or 0))
+        balance = max(0, int(get_status_points_balance(db, c.id) or 0))
         if balance != before:
             c.status_points = balance
             c.status_points_reset_at = now

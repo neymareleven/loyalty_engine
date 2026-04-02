@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models.customer import Customer
+from app.models.coupon_type import CouponType
 from app.models.internal_job import InternalJob
 from app.models.reward import Reward
 from app.services.internal_job_runner import compute_next_run_at_from_schedule, run_internal_job_once
@@ -61,6 +62,9 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
     for (b,) in db.query(Reward.brand).filter(Reward.brand.isnot(None)).distinct().all():
         if b:
             brands.add(str(b))
+    for (b,) in db.query(CouponType.brand).filter(CouponType.brand.isnot(None)).distinct().all():
+        if b:
+            brands.add(str(b))
 
     if not brands:
         return
@@ -70,6 +74,7 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
 
     job_names = {
         "MAINT_EXPIRE_REWARDS": "Maintenance: Expire Rewards",
+        "MAINT_EXPIRE_COUPONS": "Maintenance: Expire Coupons",
         "MAINT_EXPIRE_POINTS": "Maintenance: Expire Points",
         "MAINT_EXPIRE_LOYALTY_STATUS": "Maintenance: Expire Loyalty Status",
         "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS": "Maintenance: Recompute Customers Loyalty Status",
@@ -79,6 +84,7 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
     for brand in brands:
         for job_key in [
             "MAINT_EXPIRE_REWARDS",
+            "MAINT_EXPIRE_COUPONS",
             "MAINT_EXPIRE_POINTS",
             "MAINT_EXPIRE_LOYALTY_STATUS",
             "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",

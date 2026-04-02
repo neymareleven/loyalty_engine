@@ -4,7 +4,7 @@ from datetime import date
 from app.models.point_movement import PointMovement
 
 
-def get_points_balance(db: Session, customer_id):
+def get_status_points_balance(db: Session, customer_id):
     today = date.today()
 
     balance = (
@@ -17,3 +17,7 @@ def get_points_balance(db: Session, customer_id):
     )
 
     return max(0, int(balance or 0))
+
+
+def get_points_balance(db: Session, customer_id):
+    return get_status_points_balance(db, customer_id)

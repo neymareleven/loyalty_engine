@@ -14,7 +14,7 @@ class PointMovement(Base):
     customer_id = Column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
 
     points = Column(Integer, nullable=False)
-    type = Column(String(20), nullable=False)  # EARN / BURN / ADJUST
+    type = Column(String(20), nullable=False)  # EARN / DEDUCT / ADJUST
 
     source_transaction_id = Column(UUID(as_uuid=True), ForeignKey("transactions.id"))
 

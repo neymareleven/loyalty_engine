@@ -26,9 +26,11 @@ router = APIRouter(prefix="/admin/internal-jobs", tags=["admin-internal-jobs"])
 def _is_system_managed_job(job: InternalJob) -> bool:
     return job.job_key in {
         "MAINT_EXPIRE_REWARDS",
+        "MAINT_EXPIRE_COUPONS",
         "MAINT_EXPIRE_POINTS",
         "MAINT_EXPIRE_LOYALTY_STATUS",
         "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+        "MAINT_BACKFILL_COUPONS",
     }
 
 
@@ -90,8 +92,6 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
             return Customer.status
         if key == "loyalty_status":
             return Customer.loyalty_status
-        if key == "lifetime_points":
-            return Customer.lifetime_points
         if key == "created_at":
             return Customer.created_at
         if key == "last_activity_at":
@@ -260,13 +260,6 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
 
         return or_(Customer.last_activity_at.is_(None), Customer.last_activity_at <= cutoff)
 
-    if "lifetime_points_gte" in selector:
-        try:
-            pts = int(selector.get("lifetime_points_gte"))
-        except Exception:
-            raise HTTPException(status_code=400, detail="Legacy selector 'lifetime_points_gte' must be an integer")
-        return Customer.lifetime_points >= pts
-
     # Legacy guard (explicit)
     legacy_keys = {
         "all",
@@ -276,7 +269,6 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
         "inactive_days_gte",
         "status_in",
         "loyalty_status_in",
-        "lifetime_points_gte",
     }
     found = [k for k in legacy_keys if k in selector]
     if found:

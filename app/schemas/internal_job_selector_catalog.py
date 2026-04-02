@@ -46,6 +46,6 @@ def get_internal_job_selector_catalog():
                     {"field": "customer.created_at", "operator": "lte", "value": {"$system": "now"}},
                 ]
             },
-            {"or": [{"field": "customer.lifetime_points", "operator": "gte", "value": 1000}, {"field": "customer.loyalty_status", "operator": "in", "value": ["GOLD", "PLATINUM"]}]},
+            {"or": [{"field": "customer.status_points", "operator": "gte", "value": 1000}, {"field": "customer.loyalty_status", "operator": "in", "value": ["GOLD", "PLATINUM"]}]},
         ],
     }

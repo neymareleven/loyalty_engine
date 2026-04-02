@@ -11,6 +11,7 @@ from app.models.customer_reward import CustomerReward
 from app.services.contact_service import get_customer
 from app.services.loyalty_service import earn_points, burn_points
 from app.services.reward_service import issue_reward
+from app.services.coupon_service import issue_coupon, use_coupon
 
 
 def _get_by_path(obj, path: str):
@@ -408,8 +409,81 @@ def _execute_actions(db: Session, customer, transaction, actions):
             )
             executed.append({"type": action_type, "rewardId": reward_id})
 
+        elif action_type == "issue_coupon":
+            coupon_type_id = action.get("coupon_type_id") or action.get("couponTypeId") or action.get("couponTypeID")
+            if isinstance(coupon_type_id, dict):
+                coupon_type_id = coupon_type_id.get("id") or coupon_type_id.get("couponTypeId") or coupon_type_id.get(
+                    "coupon_type_id"
+                )
+            if coupon_type_id is not None:
+                coupon_type_id = str(coupon_type_id)
+            if not coupon_type_id:
+                raise ValueError("issue_coupon requires coupon_type_id")
+
+            frequency = action.get("frequency") or "ONCE_PER_CALENDAR_YEAR"
+            frequency = str(frequency)
+
+            rule_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_id")
+            rule_execution_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_execution_id")
+
+            idempotency_key = None
+            if transaction.id and rule_id and rule_execution_id and coupon_type_id:
+                idempotency_key = f"issue_coupon:{transaction.id}:{rule_id}:{rule_execution_id}:{action_index}:{coupon_type_id}"
+
+            issue_coupon(
+                db,
+                customer=customer,
+                transaction=transaction,
+                coupon_type_id=coupon_type_id,
+                frequency=frequency,  # validated in service
+                rule_id=str(rule_id) if rule_id is not None else None,
+                rule_execution_id=str(rule_execution_id) if rule_execution_id is not None else None,
+                idempotency_key=idempotency_key,
+            )
+            executed.append({"type": action_type, "couponTypeId": coupon_type_id, "frequency": frequency})
+
+        elif action_type == "use_coupon":
+            coupon_type_id = action.get("coupon_type_id") or action.get("couponTypeId") or action.get("couponTypeID")
+            if isinstance(coupon_type_id, dict):
+                coupon_type_id = coupon_type_id.get("id") or coupon_type_id.get("couponTypeId") or coupon_type_id.get(
+                    "coupon_type_id"
+                )
+            if coupon_type_id is not None:
+                coupon_type_id = str(coupon_type_id)
+            if not coupon_type_id:
+                raise ValueError("use_coupon requires coupon_type_id")
+
+            rule_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_id")
+            rule_execution_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_execution_id")
+
+            use_coupon(
+                db,
+                customer=customer,
+                transaction=transaction,
+                coupon_type_id=coupon_type_id,
+                rule_id=str(rule_id) if rule_id is not None else None,
+                rule_execution_id=str(rule_execution_id) if rule_execution_id is not None else None,
+            )
+            executed.append({"type": action_type, "couponTypeId": coupon_type_id})
+
         elif action_type == "reset_status_points":
             locked_customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
+
+            from app.models.point_movement import PointMovement
+            from app.services.wallet_service import get_status_points_balance
+
+            balance = int(get_status_points_balance(db, locked_customer.id) or 0)
+            if balance > 0:
+                db.add(
+                    PointMovement(
+                        customer_id=locked_customer.id,
+                        points=-balance,
+                        type="ADJUST",
+                        source_transaction_id=transaction.id,
+                        expires_at=None,
+                    )
+                )
+
             locked_customer.status_points = 0
             locked_customer.status_points_reset_at = datetime.utcnow()
             db.flush()
@@ -499,6 +573,9 @@ def process_transaction_rules(db: Session, transaction):
         .all()
     )
 
+    # Rules with no actions are effectively no-ops; skip them entirely to avoid wasting resources.
+    rules = [r for r in rules if r and getattr(r, "actions", None)]
+
     if not rules:
         if not transaction.error_code:
             transaction.error_code = "NO_RULES"
@@ -521,16 +598,6 @@ def process_transaction_rules(db: Session, transaction):
                     rule_id=rule.id,
                     result="SKIPPED",
                     details={"matched": False},
-                )
-                db.add(execution)
-                continue
-
-            if not rule.actions:
-                execution = TransactionRuleExecution(
-                    transaction_id=transaction.id,
-                    rule_id=rule.id,
-                    result="SKIPPED",
-                    details={"matched": True, "reason": "No actions defined"},
                 )
                 db.add(execution)
                 continue
