@@ -354,6 +354,13 @@ def _execute_actions(db: Session, customer, transaction, actions):
             raise ValueError("Invalid action")
 
         action_type = action.get("type")
+
+        # Backward-compatibility: old rules may still exist in DB.
+        # These actions are deprecated and must have no side effects.
+        if action_type in {"burn_points", "issue_reward", "use_coupon", "set_rank"}:
+            executed.append({"type": str(action_type), "ignored": True})
+            continue
+
         if action_type == "earn_points":
             points = action.get("points")
             multiplier = action.get("multiplier")
@@ -371,43 +378,6 @@ def _execute_actions(db: Session, customer, transaction, actions):
                 depth=depth,
             )
             executed.append({"type": action_type, "points": points_int, "multiplier": mult_int})
-
-        elif action_type == "burn_points":
-            points = action.get("points")
-
-            depth = _as_int(_get_by_path(transaction.payload or {}, "_ruleDepth")) or 0
-            burn_points(
-                db,
-                customer,
-                points=points,
-                source_transaction_id=transaction.id,
-                depth=depth,
-            )
-            executed.append({"type": action_type, "points": _as_int(points)})
-
-        elif action_type == "issue_reward":
-            reward_id = action.get("reward_id") or action.get("rewardId") or action.get("rewardID")
-            if isinstance(reward_id, dict):
-                reward_id = reward_id.get("id") or reward_id.get("rewardId") or reward_id.get("reward_id")
-            if reward_id is not None:
-                reward_id = str(reward_id)
-
-            rule_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_id")
-            rule_execution_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_execution_id")
-            idempotency_key = None
-            if transaction.id and rule_id and rule_execution_id and reward_id:
-                idempotency_key = f"issue:{transaction.id}:{rule_id}:{rule_execution_id}:{action_index}:{reward_id}"
-
-            issue_reward(
-                db,
-                customer,
-                transaction,
-                reward_id=reward_id,
-                rule_id=str(rule_id) if rule_id is not None else None,
-                rule_execution_id=str(rule_execution_id) if rule_execution_id is not None else None,
-                idempotency_key=idempotency_key,
-            )
-            executed.append({"type": action_type, "rewardId": reward_id})
 
         elif action_type == "issue_coupon":
             coupon_type_id = action.get("coupon_type_id") or action.get("couponTypeId") or action.get("couponTypeID")
@@ -442,30 +412,6 @@ def _execute_actions(db: Session, customer, transaction, actions):
             )
             executed.append({"type": action_type, "couponTypeId": coupon_type_id, "frequency": frequency})
 
-        elif action_type == "use_coupon":
-            coupon_type_id = action.get("coupon_type_id") or action.get("couponTypeId") or action.get("couponTypeID")
-            if isinstance(coupon_type_id, dict):
-                coupon_type_id = coupon_type_id.get("id") or coupon_type_id.get("couponTypeId") or coupon_type_id.get(
-                    "coupon_type_id"
-                )
-            if coupon_type_id is not None:
-                coupon_type_id = str(coupon_type_id)
-            if not coupon_type_id:
-                raise ValueError("use_coupon requires coupon_type_id")
-
-            rule_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_id")
-            rule_execution_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_execution_id")
-
-            use_coupon(
-                db,
-                customer=customer,
-                transaction=transaction,
-                coupon_type_id=coupon_type_id,
-                rule_id=str(rule_id) if rule_id is not None else None,
-                rule_execution_id=str(rule_execution_id) if rule_execution_id is not None else None,
-            )
-            executed.append({"type": action_type, "couponTypeId": coupon_type_id})
-
         elif action_type == "reset_status_points":
             locked_customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
 
@@ -499,47 +445,6 @@ def _execute_actions(db: Session, customer, transaction, actions):
                 depth=depth,
             )
             executed.append({"type": action_type})
-
-        elif action_type == "set_rank":
-            tier_key = action.get("tier_key") or action.get("tierKey") or action.get("tier")
-            if not tier_key:
-                raise ValueError("set_rank requires tier_key")
-            tier_key = str(tier_key)
-
-            target = (
-                db.query(LoyaltyTier)
-                .filter(LoyaltyTier.brand == customer.brand)
-                .filter(LoyaltyTier.active.is_(True))
-                .filter(LoyaltyTier.key == tier_key)
-                .first()
-            )
-            if not target:
-                raise ValueError("Target loyalty tier not found for brand")
-
-            locked_customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
-            current_points = int(locked_customer.status_points or 0)
-            target_points = int(target.min_status_points or 0)
-            delta = target_points - current_points
-
-            depth = _as_int(_get_by_path(transaction.payload or {}, "_ruleDepth")) or 0
-            if delta > 0:
-                earn_points(
-                    db,
-                    locked_customer,
-                    points=delta,
-                    source_transaction_id=transaction.id,
-                    depth=depth,
-                )
-            elif delta < 0:
-                burn_points(
-                    db,
-                    locked_customer,
-                    points=-delta,
-                    source_transaction_id=transaction.id,
-                    depth=depth,
-                )
-
-            executed.append({"type": action_type, "tier_key": tier_key, "delta": int(delta)})
 
         else:
             raise ValueError(f"Unknown action type: {action_type}")
