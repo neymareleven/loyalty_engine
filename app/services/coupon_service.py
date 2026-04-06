@@ -19,6 +19,7 @@ from app.services.reward_service import issue_reward
 IssueCouponFrequency = Literal[
     "ALWAYS",
     "ONCE_PER_CALENDAR_YEAR",
+    "ONCE_PER_CUSTOMER",
 ]
 
 
@@ -81,7 +82,7 @@ def issue_coupon(
     if not coupon_type_id:
         raise HTTPException(status_code=400, detail="coupon_type_id is required")
 
-    if frequency not in ("ALWAYS", "ONCE_PER_CALENDAR_YEAR"):
+    if frequency not in ("ALWAYS", "ONCE_PER_CALENDAR_YEAR", "ONCE_PER_CUSTOMER"):
         raise HTTPException(status_code=400, detail="Invalid frequency")
 
     ct = (
@@ -105,6 +106,17 @@ def issue_coupon(
 
     now = datetime.utcnow()
     year = _calendar_year(now)
+
+    if frequency == "ONCE_PER_CUSTOMER":
+        existing = (
+            db.query(CustomerCoupon)
+            .filter(CustomerCoupon.customer_id == customer.id)
+            .filter(CustomerCoupon.coupon_type_id == ct.id)
+            .order_by(CustomerCoupon.created_at.asc())
+            .first()
+        )
+        if existing:
+            return existing
 
     if frequency == "ONCE_PER_CALENDAR_YEAR":
         existing = (
@@ -180,6 +192,17 @@ def issue_coupon(
         # If caller uses idempotency_key, we can safely return existing.
         if idempotency_key:
             existing = db.query(CustomerCoupon).filter(CustomerCoupon.idempotency_key == idempotency_key).first()
+            if existing:
+                return existing
+
+        if frequency == "ONCE_PER_CUSTOMER":
+            existing = (
+                db.query(CustomerCoupon)
+                .filter(CustomerCoupon.customer_id == customer.id)
+                .filter(CustomerCoupon.coupon_type_id == ct.id)
+                .order_by(CustomerCoupon.created_at.asc())
+                .first()
+            )
             if existing:
                 return existing
 

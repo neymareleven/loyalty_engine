@@ -154,6 +154,12 @@ def upsert_customer(
             birthdate = datetime.utcfromtimestamp(float(bd) / 1000.0).date()
 
     try:
+        existed = bool(
+            db.query(Customer.id)
+            .filter(Customer.brand == brand)
+            .filter(Customer.profile_id == profile_id)
+            .first()
+        )
         customer = get_or_create_customer(
             db,
             brand,
@@ -172,6 +178,22 @@ def upsert_customer(
             depth=0,
             refresh_window=True,
             emit_events=False,
+        )
+
+    if not existed:
+        from app.services.loyalty_settings_service import ensure_system_transaction_types
+        from app.services.transaction_service import create_internal_transaction
+
+        ensure_system_transaction_types(db, brand=brand)
+        create_internal_transaction(
+            db,
+            brand=brand,
+            profile_id=profile_id,
+            transaction_type="WELCOME",
+            transaction_id=f"welcome_{brand}_{profile_id}",
+            payload={"reason": "CUSTOMER_CREATED"},
+            depth=0,
+            commit=False,
         )
     db.commit()
     db.refresh(customer)
@@ -741,7 +763,7 @@ def get_customer_loyalty_history(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    tier_event_types = ["TIER_UPGRADED", "TIER_DOWNGRADED", "STATUS_RESET"]
+    tier_event_types = ["TIER_UPGRADED", "TIER_DOWNGRADED", "TIER_RENEWED", "STATUS_RESET"]
 
     q = (
         db.query(Transaction)
