@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
+from app.models.customer_reward import CustomerReward
 from app.models.reward import Reward
 from app.models.reward_category import RewardCategory
 from app.schemas.reward import RewardCreate, RewardUpdate, RewardOut
@@ -116,6 +117,25 @@ def delete_reward(
     if not reward or reward.brand != active_brand:
         raise HTTPException(status_code=404, detail="Reward not found")
 
+    # Prevent hard delete when reward has already been issued to customers.
+    in_use = (
+        db.query(CustomerReward.id)
+        .filter(CustomerReward.reward_id == reward.id)
+        .first()
+    )
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail="Reward cannot be deleted because it is referenced by customer rewards. Disable it instead.",
+        )
+
     db.delete(reward)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Reward cannot be deleted because it is still referenced by other records.",
+        )
     return {"deleted": True}
