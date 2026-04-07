@@ -154,6 +154,12 @@ def upsert_customer(
             birthdate = datetime.utcfromtimestamp(float(bd) / 1000.0).date()
 
     try:
+        existed = bool(
+            db.query(Customer.id)
+            .filter(Customer.brand == brand)
+            .filter(Customer.profile_id == profile_id)
+            .first()
+        )
         customer = get_or_create_customer(
             db,
             brand,
@@ -741,7 +747,7 @@ def get_customer_loyalty_history(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    tier_event_types = ["TIER_UPGRADED", "TIER_DOWNGRADED", "STATUS_RESET"]
+    tier_event_types = ["TIER_UPGRADED", "TIER_DOWNGRADED", "TIER_RENEWED", "STATUS_RESET"]
 
     q = (
         db.query(Transaction)

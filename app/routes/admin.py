@@ -867,7 +867,7 @@ def list_rule_actions_catalog():
                 "type": "issue_coupon",
                 "title": "Attribuer un coupon",
                 "description": "Émet un coupon pour le client et lui attribue toutes les récompenses actives de la catégorie associée (snapshot au moment de l’émission).",
-                "params": {"coupon_type_id": "uuid", "frequency": "ALWAYS | ONCE_PER_CALENDAR_YEAR"},
+                "params": {"coupon_type_id": "uuid", "frequency": "ALWAYS | ONCE_PER_CALENDAR_YEAR | ONCE_PER_CUSTOMER"},
                 "jsonSchema": _model_json_schema(IssueCouponAction),
                 "examples": [
                     {"type": "issue_coupon", "coupon_type_id": "<uuid>"},
@@ -887,6 +887,7 @@ def list_rule_actions_catalog():
                     "frequency": {
                         "widget": "select",
                         "options": [
+                            {"label": "Once per customer (lifetime)", "value": "ONCE_PER_CUSTOMER"},
                             {"label": "Once per calendar year", "value": "ONCE_PER_CALENDAR_YEAR"},
                             {"label": "Always", "value": "ALWAYS"},
                         ],
@@ -936,7 +937,7 @@ def get_rules_ui_catalog():
                     "datasource": {
                         "endpoint": "/admin/ui-options/transaction-types",
                         "method": "GET",
-                        "query": {"origin": "EXTERNAL", "active": True},
+                        "query": {"active": True},
                         "valueField": "key",
                         "labelField": "name",
                         "brandVia": "X-Brand",
