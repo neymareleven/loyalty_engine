@@ -99,6 +99,10 @@ def update_customer_status(
     base_tier_key = _get_base_tier_key(db, customer.brand)
     now = datetime.utcnow()
 
+    old_status = customer.loyalty_status
+    old_assigned_at = customer.loyalty_status_assigned_at
+    old_expires_at = customer.loyalty_status_expires_at
+
     # Prevent automatic downgrades before the current loyalty status validity window expires.
     # Upgrades are still applied immediately.
     if customer.loyalty_status and customer.loyalty_status != new_status:
@@ -134,6 +138,17 @@ def update_customer_status(
             else:
                 customer.loyalty_status_assigned_at = None
                 customer.loyalty_status_expires_at = None
+
+    did_refresh_window_without_tier_change = bool(
+        should_refresh_window
+        and (old_status == new_status)
+        and (not is_base_tier)
+        and (status_days is not None)
+        and (
+            (old_assigned_at != customer.loyalty_status_assigned_at)
+            or (old_expires_at != customer.loyalty_status_expires_at)
+        )
+    )
 
     # éviter des écritures DB inutiles
     if customer.loyalty_status != new_status:
@@ -176,6 +191,105 @@ def update_customer_status(
                     transaction_type=transaction_type,
                     transaction_id=transaction_id,
                     payload=payload,
+                    depth=depth,
+                    commit=False,
+                )
+
+                welcome_tt = (
+                    db.query(TransactionType.id)
+                    .filter(TransactionType.key == "WELCOME")
+                    .filter(TransactionType.active.is_(True))
+                    .filter(TransactionType.origin == "INTERNAL")
+                    .filter(TransactionType.brand == customer.brand)
+                    .first()
+                )
+                if welcome_tt:
+                    welcome_id = f"welcome_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
+                    welcome_payload = {
+                        "reason": reason,
+                        "trigger": transaction_type,
+                        "fromTier": old_status,
+                        "toTier": new_status,
+                        "statusPoints": int(customer.status_points or 0),
+                        "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
+                        "_ruleDepth": depth + 1,
+                    }
+                    create_internal_transaction(
+                        db,
+                        brand=customer.brand,
+                        profile_id=customer.profile_id,
+                        transaction_type="WELCOME",
+                        transaction_id=welcome_id,
+                        payload=welcome_payload,
+                        depth=depth,
+                        commit=False,
+                    )
+
+    elif did_refresh_window_without_tier_change and emit_events:
+        from app.models.event_type import TransactionType
+        from app.services.transaction_service import create_internal_transaction
+
+        transaction_type = "TIER_RENEWED"
+        tt = (
+            db.query(TransactionType.id)
+            .filter(TransactionType.key == transaction_type)
+            .filter(TransactionType.active.is_(True))
+            .filter(TransactionType.origin == "INTERNAL")
+            .filter(TransactionType.brand == customer.brand)
+            .first()
+        )
+        if tt:
+            ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+            transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
+            payload = {
+                "tier": new_status,
+                "reason": reason,
+                "statusPoints": int(customer.status_points or 0),
+                "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
+                "previousAssignedAt": old_assigned_at.isoformat() if old_assigned_at else None,
+                "previousExpiresAt": old_expires_at.isoformat() if old_expires_at else None,
+                "assignedAt": customer.loyalty_status_assigned_at.isoformat() if customer.loyalty_status_assigned_at else None,
+                "expiresAt": customer.loyalty_status_expires_at.isoformat() if customer.loyalty_status_expires_at else None,
+                "_ruleDepth": depth + 1,
+            }
+            create_internal_transaction(
+                db,
+                brand=customer.brand,
+                profile_id=customer.profile_id,
+                transaction_type=transaction_type,
+                transaction_id=transaction_id,
+                payload=payload,
+                depth=depth,
+                commit=False,
+            )
+
+            welcome_tt = (
+                db.query(TransactionType.id)
+                .filter(TransactionType.key == "WELCOME")
+                .filter(TransactionType.active.is_(True))
+                .filter(TransactionType.origin == "INTERNAL")
+                .filter(TransactionType.brand == customer.brand)
+                .first()
+            )
+            if welcome_tt:
+                welcome_id = f"welcome_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
+                welcome_payload = {
+                    "reason": reason,
+                    "trigger": transaction_type,
+                    "tier": new_status,
+                    "statusPoints": int(customer.status_points or 0),
+                    "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
+                    "assignedAt": customer.loyalty_status_assigned_at.isoformat() if customer.loyalty_status_assigned_at else None,
+                    "expiresAt": customer.loyalty_status_expires_at.isoformat() if customer.loyalty_status_expires_at else None,
+                    "_ruleDepth": depth + 1,
+                }
+                create_internal_transaction(
+                    db,
+                    brand=customer.brand,
+                    profile_id=customer.profile_id,
+                    transaction_type="WELCOME",
+                    transaction_id=welcome_id,
+                    payload=welcome_payload,
                     depth=depth,
                     commit=False,
                 )
