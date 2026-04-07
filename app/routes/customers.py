@@ -179,22 +179,6 @@ def upsert_customer(
             refresh_window=True,
             emit_events=False,
         )
-
-    if not existed:
-        from app.services.loyalty_settings_service import ensure_system_transaction_types
-        from app.services.transaction_service import create_internal_transaction
-
-        ensure_system_transaction_types(db, brand=brand)
-        create_internal_transaction(
-            db,
-            brand=brand,
-            profile_id=profile_id,
-            transaction_type="WELCOME",
-            transaction_id=f"welcome_{brand}_{profile_id}",
-            payload={"reason": "CUSTOMER_CREATED"},
-            depth=0,
-            commit=False,
-        )
     db.commit()
     db.refresh(customer)
 

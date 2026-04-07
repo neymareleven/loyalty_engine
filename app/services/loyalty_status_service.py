@@ -195,6 +195,36 @@ def update_customer_status(
                     commit=False,
                 )
 
+                welcome_tt = (
+                    db.query(TransactionType.id)
+                    .filter(TransactionType.key == "WELCOME")
+                    .filter(TransactionType.active.is_(True))
+                    .filter(TransactionType.origin == "INTERNAL")
+                    .filter(TransactionType.brand == customer.brand)
+                    .first()
+                )
+                if welcome_tt:
+                    welcome_id = f"welcome_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
+                    welcome_payload = {
+                        "reason": reason,
+                        "trigger": transaction_type,
+                        "fromTier": old_status,
+                        "toTier": new_status,
+                        "statusPoints": int(customer.status_points or 0),
+                        "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
+                        "_ruleDepth": depth + 1,
+                    }
+                    create_internal_transaction(
+                        db,
+                        brand=customer.brand,
+                        profile_id=customer.profile_id,
+                        transaction_type="WELCOME",
+                        transaction_id=welcome_id,
+                        payload=welcome_payload,
+                        depth=depth,
+                        commit=False,
+                    )
+
     elif did_refresh_window_without_tier_change and emit_events:
         from app.models.event_type import TransactionType
         from app.services.transaction_service import create_internal_transaction
@@ -232,5 +262,36 @@ def update_customer_status(
                 depth=depth,
                 commit=False,
             )
+
+            welcome_tt = (
+                db.query(TransactionType.id)
+                .filter(TransactionType.key == "WELCOME")
+                .filter(TransactionType.active.is_(True))
+                .filter(TransactionType.origin == "INTERNAL")
+                .filter(TransactionType.brand == customer.brand)
+                .first()
+            )
+            if welcome_tt:
+                welcome_id = f"welcome_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
+                welcome_payload = {
+                    "reason": reason,
+                    "trigger": transaction_type,
+                    "tier": new_status,
+                    "statusPoints": int(customer.status_points or 0),
+                    "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
+                    "assignedAt": customer.loyalty_status_assigned_at.isoformat() if customer.loyalty_status_assigned_at else None,
+                    "expiresAt": customer.loyalty_status_expires_at.isoformat() if customer.loyalty_status_expires_at else None,
+                    "_ruleDepth": depth + 1,
+                }
+                create_internal_transaction(
+                    db,
+                    brand=customer.brand,
+                    profile_id=customer.profile_id,
+                    transaction_type="WELCOME",
+                    transaction_id=welcome_id,
+                    payload=welcome_payload,
+                    depth=depth,
+                    commit=False,
+                )
 
     return customer.loyalty_status
