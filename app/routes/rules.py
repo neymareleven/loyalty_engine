@@ -9,7 +9,7 @@ from app.db import get_db
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.event_type import TransactionType
 from app.models.rule import Rule
-from app.schemas.rule import RuleCreate, RuleOut, RuleUpdate
+from app.schemas.rule import RuleCreate, RuleOut, RuleUpdate, RuleReorderRequest
 from app.deps.brand import get_active_brand
 
 
@@ -40,6 +40,17 @@ def _validate_rule_actions(actions):
             raise HTTPException(status_code=400, detail=f"Unknown action type: {t}")
 
 
+def _next_priority_for_brand(db: Session, *, brand: str) -> int:
+    max_priority = (
+        db.query(func.max(Rule.priority))
+        .filter(Rule.brand == brand)
+        .scalar()
+    )
+    if max_priority is None:
+        return 0
+    return int(max_priority) + 1
+
+
 @router.get("", response_model=list[RuleOut])
 def list_rules(
     active_brand: str = Depends(get_active_brand),
@@ -53,7 +64,7 @@ def list_rules(
     q = q.filter(Rule.brand == active_brand)
     if transaction_type:
         q = q.filter(Rule.transaction_type == transaction_type)
-    return q.order_by(Rule.brand.asc(), Rule.transaction_type.asc(), Rule.priority.asc()).all()
+    return q.order_by(Rule.priority.asc(), Rule.transaction_type.asc(), Rule.created_at.asc()).all()
 
 
 @router.post("", response_model=RuleOut)
@@ -85,20 +96,82 @@ def create_rule(
 
     _validate_rule_actions(payload.actions)
 
+    next_priority = _next_priority_for_brand(db, brand=active_brand)
+
     rule = Rule(
         brand=active_brand,
         name=payload.name,
         description=payload.description,
         transaction_type=payload.transaction_type,
-        priority=payload.priority,
+        priority=next_priority,
         conditions=payload.conditions,
         actions=payload.actions,
         active=payload.active,
     )
     db.add(rule)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        orig = getattr(e, "orig", None)
+        pgcode = getattr(orig, "pgcode", None)
+        if str(pgcode or "") == "23505":
+            raise HTTPException(
+                status_code=409,
+                detail="Rule priority conflict detected. Please retry.",
+            )
+        raise
     db.refresh(rule)
     return rule
+
+
+@router.post("/reorder")
+def reorder_rules(
+    payload: RuleReorderRequest,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    rule_ids = payload.rule_ids or []
+    if not rule_ids:
+        raise HTTPException(status_code=400, detail="rule_ids is required")
+
+    # Ensure list has no duplicates and exactly matches brand rule set.
+    if len(rule_ids) != len(set(rule_ids)):
+        raise HTTPException(status_code=400, detail="rule_ids contains duplicates")
+
+    brand_rules = db.query(Rule).filter(Rule.brand == active_brand).all()
+    if len(brand_rules) != len(rule_ids):
+        raise HTTPException(status_code=400, detail="rule_ids must include all rules for the brand")
+
+    brand_rule_ids = {r.id for r in brand_rules}
+    payload_rule_ids = set(rule_ids)
+    if brand_rule_ids != payload_rule_ids:
+        raise HTTPException(status_code=400, detail="rule_ids does not match rules in this brand")
+
+    rule_map = {r.id: r for r in brand_rules}
+
+    # Two-step reorder to avoid transient UNIQUE collisions while swapping priorities.
+    temp_base = 1_000_000
+    for idx, rid in enumerate(rule_ids):
+        rule_map[rid].priority = temp_base + idx
+
+    try:
+        db.flush()
+        for idx, rid in enumerate(rule_ids):
+            rule_map[rid].priority = idx
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        orig = getattr(e, "orig", None)
+        pgcode = getattr(orig, "pgcode", None)
+        if str(pgcode or "") == "23505":
+            raise HTTPException(
+                status_code=409,
+                detail="Rule priorities conflict during reorder. Please refresh and retry.",
+            )
+        raise HTTPException(status_code=409, detail="Unable to reorder rules due to data conflict")
+
+    return {"updated": len(rule_ids)}
 
 
 @router.get("/{rule_id}", response_model=RuleOut)
@@ -153,6 +226,12 @@ def update_rule(
     if "actions" in data:
         _validate_rule_actions(data.get("actions"))
 
+    if "priority" in data:
+        raise HTTPException(
+            status_code=400,
+            detail="Priority is managed automatically and cannot be edited manually.",
+        )
+
     next_actions = data.get("actions") if "actions" in data else rule.actions
     _validate_rule_actions(next_actions)
 
@@ -161,7 +240,18 @@ def update_rule(
             continue
         setattr(rule, k, v)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        orig = getattr(e, "orig", None)
+        pgcode = getattr(orig, "pgcode", None)
+        if str(pgcode or "") == "23505":
+            raise HTTPException(
+                status_code=409,
+                detail="A rule with this priority already exists for this brand.",
+            )
+        raise
     db.refresh(rule)
     return rule
 
@@ -199,3 +289,5 @@ def delete_rule(
             detail="Cannot delete rule due to existing references (apply latest DB migrations or remove dependent records).",
         )
     return {"deleted": True}
+
+

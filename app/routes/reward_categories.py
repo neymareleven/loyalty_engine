@@ -7,11 +7,19 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.coupon_type import CouponType
+from app.models.reward import Reward
 from app.models.reward_category import RewardCategory
 from app.schemas.reward_category import RewardCategoryCreate, RewardCategoryOut, RewardCategoryUpdate
 
 
 router = APIRouter(prefix="/admin/reward-categories", tags=["admin-reward-categories"])
+
+def _pgcode(err: IntegrityError) -> str | None:
+    orig = getattr(err, "orig", None)
+    code = getattr(orig, "pgcode", None)
+    if code:
+        return str(code)
+    return None
 
 
 @router.get("", response_model=list[RewardCategoryOut])
@@ -112,6 +120,37 @@ def delete_reward_category(
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Reward category not found")
 
+    linked_reward = (
+        db.query(Reward.id)
+        .filter(Reward.brand == active_brand)
+        .filter(Reward.reward_category_id == obj.id)
+        .first()
+    )
+    if linked_reward:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Impossible de supprimer cette catégorie car elle est liée à au moins une récompense. "
+                "Supprimez ou réaffectez d'abord les récompenses associées."
+            ),
+        )
+
     db.delete(obj)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        code = _pgcode(e)
+        if code == "23503":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Impossible de supprimer cette catégorie car elle est encore référencée par d'autres données. "
+                    "Supprimez d'abord les dépendances."
+                ),
+            )
+        raise HTTPException(
+            status_code=409,
+            detail="Impossible de supprimer cette catégorie (conflit de données).",
+        )
     return {"deleted": True}

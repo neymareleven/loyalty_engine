@@ -46,3 +46,7 @@ class RuleOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class RuleReorderRequest(BaseModel):
+    rule_ids: list[UUID]

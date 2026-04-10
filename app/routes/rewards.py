@@ -180,7 +180,7 @@ def delete_reward(
     if in_use:
         raise HTTPException(
             status_code=409,
-            detail="Reward cannot be deleted because it is referenced by customer rewards. Disable it instead.",
+            detail="La récompense ne peut pas être supprimée car elle est référencée par des récompenses clients. Veuillez plutôt la désactiver.",
         )
 
     db.delete(reward)
