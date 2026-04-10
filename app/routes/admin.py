@@ -15,6 +15,7 @@ from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.models.rule import Rule
 from app.models.reward import Reward
+from app.models.reward_category import RewardCategory
 from app.models.coupon_type import CouponType
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
