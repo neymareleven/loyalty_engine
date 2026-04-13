@@ -10,6 +10,7 @@ from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
 from app.models.point_movement import PointMovement
 from app.models.transaction import Transaction
+from app.models.loyalty_tier import LoyaltyTier
 from app.schemas.customer import CustomerOut, CustomerUpsert
 from app.schemas.customer import CustomerSetTierMinOnly
 from app.schemas.customer_coupon import CustomerCouponOut
@@ -19,7 +20,6 @@ from app.services.contact_service import get_or_create_customer
 from app.services.loyalty_status_service import update_customer_status
 from app.services.wallet_service import get_status_points_balance
 from app.services.loyalty_settings_service import get_loyalty_settings
-from app.models.loyalty_tier import LoyaltyTier
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -686,12 +686,33 @@ def get_customer_loyalty(
     next_min = int(next_tier.min_status_points) if next_tier else None
     points_to_next = (max(0, next_min - sp) if next_min is not None else None)
 
+    last_change = None
+    if current_tier:
+        last_tier_event = (
+            db.query(Transaction.transaction_type)
+            .filter(Transaction.brand == brand)
+            .filter(Transaction.profile_id == profile_id)
+            .filter(Transaction.transaction_type.in_(["TIER_UPGRADED", "TIER_DOWNGRADED", "TIER_RENEWED"]))
+            .filter(Transaction.payload["toTier"].astext == current_tier.key)
+            .order_by(Transaction.created_at.desc())
+            .first()
+        )
+        if last_tier_event:
+            ttype = last_tier_event[0]
+            if ttype == "TIER_UPGRADED":
+                last_change = "upgrade"
+            elif ttype == "TIER_DOWNGRADED":
+                last_change = "downgrade"
+            elif ttype == "TIER_RENEWED":
+                last_change = "no_change"
+
     return {
         "brand": brand,
         "profileId": profile_id,
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": sp,
         "lastActivityAt": customer.last_activity_at,
+        "lastChange": last_change,
         "currentTier": (
             {
                 "key": current_tier.key,

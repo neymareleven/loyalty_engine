@@ -243,6 +243,8 @@ def update_customer_status(
             transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
             payload = {
                 "tier": new_status,
+                "fromTier": new_status,
+                "toTier": new_status,
                 "reason": reason,
                 "statusPoints": int(customer.status_points or 0),
                 "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
