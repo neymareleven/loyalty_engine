@@ -12,6 +12,21 @@ from app.schemas.event_type import TransactionTypeCreate, TransactionTypeOut, Tr
 router = APIRouter(prefix="/admin/transaction-types", tags=["admin-transaction-types"])
 
 
+def _is_system_transaction_type(obj: TransactionType) -> bool:
+    if not obj:
+        return False
+    if obj.origin != "INTERNAL":
+        return False
+    desc = (obj.description or "").strip()
+    return desc.startswith("System event emitted")
+
+
+def _is_hidden_transaction_type(obj: TransactionType) -> bool:
+    if not obj:
+        return False
+    return obj.key == "ADMIN_SET_TIER"
+
+
 def _slug_key(value: str) -> str:
     s = (value or "").strip().lower()
     out = []
@@ -49,6 +64,10 @@ def list_transaction_types(
         q = q.filter(TransactionType.origin == origin)
     if active is not None:
         q = q.filter(TransactionType.active.is_(active))
+
+    # Do not expose internal audit-only transaction types in the list.
+    q = q.filter(TransactionType.key != "ADMIN_SET_TIER")
+
     return q.order_by(
         TransactionType.origin.asc(),
         TransactionType.brand.asc().nullsfirst(),
@@ -118,6 +137,9 @@ def update_transaction_type(
     if obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Transaction type not found")
 
+    if _is_hidden_transaction_type(obj) or _is_system_transaction_type(obj):
+        raise HTTPException(status_code=403, detail="This transaction type is managed by the system and cannot be modified")
+
     data = payload.model_dump(exclude_unset=True)
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
@@ -157,6 +179,9 @@ def delete_transaction_type(
         raise HTTPException(status_code=404, detail="Transaction type not found")
     if obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Transaction type not found")
+
+    if _is_hidden_transaction_type(obj) or _is_system_transaction_type(obj):
+        raise HTTPException(status_code=403, detail="This transaction type is managed by the system and cannot be deleted")
 
     db.delete(obj)
     db.commit()

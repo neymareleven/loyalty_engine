@@ -772,6 +772,7 @@ def list_ui_options_transaction_types(
     db: Session = Depends(get_db),
 ):
     q = db.query(TransactionType).filter(TransactionType.brand == brand)
+    q = q.filter(TransactionType.key != "ADMIN_SET_TIER")
     if active is not None:
         q = q.filter(TransactionType.active.is_(active))
     if origin:

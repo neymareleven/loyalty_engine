@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 from sqlalchemy import asc
 from app.models.customer import Customer
@@ -467,12 +468,17 @@ def process_transaction_rules(db: Session, transaction):
         transaction.status = "PROCESSED"
         return
 
+    # Match rules by ANY (OR): transaction.transaction_type must be included in rule.transaction_types.
+    # Backward compatibility: legacy rules may have transaction_types NULL; they match via transaction_type.
     rules = (
         db.query(Rule)
+        .filter(Rule.brand == transaction.brand)
+        .filter(Rule.active == True)
         .filter(
-            Rule.brand == transaction.brand,
-            Rule.transaction_type == transaction.transaction_type,
-            Rule.active == True,
+            sa.or_(
+                Rule.transaction_types.any(transaction.transaction_type),
+                sa.and_(Rule.transaction_types.is_(None), Rule.transaction_type == transaction.transaction_type),
+            )
         )
         .order_by(asc(Rule.priority), asc(Rule.id))
         .all()

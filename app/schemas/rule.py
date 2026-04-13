@@ -10,7 +10,8 @@ class RuleCreate(BaseModel):
     brand: Optional[str] = None
     name: str
     description: Optional[str] = None
-    transaction_type: str
+    transaction_type: Optional[str] = None
+    transaction_types: Optional[list[str]] = None
     priority: int = 0
 
     conditions: Optional[Dict[str, Any]] = None
@@ -24,6 +25,9 @@ class RuleUpdate(BaseModel):
     description: Optional[str] = None
     priority: Optional[int] = None
 
+    transaction_type: Optional[str] = None
+    transaction_types: Optional[list[str]] = None
+
     conditions: Optional[Dict[str, Any]] = None
     actions: Optional[list[Dict[str, Any]]] = None
 
@@ -36,6 +40,7 @@ class RuleOut(BaseModel):
     name: str
     description: Optional[str] = None
     transaction_type: str
+    transaction_types: Optional[list[str]] = None
     priority: int
 
     conditions: Optional[Dict[str, Any]] = None

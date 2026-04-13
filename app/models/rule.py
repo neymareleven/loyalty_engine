@@ -1,5 +1,6 @@
 import uuid
 from sqlalchemy import Column, String, Integer, Boolean, JSON, TIMESTAMP
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
@@ -15,6 +16,7 @@ class Rule(Base):
     
     brand = Column(String(50), nullable=False)
     transaction_type = Column(String(50), nullable=False)
+    transaction_types = Column(ARRAY(String(50)), nullable=True)
     priority = Column(Integer, default=0)
 
     conditions = Column(JSON)

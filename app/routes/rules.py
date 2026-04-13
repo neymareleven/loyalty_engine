@@ -20,6 +20,48 @@ _DEPRECATED_ACTION_TYPES = {"burn_points", "issue_reward", "use_coupon", "set_ra
 _ALLOWED_ACTION_TYPES = {"earn_points", "issue_coupon", "reset_status_points"}
 
 
+def _normalize_transaction_types(*, transaction_type: str | None, transaction_types: list[str] | None) -> list[str]:
+    if transaction_types is not None:
+        if not isinstance(transaction_types, list) or len(transaction_types) == 0:
+            raise HTTPException(status_code=400, detail="transaction_types must be a non-empty list")
+        items = []
+        for t in transaction_types:
+            if not isinstance(t, str) or not t.strip():
+                raise HTTPException(status_code=400, detail="transaction_types must contain non-empty strings")
+            items.append(t.strip())
+        # dedupe while preserving order
+        seen = set()
+        out = []
+        for t in items:
+            if t not in seen:
+                out.append(t)
+                seen.add(t)
+        return out
+
+    if transaction_type is None or not str(transaction_type).strip():
+        raise HTTPException(status_code=400, detail="transaction_type (legacy) or transaction_types is required")
+    return [str(transaction_type).strip()]
+
+
+def _validate_transaction_types_exist(db: Session, *, brand: str, keys: list[str]) -> None:
+    if not keys:
+        raise HTTPException(status_code=400, detail="transaction_types must be provided")
+    found = (
+        db.query(TransactionType.key)
+        .filter(TransactionType.brand == brand)
+        .filter(TransactionType.active.is_(True))
+        .filter(TransactionType.key.in_(keys))
+        .all()
+    )
+    found_keys = {k for (k,) in found}
+    missing = [k for k in keys if k not in found_keys]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown or inactive transaction_type(s): " + ", ".join(missing) + ". Create them in /admin/transaction-types first.",
+        )
+
+
 def _validate_rule_actions(actions):
     if actions is None:
         raise HTTPException(status_code=400, detail="Rules must define at least one action")
@@ -75,15 +117,12 @@ def create_rule(
 ):
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
-    exists = (
-        db.query(TransactionType.id)
-        .filter(TransactionType.key == payload.transaction_type)
-        .filter(TransactionType.active.is_(True))
-        .filter(TransactionType.brand == active_brand)
-        .first()
+
+    normalized_types = _normalize_transaction_types(
+        transaction_type=payload.transaction_type,
+        transaction_types=payload.transaction_types,
     )
-    if not exists:
-        raise HTTPException(status_code=400, detail="Unknown or inactive transaction_type. Create it in /admin/transaction-types first.")
+    _validate_transaction_types_exist(db, brand=active_brand, keys=normalized_types)
 
     dup = (
         db.query(Rule.id)
@@ -102,7 +141,8 @@ def create_rule(
         brand=active_brand,
         name=payload.name,
         description=payload.description,
-        transaction_type=payload.transaction_type,
+        transaction_type=normalized_types[0],
+        transaction_types=normalized_types,
         priority=next_priority,
         conditions=payload.conditions,
         actions=payload.actions,
@@ -210,6 +250,17 @@ def update_rule(
     data = payload.model_dump(exclude_unset=True)
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
+
+    if "transaction_type" in data or "transaction_types" in data:
+        next_types = _normalize_transaction_types(
+            transaction_type=data.get("transaction_type", rule.transaction_type),
+            transaction_types=data.get("transaction_types"),
+        )
+        _validate_transaction_types_exist(db, brand=active_brand, keys=next_types)
+        rule.transaction_type = next_types[0]
+        rule.transaction_types = next_types
+        data.pop("transaction_type", None)
+        data.pop("transaction_types", None)
 
     if "name" in data and data["name"] is not None:
         new_name = str(data["name"])
