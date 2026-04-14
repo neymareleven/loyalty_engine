@@ -693,7 +693,7 @@ def get_customer_loyalty(
             .filter(Transaction.brand == brand)
             .filter(Transaction.profile_id == profile_id)
             .filter(Transaction.transaction_type.in_(["TIER_UPGRADED", "TIER_DOWNGRADED", "TIER_RENEWED"]))
-            .filter(Transaction.payload["toTier"].astext == current_tier.key)
+            .filter(Transaction.payload["toTier"].as_string() == current_tier.key)
             .order_by(Transaction.created_at.desc())
             .first()
         )
