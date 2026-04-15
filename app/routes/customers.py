@@ -169,6 +169,28 @@ def upsert_customer(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    if not existed:
+        from app.services.transaction_service import create_internal_transaction
+
+        ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        tx_id = f"customer_{brand}_{profile_id}_CUSTOMER_REGISTRATION_{ts}"
+        tx_payload = {
+            "reason": "CUSTOMER_CREATED",
+            "brand": brand,
+            "profileId": profile_id,
+            "_ruleDepth": 0,
+        }
+        create_internal_transaction(
+            db,
+            brand=brand,
+            profile_id=profile_id,
+            transaction_type="CUSTOMER_REGISTRATION",
+            transaction_id=tx_id,
+            payload=tx_payload,
+            depth=0,
+            commit=False,
+        )
+
     if customer.loyalty_status in (None, "UNCONFIGURED"):
         update_customer_status(
             db,
@@ -768,7 +790,13 @@ def get_customer_loyalty_history(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    tier_event_types = ["TIER_UPGRADED", "TIER_DOWNGRADED", "TIER_RENEWED", "STATUS_RESET"]
+    tier_event_types = [
+        "CUSTOMER_REGISTRATION",
+        "TIER_UPGRADED",
+        "TIER_DOWNGRADED",
+        "TIER_RENEWED",
+        "STATUS_RESET",
+    ]
 
     q = (
         db.query(Transaction)

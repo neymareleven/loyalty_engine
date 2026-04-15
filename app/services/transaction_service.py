@@ -274,6 +274,7 @@ def create_transaction(db: Session, event_data):
             transaction.processed_at = datetime.utcnow()
             db.commit()
         except Exception as e:
+            db.rollback()
             msg = str(e)
             if "Customer not found" in msg:
                 transaction.status = "BLOCKED"

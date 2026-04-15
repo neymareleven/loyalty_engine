@@ -1,11 +1,11 @@
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
 
 class EarnPointsAction(BaseModel):
     type: Literal["earn_points"] = "earn_points"
-    points: int
+    points: int | dict[str, Any]
     multiplier: Optional[int] = None
 
 

@@ -161,97 +161,16 @@ def update_customer_status(
         transaction_type = "TIER_UPGRADED" if (new_min is not None and (old_min is None or new_min > old_min)) else "TIER_DOWNGRADED"
 
         if emit_events:
-            from app.models.event_type import TransactionType
             from app.services.transaction_service import create_internal_transaction
 
-            # Only emit if the transaction type exists in the catalog as INTERNAL+active
-            tt = (
-                db.query(TransactionType.id)
-                .filter(TransactionType.key == transaction_type)
-                .filter(TransactionType.active.is_(True))
-                .filter(TransactionType.origin == "INTERNAL")
-                .filter(TransactionType.brand == customer.brand)
-                .first()
-            )
-            if tt:
-                ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-                transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
-                payload = {
-                    "fromTier": old_status,
-                    "toTier": new_status,
-                    "reason": reason,
-                    "statusPoints": int(customer.status_points or 0),
-                    "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
-                    "_ruleDepth": depth + 1,
-                }
-                create_internal_transaction(
-                    db,
-                    brand=customer.brand,
-                    profile_id=customer.profile_id,
-                    transaction_type=transaction_type,
-                    transaction_id=transaction_id,
-                    payload=payload,
-                    depth=depth,
-                    commit=False,
-                )
-
-                welcome_tt = (
-                    db.query(TransactionType.id)
-                    .filter(TransactionType.key == "WELCOME")
-                    .filter(TransactionType.active.is_(True))
-                    .filter(TransactionType.origin == "INTERNAL")
-                    .filter(TransactionType.brand == customer.brand)
-                    .first()
-                )
-                if welcome_tt:
-                    welcome_id = f"welcome_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
-                    welcome_payload = {
-                        "reason": reason,
-                        "trigger": transaction_type,
-                        "fromTier": old_status,
-                        "toTier": new_status,
-                        "statusPoints": int(customer.status_points or 0),
-                        "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
-                        "_ruleDepth": depth + 1,
-                    }
-                    create_internal_transaction(
-                        db,
-                        brand=customer.brand,
-                        profile_id=customer.profile_id,
-                        transaction_type="WELCOME",
-                        transaction_id=welcome_id,
-                        payload=welcome_payload,
-                        depth=depth,
-                        commit=False,
-                    )
-
-    elif did_refresh_window_without_tier_change and emit_events:
-        from app.models.event_type import TransactionType
-        from app.services.transaction_service import create_internal_transaction
-
-        transaction_type = "TIER_RENEWED"
-        tt = (
-            db.query(TransactionType.id)
-            .filter(TransactionType.key == transaction_type)
-            .filter(TransactionType.active.is_(True))
-            .filter(TransactionType.origin == "INTERNAL")
-            .filter(TransactionType.brand == customer.brand)
-            .first()
-        )
-        if tt:
             ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
             transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
             payload = {
-                "tier": new_status,
-                "fromTier": new_status,
+                "fromTier": old_status,
                 "toTier": new_status,
                 "reason": reason,
                 "statusPoints": int(customer.status_points or 0),
                 "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
-                "previousAssignedAt": old_assigned_at.isoformat() if old_assigned_at else None,
-                "previousExpiresAt": old_expires_at.isoformat() if old_expires_at else None,
-                "assignedAt": customer.loyalty_status_assigned_at.isoformat() if customer.loyalty_status_assigned_at else None,
-                "expiresAt": customer.loyalty_status_expires_at.isoformat() if customer.loyalty_status_expires_at else None,
                 "_ruleDepth": depth + 1,
             }
             create_internal_transaction(
@@ -265,35 +184,34 @@ def update_customer_status(
                 commit=False,
             )
 
-            welcome_tt = (
-                db.query(TransactionType.id)
-                .filter(TransactionType.key == "WELCOME")
-                .filter(TransactionType.active.is_(True))
-                .filter(TransactionType.origin == "INTERNAL")
-                .filter(TransactionType.brand == customer.brand)
-                .first()
-            )
-            if welcome_tt:
-                welcome_id = f"welcome_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
-                welcome_payload = {
-                    "reason": reason,
-                    "trigger": transaction_type,
-                    "tier": new_status,
-                    "statusPoints": int(customer.status_points or 0),
-                    "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
-                    "assignedAt": customer.loyalty_status_assigned_at.isoformat() if customer.loyalty_status_assigned_at else None,
-                    "expiresAt": customer.loyalty_status_expires_at.isoformat() if customer.loyalty_status_expires_at else None,
-                    "_ruleDepth": depth + 1,
-                }
-                create_internal_transaction(
-                    db,
-                    brand=customer.brand,
-                    profile_id=customer.profile_id,
-                    transaction_type="WELCOME",
-                    transaction_id=welcome_id,
-                    payload=welcome_payload,
-                    depth=depth,
-                    commit=False,
-                )
+    elif did_refresh_window_without_tier_change and emit_events:
+        from app.services.transaction_service import create_internal_transaction
+
+        transaction_type = "TIER_RENEWED"
+        ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
+        payload = {
+            "tier": new_status,
+            "fromTier": new_status,
+            "toTier": new_status,
+            "reason": reason,
+            "statusPoints": int(customer.status_points or 0),
+            "sourceTransactionId": str(source_transaction_id) if source_transaction_id else None,
+            "previousAssignedAt": old_assigned_at.isoformat() if old_assigned_at else None,
+            "previousExpiresAt": old_expires_at.isoformat() if old_expires_at else None,
+            "assignedAt": customer.loyalty_status_assigned_at.isoformat() if customer.loyalty_status_assigned_at else None,
+            "expiresAt": customer.loyalty_status_expires_at.isoformat() if customer.loyalty_status_expires_at else None,
+            "_ruleDepth": depth + 1,
+        }
+        create_internal_transaction(
+            db,
+            brand=customer.brand,
+            profile_id=customer.profile_id,
+            transaction_type=transaction_type,
+            transaction_id=transaction_id,
+            payload=payload,
+            depth=depth,
+            commit=False,
+        )
 
     return customer.loyalty_status

@@ -11,12 +11,6 @@ def get_loyalty_settings(db: Session, *, brand: str) -> BrandLoyaltySettings | N
 def ensure_system_transaction_types(db: Session, *, brand: str) -> None:
     system_types = [
         {
-            "key": "WELCOME",
-            "origin": "INTERNAL",
-            "name": "Welcome",
-            "description": "System event emitted when the customer enters the loyalty program or a tier triggers a welcome gift.",
-        },
-        {
             "key": "TIER_UPGRADED",
             "origin": "INTERNAL",
             "name": "Tier upgraded",
@@ -45,6 +39,12 @@ def ensure_system_transaction_types(db: Session, *, brand: str) -> None:
             "origin": "INTERNAL",
             "name": "Admin set tier",
             "description": "Audit event for manual tier overrides performed via admin UI.",
+        },
+        {
+            "key": "CUSTOMER_REGISTRATION",
+            "origin": "INTERNAL",
+            "name": "Customer registration",
+            "description": "System event emitted once when a customer is created (first ingestion), not on updates.",
         },
     ]
 

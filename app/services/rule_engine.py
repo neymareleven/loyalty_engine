@@ -87,6 +87,31 @@ def _as_float(value):
         return None
 
 
+def _resolve_action_number(*, action_value, transaction) -> int | None:
+    if isinstance(action_value, dict):
+        path = action_value.get("$path")
+        if isinstance(path, str) and path.strip():
+            p = path.strip()
+            if p.startswith("transaction.payload."):
+                p = p[len("transaction.payload.") :]
+            if p.startswith("payload."):
+                p = p[len("payload.") :]
+            raw = _get_by_path(transaction.payload or {}, p)
+        else:
+            raw = None
+    else:
+        raw = action_value
+
+    as_int = _as_int(raw)
+    if as_int is not None:
+        return as_int
+
+    as_float = _as_float(raw)
+    if as_float is None:
+        return None
+    return int(as_float)
+
+
 def _as_datetime(value):
     if value is None:
         return None
@@ -365,7 +390,7 @@ def _execute_actions(db: Session, customer, transaction, actions):
         if action_type == "earn_points":
             points = action.get("points")
             multiplier = action.get("multiplier")
-            points_int = _as_int(points)
+            points_int = _resolve_action_number(action_value=points, transaction=transaction)
             mult_int = _as_int(multiplier)
             if mult_int is not None:
                 points_int = (points_int or 0) * mult_int
@@ -546,4 +571,4 @@ def process_transaction_rules(db: Session, transaction):
             )
             db.add(execution)
 
-    transaction.status = "PROCESSED_WITH_ERRORS" if had_rule_failures else "PROCESSED"
+    transaction.status = "PROCESSED_ERRORS" if had_rule_failures else "PROCESSED"
