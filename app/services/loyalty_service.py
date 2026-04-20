@@ -46,6 +46,13 @@ def earn_points(
 
     customer.status_points = (customer.status_points or 0) + points
 
+    # Keep a best-effort customer-level expiration marker in sync with the most recent earned points.
+    # Source of truth remains PointMovement.expires_at, but APIs/UI often display Customer.points_expires_at.
+    if expires_at is not None:
+        expires_at_dt = datetime.utcnow() + timedelta(days=int(points_days))
+        if customer.points_expires_at is None or customer.points_expires_at < expires_at_dt:
+            customer.points_expires_at = expires_at_dt
+
     # 🔹 recalcul statut
     try:
         depth = int(depth or 0)

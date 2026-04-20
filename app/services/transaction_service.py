@@ -234,7 +234,7 @@ def create_transaction(db: Session, event_data):
         "yes",
         "on",
     }
-    if auto_update_schema and tt and tt.origin == "EXTERNAL":
+    if auto_update_schema and tt:
         inferred_schema = _infer_json_schema_from_payload(transaction.payload) if transaction.payload is not None else None
         if inferred_schema:
             merged = _merge_json_schemas(tt.payload_schema, inferred_schema)
@@ -242,7 +242,7 @@ def create_transaction(db: Session, event_data):
                 tt.payload_schema = merged
                 db.commit()
 
-    if tt and tt.origin == "EXTERNAL":
+    if transaction.status == "PENDING":
         customer = (
             db.query(Customer)
             .filter(Customer.brand == transaction.brand, Customer.profile_id == transaction.profile_id)

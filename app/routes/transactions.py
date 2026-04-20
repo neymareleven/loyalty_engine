@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,18 @@ from app.services.transaction_service import create_transaction
 
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
+
+
+def _resolve_transaction(db: Session, *, active_brand: str, identifier: str) -> Transaction | None:
+    try:
+        tx_uuid = uuid.UUID(str(identifier))
+    except Exception:
+        tx_uuid = None
+
+    q = db.query(Transaction).filter(Transaction.brand == active_brand)
+    if tx_uuid is not None:
+        return q.filter(Transaction.id == tx_uuid).first()
+    return q.filter(Transaction.transaction_id == identifier).first()
 
 
 @router.post("")
@@ -145,12 +159,7 @@ def get_transaction(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    tx = (
-        db.query(Transaction)
-        .filter(Transaction.id == transaction_id)
-        .filter(Transaction.brand == active_brand)
-        .first()
-    )
+    tx = _resolve_transaction(db, active_brand=active_brand, identifier=transaction_id)
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return tx
@@ -162,18 +171,13 @@ def get_transaction_executions(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    tx = (
-        db.query(Transaction.id)
-        .filter(Transaction.id == transaction_id)
-        .filter(Transaction.brand == active_brand)
-        .first()
-    )
+    tx = _resolve_transaction(db, active_brand=active_brand, identifier=transaction_id)
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
     executions = (
         db.query(TransactionRuleExecution)
-        .filter(TransactionRuleExecution.transaction_id == transaction_id)
+        .filter(TransactionRuleExecution.transaction_id == tx.id)
         .order_by(TransactionRuleExecution.executed_at.asc())
         .all()
     )
