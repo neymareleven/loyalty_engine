@@ -57,21 +57,42 @@ def _as_mmdd(value):
             if mm < 1 or mm > 12 or dd < 1 or dd > 31:
                 return None
             return mm * 100 + dd
-        if len(s) == 10 and s[4] == "-" and s[7] == "-":
-            try:
-                mm = int(s[5:7])
-                dd = int(s[8:10])
-            except Exception:
-                return None
-            if mm < 1 or mm > 12 or dd < 1 or dd > 31:
-                return None
-            return mm * 100 + dd
     if hasattr(value, "month") and hasattr(value, "day"):
         try:
             return int(value.month) * 100 + int(value.day)
         except Exception:
             return None
     return None
+
+
+def _as_yyyy_mm_dd(value):
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        try:
+            return value.date()
+        except Exception:
+            return None
+    if isinstance(value, str):
+        s = value.strip()
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            try:
+                return date.fromisoformat(s)
+            except Exception:
+                return None
+    return None
+
+
+def _parse_birthdate_value(value):
+    full = _as_yyyy_mm_dd(value)
+    if full is not None:
+        return ("full", full)
+    mmdd = _as_mmdd(value)
+    if mmdd is not None:
+        return ("mmdd", mmdd)
+    return (None, None)
 
 
 def _resolve_selector_value(*, value, today: date, now_utc: datetime):
@@ -218,15 +239,36 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
 
         if field == "customer.birthdate":
             op_norm = (op or "").lower()
+
+            # exists uses the real date column.
+            if op_norm == "exists":
+                expr = Customer.birthdate
+                return _selector_compare(op=op, expr=expr, value=value)
+
+            # Parse values: either full date (YYYY-MM-DD) OR month-day (MM-DD). No mixing.
             if isinstance(value, list):
-                parsed = [_as_mmdd(v) for v in value]
-                if any(v is None for v in parsed):
+                parsed = [_parse_birthdate_value(v) for v in value]
+                kinds = {k for (k, v) in parsed if k is not None}
+                if not kinds:
                     raise HTTPException(status_code=400, detail="customer.birthdate values must be in format YYYY-MM-DD or MM-DD")
-                value = parsed
+                if len(kinds) != 1:
+                    raise HTTPException(status_code=400, detail="customer.birthdate values cannot mix YYYY-MM-DD and MM-DD")
+                kind = next(iter(kinds))
+                parsed_values = [v for (k, v) in parsed]
             else:
-                value = _as_mmdd(value)
-                if op_norm != "exists" and value is None:
+                kind, parsed_value = _parse_birthdate_value(value)
+                if kind is None:
                     raise HTTPException(status_code=400, detail="customer.birthdate must be in format YYYY-MM-DD or MM-DD")
+                parsed_values = parsed_value
+                kind = kind
+
+            if kind == "full":
+                expr = Customer.birthdate
+                return _selector_compare(op=op, expr=expr, value=parsed_values)
+
+            # kind == "mmdd" => anniversary match (ignores year)
+            expr = (Customer.birth_month * 100) + Customer.birth_day
+            return _selector_compare(op=op, expr=expr, value=parsed_values)
 
         expr = _resolve_selector_field(field=field, today=today, now_utc=now_utc)
         return _selector_compare(op=op, expr=expr, value=value)

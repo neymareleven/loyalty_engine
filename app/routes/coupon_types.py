@@ -58,7 +58,13 @@ def create_coupon_type(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Coupon type could not be saved")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Coupon type could not be saved. "
+                "Causes possibles: un autre type de coupon existe déjà avec des informations similaires, ou des données invalides."
+            ),
+        )
     db.refresh(obj)
     return obj
 
@@ -95,7 +101,13 @@ def update_coupon_type(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Coupon type could not be saved")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Coupon type could not be saved. "
+                "Causes possibles: un autre type de coupon existe déjà avec des informations similaires, ou des données invalides."
+            ),
+        )
     db.refresh(obj)
     return obj
 
@@ -110,18 +122,21 @@ def delete_coupon_type(
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Coupon type not found")
 
-    linked_category = (
-        db.query(RewardCategory.id)
+    linked_categories = (
+        db.query(RewardCategory.id, RewardCategory.name)
         .filter(RewardCategory.brand == active_brand)
         .filter(RewardCategory.coupon_type_id == obj.id)
-        .first()
+        .order_by(RewardCategory.created_at.asc())
+        .limit(10)
+        .all()
     )
-    if linked_category:
+    if linked_categories:
+        linked_label = ", ".join([f"{str(cid)} ({cname})" for cid, cname in linked_categories])
         raise HTTPException(
             status_code=409,
             detail=(
-                "Impossible de supprimer ce type de coupon car il est lié à au moins une catégorie de récompense. "
-                "Supprimez ou modifiez d'abord les catégories associées."
+                f"Impossible de supprimer ce type de coupon car il est lié à une ou plusieurs catégories de récompense: {linked_label}. "
+                "Action requise: supprimez ces catégories ou réaffectez-les à un autre type de coupon, puis réessayez."
             ),
         )
 

@@ -50,7 +50,13 @@ def create_reward(
     if reward_category_id is not None:
         cat = db.query(RewardCategory).filter(RewardCategory.id == reward_category_id).first()
         if not cat or cat.brand != active_brand:
-            raise HTTPException(status_code=400, detail="reward_category_id not found")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"reward_category_id not found: '{str(reward_category_id)}'. "
+                    "Veuillez sélectionner une catégorie de récompense existante pour cette marque."
+                ),
+            )
 
     reward = Reward(
         brand=active_brand,
@@ -122,7 +128,13 @@ def update_reward(
     if "reward_category_id" in data and data["reward_category_id"] is not None:
         cat = db.query(RewardCategory).filter(RewardCategory.id == data["reward_category_id"]).first()
         if not cat or cat.brand != active_brand:
-            raise HTTPException(status_code=400, detail="reward_category_id not found")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"reward_category_id not found: '{str(data['reward_category_id'])}'. "
+                    "Veuillez sélectionner une catégorie de récompense existante pour cette marque."
+                ),
+            )
 
     for k, v in data.items():
         if k == "brand":
@@ -180,7 +192,10 @@ def delete_reward(
     if in_use:
         raise HTTPException(
             status_code=409,
-            detail="La récompense ne peut pas être supprimée car elle est référencée par des récompenses clients. Veuillez plutôt la désactiver.",
+            detail=(
+                f"Impossible de supprimer la récompense '{reward.name}' ({str(reward.id)}) car elle est déjà attribuée à au moins un client. "
+                "Action recommandée: désactivez la récompense (active=false) au lieu de la supprimer."
+            ),
         )
 
     db.delete(reward)

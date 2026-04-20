@@ -49,7 +49,13 @@ def create_reward_category(
 
     ct = db.query(CouponType).filter(CouponType.id == payload.coupon_type_id).first()
     if not ct or ct.brand != active_brand:
-        raise HTTPException(status_code=400, detail="coupon_type_id not found")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"coupon_type_id not found: '{str(payload.coupon_type_id)}'. "
+                "Veuillez sélectionner un type de coupon existant pour cette marque."
+            ),
+        )
 
     obj = RewardCategory(
         brand=active_brand,
@@ -63,7 +69,13 @@ def create_reward_category(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Reward category could not be saved")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Reward category could not be saved. "
+                "Causes possibles: une catégorie existe déjà pour ce coupon_type_id, ou des données invalides."
+            ),
+        )
     db.refresh(obj)
     return obj
 
@@ -96,7 +108,13 @@ def update_reward_category(
     if "coupon_type_id" in data and data["coupon_type_id"] is not None:
         ct = db.query(CouponType).filter(CouponType.id == data["coupon_type_id"]).first()
         if not ct or ct.brand != active_brand:
-            raise HTTPException(status_code=400, detail="coupon_type_id not found")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"coupon_type_id not found: '{str(data['coupon_type_id'])}'. "
+                    "Veuillez sélectionner un type de coupon existant pour cette marque."
+                ),
+            )
 
     for k, v in data.items():
         setattr(obj, k, v)
@@ -105,7 +123,13 @@ def update_reward_category(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Reward category could not be saved")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Reward category could not be saved. "
+                "Causes possibles: une catégorie existe déjà pour ce coupon_type_id, ou des données invalides."
+            ),
+        )
     db.refresh(obj)
     return obj
 
@@ -120,18 +144,21 @@ def delete_reward_category(
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Reward category not found")
 
-    linked_reward = (
-        db.query(Reward.id)
+    linked_rewards = (
+        db.query(Reward.id, Reward.name)
         .filter(Reward.brand == active_brand)
         .filter(Reward.reward_category_id == obj.id)
-        .first()
+        .order_by(Reward.created_at.asc())
+        .limit(10)
+        .all()
     )
-    if linked_reward:
+    if linked_rewards:
+        linked_label = ", ".join([f"{str(rid)} ({rname})" for rid, rname in linked_rewards])
         raise HTTPException(
             status_code=409,
             detail=(
-                "Impossible de supprimer cette catégorie car elle est liée à au moins une récompense. "
-                "Supprimez ou réaffectez d'abord les récompenses associées."
+                f"Impossible de supprimer cette catégorie car elle est liée à une ou plusieurs récompenses: {linked_label}. "
+                "Action requise: supprimez ces récompenses ou réaffectez-les à une autre catégorie, puis réessayez."
             ),
         )
 
