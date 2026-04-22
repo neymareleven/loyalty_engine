@@ -11,12 +11,6 @@ class CustomerCoupon(Base):
     __tablename__ = "customer_coupons"
 
     __table_args__ = (
-        UniqueConstraint(
-            "customer_id",
-            "coupon_type_id",
-            "calendar_year",
-            name="uq_customer_coupons_customer_coupon_type_year",
-        ),
         UniqueConstraint("idempotency_key", name="uq_customer_coupons_idempotency_key"),
     )
 
@@ -24,8 +18,6 @@ class CustomerCoupon(Base):
 
     customer_id = Column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
     coupon_type_id = Column(UUID(as_uuid=True), ForeignKey("coupon_types.id"), nullable=False)
-
-    calendar_year = Column(Integer, nullable=False)
 
     status = Column(String(20), nullable=False, default="ISSUED")
     # ISSUED | USED | EXPIRED

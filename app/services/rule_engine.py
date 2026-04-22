@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -87,6 +88,62 @@ def _as_float(value):
         return None
 
 
+def _as_number_from_text(value: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+
+    s = value.strip()
+    if not s:
+        return None
+
+    # Extract the first number-like token from a text value.
+    # Examples:
+    # - "50000CFA" -> "50000"
+    # - "25 000 CFA via Frais" -> "25 000"
+    # - "50,000" -> "50,000"
+    # - "50.000" -> "50.000"
+    m = re.search(r"\d[\d\s.,]*", s)
+    if not m:
+        return None
+
+    token = m.group(0)
+    token = token.replace(" ", "")
+    token = token.strip(".,")
+    if not token:
+        return None
+
+    # If no separators remain, parse as int.
+    if "," not in token and "." not in token:
+        try:
+            return int(token)
+        except Exception:
+            return None
+
+    # Heuristic: treat the last separator as decimal if it has exactly 2 digits after it.
+    last_sep_pos = max(token.rfind(","), token.rfind("."))
+    decimal_digits = len(token) - last_sep_pos - 1 if last_sep_pos >= 0 else 0
+    if last_sep_pos >= 0 and decimal_digits == 2:
+        decimal_sep = token[last_sep_pos]
+        thousands_sep = "," if decimal_sep == "." else "."
+        normalized = token.replace(thousands_sep, "")
+        normalized = normalized.replace(decimal_sep, ".")
+        try:
+            return int(float(normalized))
+        except Exception:
+            return None
+
+    # Otherwise treat separators as thousands separators and just strip them.
+    digits_only = re.sub(r"[^0-9]", "", token)
+    if not digits_only:
+        return None
+    try:
+        return int(digits_only)
+    except Exception:
+        return None
+
+
 def _resolve_action_number(*, action_value, transaction) -> int | None:
     if isinstance(action_value, dict):
         path = action_value.get("$path")
@@ -108,6 +165,10 @@ def _resolve_action_number(*, action_value, transaction) -> int | None:
 
     as_float = _as_float(raw)
     if as_float is None:
+        # Tolerate amount strings coming from external ecommerce systems.
+        # e.g. "50000CFA", "25 000 CFA via Frais"
+        if isinstance(raw, str):
+            return _as_number_from_text(raw)
         return None
     return int(as_float)
 
@@ -391,6 +452,18 @@ def _execute_actions(db: Session, customer, transaction, actions):
             points = action.get("points")
             multiplier = action.get("multiplier")
             points_int = _resolve_action_number(action_value=points, transaction=transaction)
+
+            if isinstance(points, dict) and "$path" in points and points_int is None:
+                path = points.get("$path")
+                if path is not None:
+                    path = str(path)
+                payload = transaction.payload if isinstance(transaction.payload, dict) else {}
+                keys = sorted([str(k) for k in payload.keys()])
+                raise ValueError(
+                    f"earn_points: points value could not be resolved from $path={path!r}. "
+                    f"Check transaction.payload shape. Available payload keys: {keys}"
+                )
+
             mult_int = _as_int(multiplier)
             if mult_int is not None:
                 points_int = (points_int or 0) * mult_int

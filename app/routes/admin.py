@@ -47,7 +47,6 @@ def get_loyalty_settings(
         "brand": obj.brand,
         "points_validity_days": obj.points_validity_days,
         "loyalty_status_validity_days": obj.loyalty_status_validity_days,
-        "coupon_validity_days": getattr(obj, "coupon_validity_days", None),
     }
 
 
@@ -92,7 +91,6 @@ def update_loyalty_settings(
 
     prev_points_days = obj.points_validity_days
     prev_status_days = obj.loyalty_status_validity_days
-    prev_coupon_days = getattr(obj, "coupon_validity_days", None)
 
     data = payload.model_dump(exclude_unset=True)
     if "points_validity_days" in data and data["points_validity_days"] is not None:
@@ -117,22 +115,10 @@ def update_loyalty_settings(
     elif "loyalty_status_validity_days" in data and data["loyalty_status_validity_days"] is None:
         obj.loyalty_status_validity_days = None
 
-    if "coupon_validity_days" in data and data["coupon_validity_days"] is not None:
-        try:
-            v = int(data["coupon_validity_days"])
-        except Exception:
-            raise HTTPException(status_code=400, detail="coupon_validity_days must be an integer")
-        if v < 0:
-            raise HTTPException(status_code=400, detail="coupon_validity_days must be >= 0")
-        obj.coupon_validity_days = v
-    elif "coupon_validity_days" in data and data["coupon_validity_days"] is None:
-        obj.coupon_validity_days = None
-
     should_backfill_points = obj.points_validity_days is not None and prev_points_days is None
     should_backfill_status = obj.loyalty_status_validity_days is not None and prev_status_days is None
-    should_backfill_coupon = getattr(obj, "coupon_validity_days", None) is not None and prev_coupon_days is None
 
-    if should_backfill_points or should_backfill_status or should_backfill_coupon:
+    if should_backfill_points or should_backfill_status:
         initialize_validity_windows_for_existing_customers(db, brand=brand)
 
     db.commit()
@@ -141,7 +127,6 @@ def update_loyalty_settings(
         "brand": obj.brand,
         "points_validity_days": obj.points_validity_days,
         "loyalty_status_validity_days": obj.loyalty_status_validity_days,
-        "coupon_validity_days": getattr(obj, "coupon_validity_days", None),
     }
 
 
@@ -869,7 +854,7 @@ def list_rule_actions_catalog():
                 "type": "issue_coupon",
                 "title": "Attribuer un coupon",
                 "description": "Émet un coupon pour le client et lui attribue toutes les récompenses actives de la catégorie associée (snapshot au moment de l’émission).",
-                "params": {"coupon_type_id": "uuid", "frequency": "ALWAYS | ONCE_PER_CALENDAR_YEAR | ONCE_PER_CUSTOMER"},
+                "params": {"coupon_type_id": "uuid", "frequency": "ALWAYS | ONCE_PER_CALENDAR_YEAR (1 calendar year) | ONCE_PER_CUSTOMER"},
                 "jsonSchema": _model_json_schema(IssueCouponAction),
                 "examples": [
                     {"type": "issue_coupon", "coupon_type_id": "<uuid>"},
@@ -890,7 +875,7 @@ def list_rule_actions_catalog():
                         "widget": "select",
                         "options": [
                             {"label": "Once per customer (lifetime)", "value": "ONCE_PER_CUSTOMER"},
-                            {"label": "Once per calendar year", "value": "ONCE_PER_CALENDAR_YEAR"},
+                            {"label": "Once per calendar year (1 year)", "value": "ONCE_PER_CALENDAR_YEAR"},
                             {"label": "Always", "value": "ALWAYS"},
                         ],
                     },

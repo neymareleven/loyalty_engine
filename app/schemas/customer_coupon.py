@@ -10,8 +10,6 @@ class CustomerCouponOut(BaseModel):
     customer_id: UUID
     coupon_type_id: UUID
 
-    calendar_year: int
-
     status: str
 
     issued_at: Optional[datetime] = None

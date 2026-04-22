@@ -7,7 +7,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from app.models.brand_loyalty_settings import BrandLoyaltySettings
 from app.models.coupon_type import CouponType
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
@@ -23,6 +22,20 @@ IssueCouponFrequency = Literal[
 ]
 
 
+def _since_one_calendar_year(now: datetime) -> datetime:
+    """Return a calendar-aware cutoff equivalent to (now - 1 year).
+
+    This avoids approximations like 365 days and handles leap years.
+    For leap day, we clamp to Feb 28 (e.g. 2024-02-29 -> 2023-02-28).
+    """
+
+    try:
+        return now.replace(year=now.year - 1)
+    except ValueError:
+        # Likely Feb 29 on a leap year.
+        return now.replace(year=now.year - 1, month=2, day=28)
+
+
 def _coerce_uuid(value):
     # Keep same conventions as reward_service.
     import uuid
@@ -35,28 +48,6 @@ def _coerce_uuid(value):
         return uuid.UUID(str(value))
     except Exception:
         return None
-
-
-def _get_coupon_validity_days(db: Session, *, brand: str) -> int | None:
-    s = db.query(BrandLoyaltySettings).filter(BrandLoyaltySettings.brand == brand).first()
-    if not s:
-        return None
-    v = getattr(s, "coupon_validity_days", None)
-    if v is None:
-        return None
-    try:
-        v = int(v)
-    except Exception:
-        return None
-    if v < 0:
-        return None
-    if v == 0:
-        return 0
-    return v
-
-
-def _calendar_year(now: datetime) -> int:
-    return int(now.year)
 
 
 def _is_expired(*, expires_at) -> bool:
@@ -105,7 +96,6 @@ def issue_coupon(
         raise HTTPException(status_code=400, detail="Reward category not linked to coupon type")
 
     now = datetime.utcnow()
-    year = _calendar_year(now)
 
     if frequency == "ONCE_PER_CUSTOMER":
         existing = (
@@ -119,17 +109,26 @@ def issue_coupon(
             return existing
 
     if frequency == "ONCE_PER_CALENDAR_YEAR":
+        since = _since_one_calendar_year(now)
         existing = (
             db.query(CustomerCoupon)
             .filter(CustomerCoupon.customer_id == customer.id)
             .filter(CustomerCoupon.coupon_type_id == ct.id)
-            .filter(CustomerCoupon.calendar_year == year)
+            .filter(CustomerCoupon.issued_at >= since)
+            .order_by(CustomerCoupon.issued_at.desc())
             .first()
         )
         if existing:
             return existing
 
-    validity_days = _get_coupon_validity_days(db, brand=customer.brand)
+    validity_days = getattr(ct, "validity_days", None)
+    if validity_days is not None:
+        try:
+            validity_days = int(validity_days)
+        except Exception:
+            validity_days = None
+    if validity_days is not None and validity_days < 0:
+        validity_days = None
     expires_at = None
     if validity_days is not None:
         expires_at = now + timedelta(days=int(validity_days))
@@ -137,7 +136,6 @@ def issue_coupon(
     coupon = CustomerCoupon(
         customer_id=customer.id,
         coupon_type_id=ct.id,
-        calendar_year=year,
         status="ISSUED",
         expires_at=expires_at,
         source_transaction_id=transaction.id if transaction is not None else None,
@@ -206,13 +204,15 @@ def issue_coupon(
             if existing:
                 return existing
 
-        # Concurrency safe fallback for yearly uniqueness.
+        # Concurrency safe fallback for rolling-year uniqueness.
         if frequency == "ONCE_PER_CALENDAR_YEAR":
+            since = _since_one_calendar_year(now)
             existing = (
                 db.query(CustomerCoupon)
                 .filter(CustomerCoupon.customer_id == customer.id)
                 .filter(CustomerCoupon.coupon_type_id == ct.id)
-                .filter(CustomerCoupon.calendar_year == year)
+                .filter(CustomerCoupon.issued_at >= since)
+                .order_by(CustomerCoupon.issued_at.desc())
                 .first()
             )
             if existing:

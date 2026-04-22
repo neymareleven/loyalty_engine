@@ -47,10 +47,20 @@ def create_coupon_type(
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
 
+    validity_days = payload.validity_days
+    if validity_days is not None:
+        try:
+            validity_days = int(validity_days)
+        except Exception:
+            raise HTTPException(status_code=400, detail="validity_days must be an integer")
+        if validity_days < 0:
+            raise HTTPException(status_code=400, detail="validity_days must be >= 0")
+
     obj = CouponType(
         brand=active_brand,
         name=payload.name,
         description=payload.description,
+        validity_days=validity_days,
         active=payload.active,
     )
     db.add(obj)
@@ -93,6 +103,15 @@ def update_coupon_type(
         raise HTTPException(status_code=404, detail="Coupon type not found")
 
     data = payload.model_dump(exclude_unset=True)
+
+    if "validity_days" in data and data["validity_days"] is not None:
+        try:
+            v = int(data["validity_days"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="validity_days must be an integer")
+        if v < 0:
+            raise HTTPException(status_code=400, detail="validity_days must be >= 0")
+        data["validity_days"] = v
 
     for k, v in data.items():
         setattr(obj, k, v)

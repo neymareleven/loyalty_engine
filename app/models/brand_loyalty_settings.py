@@ -16,7 +16,6 @@ class BrandLoyaltySettings(Base):
 
     points_validity_days = Column(Integer, nullable=True)
     loyalty_status_validity_days = Column(Integer, nullable=True)
-    coupon_validity_days = Column(Integer, nullable=True)
 
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())

@@ -9,12 +9,14 @@ class CouponTypeCreate(BaseModel):
     brand: Optional[str] = None
     name: str
     description: Optional[str] = None
+    validity_days: Optional[int] = None
     active: bool = True
 
 
 class CouponTypeUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    validity_days: Optional[int] = None
     active: Optional[bool] = None
 
 
@@ -23,6 +25,7 @@ class CouponTypeOut(BaseModel):
     brand: str
     name: str
     description: Optional[str] = None
+    validity_days: Optional[int] = None
     active: bool
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, Column, String, TIMESTAMP
+from sqlalchemy import Boolean, Column, Integer, String, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -16,6 +16,8 @@ class CouponType(Base):
 
     name = Column(String(200), nullable=False)
     description = Column(String(1000), nullable=True)
+
+    validity_days = Column(Integer, nullable=True)
 
     active = Column(Boolean, default=True)
 

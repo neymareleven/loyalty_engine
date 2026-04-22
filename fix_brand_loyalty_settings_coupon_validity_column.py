@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 
 
 def main():
+    print("This script is deprecated: coupon validity is now configured per CouponType (coupon_types.validity_days).")
+    return
+
     # Load environment variables
     load_dotenv(encoding="utf-8")
 
