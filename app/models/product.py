@@ -12,6 +12,7 @@ class Product(Base):
 
     __table_args__ = (
         UniqueConstraint("brand", "match_key", name="uq_products_brand_match_key"),
+        UniqueConstraint("brand", "name", name="uq_products_brand_name"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

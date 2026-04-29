@@ -11,7 +11,7 @@ class ProductCreate(BaseModel):
     category_id: Optional[UUID] = None
 
     name: str
-    match_key: str
+    match_key: Optional[str] = None
 
     points_value: Optional[int] = None
 

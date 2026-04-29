@@ -1,3 +1,4 @@
+import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,6 +23,34 @@ def _pgcode(err: IntegrityError) -> str | None:
     if code:
         return str(code)
     return None
+
+
+def _normalize_match_key(value) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s or None
+
+
+def _ensure_unique_match_key(*, db: Session, brand: str, base_key: str) -> str:
+    # Ensure uniqueness within a brand by suffixing -2, -3, ... if needed.
+    key = base_key
+    i = 2
+    while True:
+        exists = (
+            db.query(Product.id)
+            .filter(Product.brand == brand)
+            .filter(Product.match_key == key)
+            .first()
+        )
+        if not exists:
+            return key
+        key = f"{base_key}-{i}"
+        i += 1
 
 
 @router.get("/by-reward/{reward_id}")
@@ -105,11 +134,18 @@ def create_product(
                 ),
             )
 
+    match_key = payload.match_key
+    if not match_key:
+        base = _normalize_match_key(payload.name)
+        if not base:
+            raise HTTPException(status_code=400, detail="match_key could not be generated from name")
+        match_key = _ensure_unique_match_key(db=db, brand=active_brand, base_key=base)
+
     obj = Product(
         brand=active_brand,
         category_id=payload.category_id,
         name=payload.name,
-        match_key=payload.match_key,
+        match_key=match_key,
         points_value=payload.points_value,
         active=payload.active,
     )
@@ -120,6 +156,15 @@ def create_product(
         db.rollback()
         code = _pgcode(e)
         if code == "23505":
+            msg = str(getattr(getattr(e, "orig", None), "diag", "") or "")
+            if "uq_products_brand_name" in msg:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Un produit avec ce nom existe déjà pour cette marque. "
+                        "Veuillez modifier le nom puis réessayer."
+                    ),
+                )
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -188,6 +233,15 @@ def update_product(
         db.rollback()
         code = _pgcode(e)
         if code == "23505":
+            msg = str(getattr(getattr(e, "orig", None), "diag", "") or "")
+            if "uq_products_brand_name" in msg:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Impossible de mettre à jour le produit: un produit avec ce nom existe déjà pour cette marque. "
+                        "Veuillez modifier le nom puis réessayer."
+                    ),
+                )
             raise HTTPException(
                 status_code=409,
                 detail=(
