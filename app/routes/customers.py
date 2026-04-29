@@ -468,6 +468,40 @@ def use_customer_coupon(
     return coupon
 
 
+@router.patch("/{brand}/{profile_id}/coupons/{customer_coupon_id}/reopen", response_model=CustomerCouponOut)
+def patch_reopen_customer_coupon(
+    brand: str,
+    profile_id: str,
+    customer_coupon_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    return reopen_customer_coupon(
+        brand=brand,
+        profile_id=profile_id,
+        customer_coupon_id=customer_coupon_id,
+        active_brand=active_brand,
+        db=db,
+    )
+
+
+@router.patch("/{brand}/{profile_id}/coupons/{customer_coupon_id}/use", response_model=CustomerCouponOut)
+def patch_use_customer_coupon(
+    brand: str,
+    profile_id: str,
+    customer_coupon_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    return use_customer_coupon(
+        brand=brand,
+        profile_id=profile_id,
+        customer_coupon_id=customer_coupon_id,
+        active_brand=active_brand,
+        db=db,
+    )
+
+
 @router.post("/{brand}/{profile_id}/coupons/{customer_coupon_id}/reopen", response_model=CustomerCouponOut)
 def reopen_customer_coupon(
     brand: str,
@@ -662,6 +696,23 @@ def set_customer_tier_min_only(
     data["loyalty_status_name"] = tier_name
     data["points_balance"] = get_status_points_balance(db, customer.id)
     return data
+
+
+@router.patch("/{brand}/{profile_id}/loyalty/set-tier", response_model=CustomerOut)
+def patch_set_customer_tier_min_only(
+    brand: str,
+    profile_id: str,
+    payload: CustomerSetTierMinOnly,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    return set_customer_tier_min_only(
+        brand=brand,
+        profile_id=profile_id,
+        payload=payload,
+        active_brand=active_brand,
+        db=db,
+    )
 
 
 @router.get("/{brand}/{profile_id}/loyalty")

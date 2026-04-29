@@ -17,6 +17,9 @@ from app.models.rule import Rule
 from app.models.reward import Reward
 from app.models.reward_category import RewardCategory
 from app.models.coupon_type import CouponType
+from app.models.product_category import ProductCategory
+from app.models.product import Product
+from app.models.segment import Segment
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.reward_service import expire_rewards
@@ -77,6 +80,82 @@ def list_ui_options_coupon_types(
                 ),
             }
             for ct in items
+        ],
+    }
+
+
+@router.get("/ui-options/segments")
+def list_ui_options_segments(
+    brand: str = Depends(get_active_brand),
+    active: bool | None = True,
+    db: Session = Depends(get_db),
+):
+    q = db.query(Segment).filter(Segment.brand == brand)
+    if active is not None:
+        q = q.filter(Segment.active.is_(active))
+    items = q.order_by(Segment.name.asc()).all()
+    return {
+        "brand": brand,
+        "items": [
+            {
+                "id": str(s.id),
+                "name": s.name,
+                "active": s.active,
+                "is_dynamic": bool(s.is_dynamic),
+            }
+            for s in items
+        ],
+    }
+
+
+@router.get("/ui-options/product-categories")
+def list_ui_options_product_categories(
+    brand: str = Depends(get_active_brand),
+    active: bool | None = True,
+    db: Session = Depends(get_db),
+):
+    q = db.query(ProductCategory).filter(ProductCategory.brand == brand)
+    if active is not None:
+        q = q.filter(ProductCategory.active.is_(active))
+    items = q.order_by(ProductCategory.name.asc()).all()
+    return {
+        "brand": brand,
+        "items": [
+            {
+                "id": str(c.id),
+                "name": c.name,
+                "active": c.active,
+            }
+            for c in items
+        ],
+    }
+
+
+@router.get("/ui-options/products")
+def list_ui_options_products(
+    brand: str = Depends(get_active_brand),
+    active: bool | None = True,
+    category_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(Product).filter(Product.brand == brand)
+    if active is not None:
+        q = q.filter(Product.active.is_(active))
+    if category_id:
+        q = q.filter(Product.category_id == category_id)
+    items = q.order_by(Product.name.asc()).all()
+    return {
+        "brand": brand,
+        "items": [
+            {
+                "id": str(p.id),
+                "name": p.name,
+                "match_key": p.match_key,
+                "points_value": p.points_value,
+                "active": p.active,
+                "category_id": str(p.category_id) if p.category_id else None,
+            }
+            for p in items
         ],
     }
 
@@ -676,6 +755,9 @@ def list_internal_job_selector_fields():
         "customer.birthdate",
         "customer.created_at",
         "customer.last_activity_at",
+        "customer.metrics.last_transaction_at",
+        "customer.metrics.transactions_count_30d",
+        "customer.metrics.transactions_count_90d",
     ]
     system_fields: list[str] = []
     items = sorted({*customer_fields, *system_fields})
@@ -695,10 +777,29 @@ def list_internal_job_selector_fields():
             "customer.birthdate": {"valueKind": "date", "ui": {"widget": "date"}},
             "customer.created_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.last_activity_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
+            "customer.metrics.last_transaction_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
+            "customer.metrics.transactions_count_30d": {"valueKind": "number", "ui": {"widget": "number"}},
+            "customer.metrics.transactions_count_90d": {"valueKind": "number", "ui": {"widget": "number"}},
         },
         "valuePresets": {
             "datetime": [
                 {"id": "system.now", "label": "Now", "value": {"$system": "now"}},
+                {"id": "system.today", "label": "Today", "value": {"$system": "today"}},
+                {
+                    "id": "system.today_mmdd",
+                    "label": "Today (MM-DD)",
+                    "value": {"$system": "today", "format": "mmdd"},
+                },
+                {
+                    "id": "system.today_plus_7_mmdd",
+                    "label": "Today + 7 days (MM-DD)",
+                    "value": {"$system": "today", "add_days": 7, "format": "mmdd"},
+                },
+                {
+                    "id": "system.today_plus_30_mmdd",
+                    "label": "Today + 30 days (MM-DD)",
+                    "value": {"$system": "today", "add_days": 30, "format": "mmdd"},
+                },
             ]
         },
         "items": items,

@@ -1,4 +1,6 @@
 from datetime import datetime
+import logging
+from itertools import zip_longest
 import re
 
 import sqlalchemy as sa
@@ -10,10 +12,16 @@ from app.models.rule import Rule
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.point_movement import PointMovement
 from app.models.customer_reward import CustomerReward
+from app.models.customer_metrics import CustomerMetrics
+from app.models.product import Product
+from app.models.segment_member import SegmentMember
 from app.services.contact_service import get_customer
 from app.services.loyalty_service import earn_points, burn_points
 from app.services.reward_service import issue_reward
 from app.services.coupon_service import issue_coupon, use_coupon
+
+
+logger = logging.getLogger(__name__)
 
 
 def _get_by_path(obj, path: str):
@@ -28,6 +36,17 @@ def _get_by_path(obj, path: str):
         else:
             current = getattr(current, part, None)
     return current
+
+
+def _normalize_match_key(value) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s or None
 
 
 def _resolve_system_value(*, key: str, customer):
@@ -56,11 +75,12 @@ def _resolve_system_value(*, key: str, customer):
 
 
 def _resolve_expected_value(*, customer, value):
-    if isinstance(value, dict) and "$system" in value:
-        key = value.get("$system")
-        if not isinstance(key, str) or not key:
-            raise ValueError("Invalid system preset: expected non-empty '$system' string")
-        return _resolve_system_value(key=key, customer=customer)
+    if isinstance(value, dict):
+        if "$system" in value:
+            key = value.get("$system")
+            if not isinstance(key, str) or not key:
+                raise ValueError("Invalid system preset: expected non-empty '$system' string")
+            return _resolve_system_value(key=key, customer=customer)
 
     if isinstance(value, list):
         return [_resolve_expected_value(customer=customer, value=v) for v in value]
@@ -83,9 +103,153 @@ def _as_float(value):
             return None
         if isinstance(value, bool):
             return None
+        if isinstance(value, str):
+            parsed = _as_number_from_text(value)
+            if parsed is not None:
+                return float(parsed)
         return float(value)
     except Exception:
         return None
+
+
+def _eval_expr(*, db: Session, customer, transaction, expr):
+    if expr is None:
+        return None
+
+    if isinstance(expr, list):
+        return [_eval_expr(db=db, customer=customer, transaction=transaction, expr=e) for e in expr]
+
+    if not isinstance(expr, dict):
+        return expr
+
+    if "$system" in expr:
+        key = expr.get("$system")
+        if not isinstance(key, str) or not key:
+            raise ValueError("Invalid system preset: expected non-empty '$system' string")
+        return _resolve_system_value(key=key, customer=customer)
+
+    if "$path" in expr:
+        path = expr.get("$path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("Invalid $path: expected non-empty string")
+        return _resolve_field_value(db=db, field=path.strip(), customer=customer, transaction=transaction)
+
+    if "$fn" in expr:
+        fn = expr.get("$fn")
+        args = expr.get("args")
+        if not isinstance(fn, str) or not fn:
+            raise ValueError("Invalid $fn: expected non-empty string")
+        if args is None:
+            args = []
+        if not isinstance(args, list):
+            raise ValueError("Invalid $fn args: expected list")
+
+        evaled = [_eval_expr(db=db, customer=customer, transaction=transaction, expr=a) for a in args]
+        fn_norm = fn.strip().lower()
+
+        if fn_norm == "to_number":
+            if len(evaled) != 1:
+                raise ValueError("to_number expects exactly 1 argument")
+            v = evaled[0]
+            n = _as_float(v)
+            return None if n is None else int(n)
+
+        if fn_norm == "lower":
+            if len(evaled) != 1:
+                raise ValueError("lower expects exactly 1 argument")
+            v = evaled[0]
+            return None if v is None else str(v).lower()
+
+        if fn_norm == "upper":
+            if len(evaled) != 1:
+                raise ValueError("upper expects exactly 1 argument")
+            v = evaled[0]
+            return None if v is None else str(v).upper()
+
+        if fn_norm == "length":
+            if len(evaled) != 1:
+                raise ValueError("length expects exactly 1 argument")
+            v = evaled[0]
+            if v is None:
+                return None
+            if isinstance(v, (list, str, dict)):
+                return len(v)
+            return None
+
+        if fn_norm == "coalesce":
+            for v in evaled:
+                if v not in (None, ""):
+                    return v
+            return None
+
+        if fn_norm == "date_diff_days":
+            if len(evaled) != 2:
+                raise ValueError("date_diff_days expects exactly 2 arguments")
+            a = _as_datetime(evaled[0])
+            b = _as_datetime(evaled[1])
+            if a is None or b is None:
+                return None
+            delta = a - b
+            return int(delta.total_seconds() // 86400)
+
+        if fn_norm in {"sum_product_points_unomi", "sum_product_points_unomi_arrays", "sum_product_points_unomi_arrays_v1"}:
+            if len(evaled) != 2:
+                raise ValueError("sum_product_points_unomi expects exactly 2 arguments: productNames, productQuantities")
+
+            brand = getattr(transaction, "brand", None)
+            if not brand:
+                return 0
+
+            names = evaled[0] if isinstance(evaled[0], list) else []
+            quantities = evaled[1] if isinstance(evaled[1], list) else []
+
+            pairs: list[tuple[str, int]] = []
+            for name, qty in zip_longest(names, quantities, fillvalue=None):
+                mk = _normalize_match_key(name)
+                if not mk:
+                    continue
+                q = _as_int(qty)
+                if q is None:
+                    q = 1
+                if q <= 0:
+                    continue
+                pairs.append((mk, q))
+
+            if not pairs:
+                return 0
+
+            match_keys = sorted({mk for mk, _ in pairs})
+            products = (
+                db.query(Product.match_key, Product.points_value)
+                .filter(Product.brand == brand)
+                .filter(Product.match_key.in_(match_keys))
+                .filter(Product.active.is_(True))
+                .all()
+            )
+            points_by_key = {mk: (pv or 0) for mk, pv in products}
+
+            total = 0
+            unknown = []
+            for mk, q in pairs:
+                pv = points_by_key.get(mk)
+                if pv is None:
+                    unknown.append(mk)
+                    continue
+                total += int(pv) * int(q)
+
+            if unknown:
+                logger.info(
+                    "sum_product_points_unomi: unknown products ignored (brand=%s): %s",
+                    brand,
+                    ",".join(sorted(set(unknown))),
+                )
+
+            return total
+
+        raise ValueError(f"Unknown function: {fn}")
+
+    # Unknown dict => treat as literal object
+    return expr
 
 
 def _as_number_from_text(value: str) -> int | None:
@@ -228,6 +392,18 @@ def _resolve_field_value(*, db: Session, field: str, customer, transaction):
         return _get_by_path(payload, field[len("payload.") :])
 
     if field.startswith("customer."):
+        if field.startswith("customer.metrics."):
+            if not getattr(customer, "id", None):
+                return None
+            row = (
+                db.query(CustomerMetrics)
+                .filter(CustomerMetrics.customer_id == customer.id)
+                .filter(CustomerMetrics.brand == getattr(customer, "brand", None))
+                .first()
+            )
+            if not row:
+                return None
+            return _get_by_path(row, field[len("customer.metrics.") :])
         if field == "customer.rewards":
             if not getattr(customer, "id", None):
                 return []
@@ -414,7 +590,11 @@ def _evaluate_ast_condition(*, db: Session, customer, transaction, node) -> bool
             op = node.get("op")
         if not op:
             raise ValueError("Condition leaf requires 'operator' (or alias 'op')")
-        value = _resolve_expected_value(customer=customer, value=node.get("value"))
+        raw_value = node.get("value")
+        if isinstance(raw_value, dict) and ("$path" in raw_value or "$fn" in raw_value or "$system" in raw_value):
+            value = _eval_expr(db=db, customer=customer, transaction=transaction, expr=raw_value)
+        else:
+            value = _resolve_expected_value(customer=customer, value=raw_value)
         actual = _resolve_field_value(db=db, field=field, customer=customer, transaction=transaction)
         return _compare(op=op, actual=actual, expected=value)
 
@@ -600,6 +780,26 @@ def process_transaction_rules(db: Session, transaction):
     for rule in rules:
 
         try:
+            seg_ids = getattr(rule, "segment_ids", None)
+            if seg_ids:
+                seg_ids = [s for s in seg_ids if s is not None]
+            if seg_ids:
+                exists = (
+                    db.query(SegmentMember.customer_id)
+                    .filter(SegmentMember.customer_id == customer.id)
+                    .filter(SegmentMember.segment_id.in_(seg_ids))
+                    .first()
+                )
+                if not exists:
+                    execution = TransactionRuleExecution(
+                        transaction_id=transaction.id,
+                        rule_id=rule.id,
+                        result="SKIPPED",
+                        details={"matched": False, "segment": "not_in_segment"},
+                    )
+                    db.add(execution)
+                    continue
+
             matched = _evaluate_condition_block(db, customer, transaction, rule.conditions)
             if not matched:
                 execution = TransactionRuleExecution(

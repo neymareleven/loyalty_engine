@@ -14,6 +14,8 @@ class RuleCreate(BaseModel):
     transaction_types: Optional[list[str]] = None
     priority: int = 0
 
+    segment_ids: Optional[list[UUID]] = None
+
     conditions: Optional[Dict[str, Any]] = None
     actions: Optional[list[Dict[str, Any]]] = None
 
@@ -27,6 +29,8 @@ class RuleUpdate(BaseModel):
 
     transaction_type: Optional[str] = None
     transaction_types: Optional[list[str]] = None
+
+    segment_ids: Optional[list[UUID]] = None
 
     conditions: Optional[Dict[str, Any]] = None
     actions: Optional[list[Dict[str, Any]]] = None
@@ -42,6 +46,8 @@ class RuleOut(BaseModel):
     transaction_type: str
     transaction_types: Optional[list[str]] = None
     priority: int
+
+    segment_ids: Optional[list[UUID]] = None
 
     conditions: Optional[Dict[str, Any]] = None
     actions: Optional[list[Dict[str, Any]]] = None

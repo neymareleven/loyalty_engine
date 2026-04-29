@@ -19,7 +19,12 @@ class InternalJobCreate(BaseModel):
     description: Optional[str] = None
     transaction_type: str
 
-    selector: Dict[str, Any] = Field(default_factory=dict)
+    segment_id: Optional[UUID] = None
+
+    selector: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Free-form selector object (AST) used to target customers.",
+    )
     payload_template: Optional[Dict[str, Any]] = None
 
     active: bool = True
@@ -36,7 +41,12 @@ class InternalJobUpdate(BaseModel):
     description: Optional[str] = None
     transaction_type: Optional[str] = None
 
-    selector: Optional[Dict[str, Any]] = None
+    segment_id: Optional[UUID] = None
+
+    selector: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Free-form selector object (AST) used to target customers.",
+    )
     payload_template: Optional[Dict[str, Any]] = None
 
     active: Optional[bool] = None
@@ -54,7 +64,12 @@ class InternalJobOut(BaseModel):
     description: Optional[str] = None
     transaction_type: str
 
-    selector: Dict[str, Any] = Field(default_factory=dict)
+    segment_id: Optional[UUID] = None
+
+    selector: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Free-form selector object (AST) used to target customers.",
+    )
     payload_template: Optional[Dict[str, Any]] = None
 
     active: bool

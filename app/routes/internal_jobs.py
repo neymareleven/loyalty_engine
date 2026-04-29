@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
+from app.models.customer_metrics import CustomerMetrics
+from app.models.segment import Segment
+from app.models.segment_member import SegmentMember
 from app.models.event_type import TransactionType
 from app.models.internal_job import InternalJob
 from app.models.loyalty_tier import LoyaltyTier
@@ -29,6 +32,8 @@ _SYSTEM_MANAGED_JOB_KEYS = {
     "MAINT_EXPIRE_POINTS",
     "MAINT_EXPIRE_LOYALTY_STATUS",
     "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+    "MAINT_RECOMPUTE_CUSTOMER_METRICS",
+    "MAINT_RECOMPUTE_SEGMENTS",
     "MAINT_BACKFILL_COUPONS",
 }
 
@@ -99,8 +104,30 @@ def _resolve_selector_value(*, value, today: date, now_utc: datetime):
     if isinstance(value, dict) and "$system" in value:
         key = value.get("$system")
         if key == "now":
-            return now_utc
-        raise HTTPException(status_code=400, detail=f"Unknown system value preset: {key}")
+            base = now_utc
+        elif key == "today":
+            base = today
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown system value preset: {key}")
+
+        add_days = value.get("add_days")
+        if add_days is not None:
+            try:
+                add_days_int = int(add_days)
+            except Exception:
+                raise HTTPException(status_code=400, detail="System preset 'add_days' must be an integer")
+            base = base + timedelta(days=add_days_int)
+
+        fmt = value.get("format")
+        if fmt is not None:
+            fmt_norm = (str(fmt) or "").strip().lower()
+            if fmt_norm == "mmdd":
+                if not hasattr(base, "month") or not hasattr(base, "day"):
+                    raise HTTPException(status_code=400, detail="System preset format 'mmdd' requires a date-like value")
+                return f"{int(base.month):02d}-{int(base.day):02d}"
+            raise HTTPException(status_code=400, detail=f"Unknown system preset format: {fmt}")
+
+        return base
     return value
 
 
@@ -110,6 +137,17 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
 
     if field.startswith("customer."):
         key = field[len("customer.") :]
+        if key.startswith("metrics."):
+            metric_key = key[len("metrics.") :]
+            if metric_key == "last_transaction_at":
+                return CustomerMetrics.last_transaction_at
+            if metric_key == "transactions_count_30d":
+                return CustomerMetrics.transactions_count_30d
+            if metric_key == "transactions_count_90d":
+                return CustomerMetrics.transactions_count_90d
+
+            raise HTTPException(status_code=400, detail=f"Unknown selector customer metrics field: {field}")
+
         if key == "gender":
             return Customer.gender
         if key == "status":
@@ -268,6 +306,18 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
 
             # kind == "mmdd" => anniversary match (ignores year)
             expr = (Customer.birth_month * 100) + Customer.birth_day
+            if op_norm == "between":
+                if not isinstance(parsed_values, list) or len(parsed_values) != 2:
+                    raise HTTPException(status_code=400, detail="customer.birthdate between requires two values")
+                lo, hi = parsed_values[0], parsed_values[1]
+                if lo is None or hi is None:
+                    raise HTTPException(status_code=400, detail="customer.birthdate between requires valid MM-DD values")
+                if lo <= hi:
+                    return expr.between(lo, hi)
+                from sqlalchemy import or_
+
+                return or_(expr.between(lo, 1231), expr.between(101, hi))
+
             return _selector_compare(op=op, expr=expr, value=parsed_values)
 
         expr = _resolve_selector_field(field=field, today=today, now_utc=now_utc)
@@ -470,6 +520,13 @@ def get_internal_jobs_ui_bundle(
         .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
         .all()
     )
+    segments = (
+        db.query(Segment)
+        .filter(Segment.brand == brand)
+        .filter(Segment.active.is_(True))
+        .order_by(Segment.name.asc())
+        .all()
+    )
     return {
         "brand": brand,
         "uiCatalog": get_internal_jobs_ui_catalog(),
@@ -501,6 +558,13 @@ def get_internal_jobs_ui_bundle(
                     for t in tiers
                 ],
             },
+            "segments": {
+                "brand": brand,
+                "items": [
+                    {"id": str(s.id), "name": s.name, "active": s.active, "is_dynamic": bool(s.is_dynamic)}
+                    for s in segments
+                ],
+            },
         },
     }
 
@@ -510,6 +574,10 @@ def _apply_selector(q, selector: dict, today: date):
         return q
 
     now_utc = datetime.utcnow()
+    q = q.outerjoin(
+        CustomerMetrics,
+        (CustomerMetrics.brand == Customer.brand) & (CustomerMetrics.customer_id == Customer.id),
+    )
     criterion = _selector_ast_to_criterion(selector, today=today, now_utc=now_utc)
     if criterion is None:
         return q
@@ -542,6 +610,11 @@ def create_internal_job(
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
     if payload.job_key in _SYSTEM_MANAGED_JOB_KEYS:
         raise HTTPException(status_code=400, detail="This internal job is system-managed")
+
+    if payload.segment_id is not None:
+        seg = db.query(Segment).filter(Segment.id == payload.segment_id).first()
+        if not seg or seg.brand != active_brand:
+            raise HTTPException(status_code=400, detail="Unknown segment_id for this brand")
     q = (
         db.query(TransactionType.id)
         .filter(
@@ -589,6 +662,7 @@ def create_internal_job(
         name=name_in,
         description=((payload.description or "").strip() or None),
         transaction_type=payload.transaction_type,
+        segment_id=payload.segment_id,
         selector=payload.selector or {},
         payload_template=payload.payload_template,
         active=payload.active,
@@ -638,20 +712,29 @@ def update_internal_job(
 
     data = payload.model_dump(exclude_unset=True)
 
-    if "name" in data:
-        name_in = (data.get("name") or "").strip() or None
-        if not name_in:
+    if "segment_id" in data:
+        seg_id = data.get("segment_id")
+        if seg_id is not None:
+            seg = db.query(Segment).filter(Segment.id == seg_id).first()
+            if not seg or seg.brand != active_brand:
+                raise HTTPException(status_code=400, detail="Unknown segment_id for this brand")
+        job.segment_id = seg_id
+        data.pop("segment_id", None)
+
+    if "name" in data and data["name"] is not None:
+        new_name = str(data["name"]).strip()
+        if not new_name:
             raise HTTPException(status_code=400, detail="name is required")
         existing_name = (
             db.query(InternalJob.id)
             .filter(InternalJob.brand == active_brand)
-            .filter(InternalJob.name == name_in)
+            .filter(InternalJob.name == new_name)
             .filter(InternalJob.id != job.id)
             .first()
         )
         if existing_name:
             raise HTTPException(status_code=400, detail="Internal job name already exists")
-        data["name"] = name_in
+        data["name"] = new_name
 
     if "schedule" in data and data["schedule"] is not None:
         fn = getattr(data["schedule"], "model_dump", None)
@@ -736,6 +819,10 @@ def preview_internal_job(
 
     q = db.query(Customer)
     q = q.filter(Customer.brand == active_brand)
+
+    if job.segment_id is not None:
+        q = q.join(SegmentMember, SegmentMember.customer_id == Customer.id)
+        q = q.filter(SegmentMember.segment_id == job.segment_id)
 
     q = _apply_selector(q, job.selector or {}, today)
 

@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, Column, JSON, String, TIMESTAMP
+from sqlalchemy import Boolean, Column, ForeignKey, JSON, String, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -19,6 +19,8 @@ class InternalJob(Base):
     description = Column(String(1000), nullable=True)
 
     transaction_type = Column("event_type", String(50), nullable=False)
+
+    segment_id = Column(UUID(as_uuid=True), ForeignKey("segments.id", ondelete="SET NULL"), nullable=True)
 
     selector = Column(JSON, nullable=False, default=dict)
     payload_template = Column(JSON, nullable=True)

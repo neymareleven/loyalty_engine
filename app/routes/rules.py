@@ -9,6 +9,7 @@ from app.db import get_db
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.models.event_type import TransactionType
 from app.models.rule import Rule
+from app.models.segment import Segment
 from app.schemas.rule import RuleCreate, RuleOut, RuleUpdate, RuleReorderRequest
 from app.deps.brand import get_active_brand
 
@@ -60,6 +61,21 @@ def _validate_transaction_types_exist(db: Session, *, brand: str, keys: list[str
             status_code=400,
             detail="Unknown or inactive transaction_type(s): " + ", ".join(missing) + ". Create them in /admin/transaction-types first.",
         )
+
+
+def _validate_segments_exist(db: Session, *, brand: str, segment_ids: list[str]) -> None:
+    if not segment_ids:
+        return
+    found = (
+        db.query(Segment.id)
+        .filter(Segment.brand == brand)
+        .filter(Segment.id.in_(segment_ids))
+        .all()
+    )
+    found_ids = {sid for (sid,) in found}
+    missing = [str(s) for s in segment_ids if s not in found_ids]
+    if missing:
+        raise HTTPException(status_code=400, detail="Unknown segment_id(s): " + ", ".join(missing))
 
 
 def _validate_rule_actions(actions):
@@ -135,6 +151,9 @@ def create_rule(
 
     _validate_rule_actions(payload.actions)
 
+    seg_ids = payload.segment_ids or []
+    _validate_segments_exist(db, brand=active_brand, segment_ids=seg_ids)
+
     next_priority = _next_priority_for_brand(db, brand=active_brand)
 
     rule = Rule(
@@ -144,6 +163,7 @@ def create_rule(
         transaction_type=normalized_types[0],
         transaction_types=normalized_types,
         priority=next_priority,
+        segment_ids=seg_ids or None,
         conditions=payload.conditions,
         actions=payload.actions,
         active=payload.active,
@@ -261,6 +281,12 @@ def update_rule(
         rule.transaction_types = next_types
         data.pop("transaction_type", None)
         data.pop("transaction_types", None)
+
+    if "segment_ids" in data:
+        seg_ids = data.get("segment_ids") or []
+        _validate_segments_exist(db, brand=active_brand, segment_ids=seg_ids)
+        rule.segment_ids = seg_ids or None
+        data.pop("segment_ids", None)
 
     if "name" in data and data["name"] is not None:
         new_name = str(data["name"])

@@ -30,6 +30,9 @@ from app.routes.rules import router as rules_router
 from app.routes.rewards import router as rewards_router
 from app.routes.reward_categories import router as reward_categories_router
 from app.routes.coupon_types import router as coupon_types_router
+from app.routes.product_categories import router as product_categories_router
+from app.routes.products import router as products_router
+from app.routes.segments import router as segments_router
 from app.routes.imports import router as imports_router
 from app.routes.admin import router as admin_router
 from app.routes.internal_jobs import router as internal_jobs_router
@@ -111,6 +114,9 @@ app.include_router(rules_router)
 app.include_router(rewards_router)
 app.include_router(reward_categories_router)
 app.include_router(coupon_types_router)
+app.include_router(product_categories_router)
+app.include_router(products_router)
+app.include_router(segments_router)
 app.include_router(imports_router)
 app.include_router(admin_router)
 app.include_router(internal_jobs_router)

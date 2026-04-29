@@ -78,6 +78,8 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
         "MAINT_EXPIRE_POINTS": "Maintenance: Expire Points",
         "MAINT_EXPIRE_LOYALTY_STATUS": "Maintenance: Expire Loyalty Status",
         "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS": "Maintenance: Recompute Customers Loyalty Status",
+        "MAINT_RECOMPUTE_CUSTOMER_METRICS": "Maintenance: Recompute Customer Metrics",
+        "MAINT_RECOMPUTE_SEGMENTS": "Maintenance: Recompute Segments",
     }
 
     created_any = False
@@ -88,6 +90,8 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
             "MAINT_EXPIRE_POINTS",
             "MAINT_EXPIRE_LOYALTY_STATUS",
             "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
+            "MAINT_RECOMPUTE_CUSTOMER_METRICS",
+            "MAINT_RECOMPUTE_SEGMENTS",
         ]:
             exists = (
                 db.query(InternalJob.id)
@@ -244,6 +248,7 @@ def run_scheduler_loop(
                         "failed": "failed_count",
                         "expired": "expired_count",
                         "updated": "updated_count",
+                        "touched": "touched_count",
                         "finished": "finished",
                     }
                     for k, out_k in key_map.items():

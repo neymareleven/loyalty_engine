@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
 from app.models.internal_job import InternalJob
+from app.models.segment_member import SegmentMember
 from app.models.transaction import Transaction
 from app.schemas.event import EventCreate
 from app.services.transaction_service import create_transaction
@@ -34,6 +35,13 @@ class MaintenanceJobRunStats:
 class CustomerRecomputeRunStats:
     processed: int
     updated: int
+    finished: bool
+
+
+@dataclass
+class CustomerMetricsRecomputeRunStats:
+    processed: int
+    touched: int
     finished: bool
 
 
@@ -197,6 +205,63 @@ def run_internal_job_once(
         db.flush()
         return CustomerRecomputeRunStats(processed=processed, updated=updated, finished=bool(finished))
 
+    if job.job_key == "MAINT_RECOMPUTE_CUSTOMER_METRICS":
+        if not job.brand:
+            raise ValueError("MAINT_RECOMPUTE_CUSTOMER_METRICS requires job.brand")
+
+        selector = job.selector or {}
+        after_id_raw = selector.get("after_id")
+        after_id: UUID | None = None
+        if after_id_raw:
+            try:
+                after_id = UUID(str(after_id_raw))
+            except Exception:
+                after_id = None
+        try:
+            batch_size = int(selector.get("batch_size") or 500)
+        except Exception:
+            batch_size = 500
+        batch_size = max(1, min(batch_size, 5000))
+
+        q = db.query(Customer.id).filter(Customer.brand == job.brand).order_by(Customer.id.asc())
+        if after_id:
+            q = q.filter(Customer.id > after_id)
+
+        ids = [row.id for row in q.limit(batch_size).all()]
+
+        processed = len(ids)
+        from app.services.customer_metrics_service import recompute_customer_metrics_for_brand
+
+        touched = 0
+        if ids:
+            touched = int(recompute_customer_metrics_for_brand(db, brand=job.brand, customer_ids=ids, now_utc=now))
+
+        finished = len(ids) < batch_size
+        if finished:
+            job.selector = {"batch_size": batch_size}
+        else:
+            job.selector = {"after_id": str(ids[-1]), "batch_size": batch_size}
+
+        db.flush()
+        return CustomerMetricsRecomputeRunStats(processed=int(processed), touched=int(touched), finished=bool(finished))
+
+    if job.job_key == "MAINT_RECOMPUTE_SEGMENTS":
+        if not job.brand:
+            raise ValueError("MAINT_RECOMPUTE_SEGMENTS requires job.brand")
+
+        from app.services.segment_service import recompute_dynamic_segments_for_brand
+
+        selector = job.selector or {}
+        try:
+            batch_size = int(selector.get("batch_size") or 500)
+        except Exception:
+            batch_size = 500
+        batch_size = max(1, min(batch_size, 5000))
+
+        stats = recompute_dynamic_segments_for_brand(db, brand=job.brand, now_utc=now, batch_size=batch_size)
+        db.flush()
+        return stats
+
     if job.job_key == "MAINT_BACKFILL_COUPONS":
         if not job.brand:
             raise ValueError("MAINT_BACKFILL_COUPONS requires job.brand")
@@ -311,6 +376,10 @@ def run_internal_job_once(
     q = db.query(Customer)
     if job.brand:
         q = q.filter(Customer.brand == job.brand)
+
+    if getattr(job, "segment_id", None) is not None:
+        q = q.join(SegmentMember, SegmentMember.customer_id == Customer.id)
+        q = q.filter(SegmentMember.segment_id == job.segment_id)
 
     from app.routes.internal_jobs import _apply_selector
 

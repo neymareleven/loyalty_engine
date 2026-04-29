@@ -19,6 +19,8 @@ class Rule(Base):
     transaction_types = Column(ARRAY(String(50)), nullable=True)
     priority = Column(Integer, default=0)
 
+    segment_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
+
     conditions = Column(JSON)
     actions = Column(JSON)
 

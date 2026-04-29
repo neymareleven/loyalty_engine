@@ -27,6 +27,12 @@ from app.models.customer_reward import CustomerReward  # noqa: F401
 from app.models.reward_category import RewardCategory  # noqa: F401
 from app.models.coupon_type import CouponType  # noqa: F401
 from app.models.customer_coupon import CustomerCoupon  # noqa: F401
+from app.models.customer_metrics import CustomerMetrics  # noqa: F401
+from app.models.product_category import ProductCategory  # noqa: F401
+from app.models.product import Product  # noqa: F401
+from app.models.reward_product import RewardProduct  # noqa: F401
+from app.models.segment import Segment  # noqa: F401
+from app.models.segment_member import SegmentMember  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
