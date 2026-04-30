@@ -11,6 +11,9 @@ from app.models.segment import Segment
 from app.models.segment_member import SegmentMember
 from app.schemas.segment import (
     SegmentCreate,
+    SegmentMembersBulkAdd,
+    SegmentMembersBulkRemove,
+    SegmentMembersBulkResult,
     SegmentMemberCreate,
     SegmentMemberOut,
     SegmentOut,
@@ -183,6 +186,72 @@ def add_segment_member(
     return m
 
 
+@router.post("/{segment_id}/members/bulk", response_model=SegmentMembersBulkResult)
+def bulk_add_segment_members(
+    segment_id: UUID,
+    payload: SegmentMembersBulkAdd,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    seg = db.query(Segment).filter(Segment.id == segment_id).first()
+    if not seg or seg.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    if seg.is_dynamic:
+        raise HTTPException(status_code=400, detail="Cannot manually edit members of a dynamic segment")
+
+    created = 0
+    skipped_existing = 0
+    deleted = 0
+    missing = 0
+    invalid = 0
+    errors: list[dict] = []
+
+    ids = payload.customer_ids or []
+    # de-dup while keeping deterministic order
+    seen = set()
+    unique_ids: list[UUID] = []
+    for cid in ids:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        unique_ids.append(cid)
+
+    for customer_id in unique_ids:
+        try:
+            cust = db.query(Customer).filter(Customer.id == customer_id).first()
+            if not cust or cust.brand != active_brand:
+                missing += 1
+                continue
+
+            exists = (
+                db.query(SegmentMember)
+                .filter(SegmentMember.segment_id == segment_id)
+                .filter(SegmentMember.customer_id == customer_id)
+                .first()
+            )
+            if exists:
+                skipped_existing += 1
+                continue
+
+            m = SegmentMember(segment_id=segment_id, customer_id=customer_id, source="STATIC")
+            db.add(m)
+            db.flush()
+            created += 1
+        except Exception as e:
+            db.rollback()
+            errors.append({"customer_id": str(customer_id), "error": str(e)})
+
+    db.commit()
+    return {
+        "created": created,
+        "skipped_existing": skipped_existing,
+        "deleted": deleted,
+        "missing": missing,
+        "invalid": invalid,
+        "errors": errors,
+    }
+
+
 @router.delete("/{segment_id}/members/{customer_id}")
 def remove_segment_member(
     segment_id: UUID,
@@ -208,3 +277,61 @@ def remove_segment_member(
     db.delete(m)
     db.commit()
     return {"deleted": True}
+
+
+@router.post("/{segment_id}/members/bulk-delete", response_model=SegmentMembersBulkResult)
+def bulk_remove_segment_members(
+    segment_id: UUID,
+    payload: SegmentMembersBulkRemove,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    seg = db.query(Segment).filter(Segment.id == segment_id).first()
+    if not seg or seg.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    if seg.is_dynamic:
+        raise HTTPException(status_code=400, detail="Cannot manually edit members of a dynamic segment")
+
+    created = 0
+    skipped_existing = 0
+    deleted = 0
+    missing = 0
+    invalid = 0
+    errors: list[dict] = []
+
+    ids = payload.customer_ids or []
+    seen = set()
+    unique_ids: list[UUID] = []
+    for cid in ids:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        unique_ids.append(cid)
+
+    for customer_id in unique_ids:
+        try:
+            m = (
+                db.query(SegmentMember)
+                .filter(SegmentMember.segment_id == segment_id)
+                .filter(SegmentMember.customer_id == customer_id)
+                .first()
+            )
+            if not m:
+                missing += 1
+                continue
+            db.delete(m)
+            db.flush()
+            deleted += 1
+        except Exception as e:
+            db.rollback()
+            errors.append({"customer_id": str(customer_id), "error": str(e)})
+
+    db.commit()
+    return {
+        "created": created,
+        "skipped_existing": skipped_existing,
+        "deleted": deleted,
+        "missing": missing,
+        "invalid": invalid,
+        "errors": errors,
+    }

@@ -45,6 +45,23 @@ class SegmentOut(BaseModel):
         from_attributes = True
 
 
+class SegmentMembersBulkAdd(BaseModel):
+    customer_ids: list[UUID]
+
+
+class SegmentMembersBulkRemove(BaseModel):
+    customer_ids: list[UUID]
+
+
+class SegmentMembersBulkResult(BaseModel):
+    created: int
+    skipped_existing: int
+    deleted: int
+    missing: int
+    invalid: int
+    errors: list[dict]
+
+
 class SegmentMemberCreate(BaseModel):
     customer_id: UUID
 

@@ -537,7 +537,16 @@
  - `DELETE /admin/segments/{segment_id}/members/{customer_id}`
    - Only allowed for `is_dynamic = false`.
 
- ### Dynamic segment recomputation
+Bulk helpers (recommended for multi-select UI):
+
+- `POST /admin/segments/{segment_id}/members/bulk`
+  - Adds one or more customers to a static segment.
+  - Best-effort: returns a per-batch summary and continues on partial failures.
+- `POST /admin/segments/{segment_id}/members/bulk-delete`
+  - Removes one or more customers from a static segment.
+  - Uses `POST` (instead of `DELETE` with a JSON body) for compatibility with common HTTP clients/proxies.
+
+### Dynamic segment recomputation
 
  Dynamic segment membership is recomputed by the system-managed internal job:
 
