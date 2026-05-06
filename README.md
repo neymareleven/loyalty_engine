@@ -102,7 +102,35 @@
  
  - Rule conditions can read `payload.*`, `customer.*`, `customer.metrics.*`.
  - Internal job selectors can read `customer.*`, `customer.metrics.*`, and `system.*`.
- 
+
+## Coupon types, reward categories, and issuing coupons from rules
+
+Rules can issue coupons to customers via the `issue_coupon` action.
+
+- A `CustomerCoupon` is issued for a given `coupon_type_id`.
+- Each `CouponType` can be linked to a `RewardCategory` via `coupon_types.reward_category_id`.
+- A `RewardCategory` is a grouping mechanism and can be shared by multiple coupon types.
+- By default, coupon issuance emits `CustomerReward` rows for **all active Rewards** in the coupon type's reward category.
+- Optional: the rule action can specify `reward_ids` to emit **only a subset** of rewards.
+  - Best-effort: if one or more IDs are unknown / inactive / not in the coupon type's category, they are ignored (the issuance continues for valid IDs).
+
+Example action:
+
+```json
+{
+  "type": "issue_coupon",
+  "coupon_type_id": "<coupon-type-uuid>",
+  "frequency": "ONCE_PER_CALENDAR_YEAR",
+  "reward_ids": ["<reward-uuid-1>", "<reward-uuid-2>"]
+}
+```
+
+Reward deletion behavior:
+
+- `DELETE /rewards/{reward_id}` is allowed even if the reward was previously issued.
+- Any `CustomerReward` still in status `ISSUED` for that reward is automatically marked as `CANCELLED` to keep customer history accurate.
+- The delete endpoint returns a `cancelled_count` field indicating how many issued entitlements were cancelled.
+
  ### Internal Job schedule format (cron)
  
  `InternalJob.schedule` is a structured object:

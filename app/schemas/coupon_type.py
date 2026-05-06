@@ -10,6 +10,7 @@ class CouponTypeCreate(BaseModel):
     name: str
     description: Optional[str] = None
     validity_days: Optional[int] = None
+    reward_category_id: Optional[UUID] = None
     active: bool = True
 
 
@@ -17,6 +18,7 @@ class CouponTypeUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     validity_days: Optional[int] = None
+    reward_category_id: Optional[UUID] = None
     active: Optional[bool] = None
 
 
@@ -26,6 +28,7 @@ class CouponTypeOut(BaseModel):
     name: str
     description: Optional[str] = None
     validity_days: Optional[int] = None
+    reward_category_id: Optional[UUID] = None
     active: bool
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -273,20 +275,24 @@ def delete_reward(
     if not reward or reward.brand != active_brand:
         raise HTTPException(status_code=404, detail="Reward not found")
 
-    # Prevent hard delete when reward has already been issued to customers.
-    in_use = (
-        db.query(CustomerReward.id)
+    # If a reward is deleted while still issued to customers, we must cancel those
+    # entitlements to avoid a misleading history (ISSUED reward that no longer exists).
+    now = datetime.utcnow()
+    issued = (
+        db.query(CustomerReward)
         .filter(CustomerReward.reward_id == reward.id)
-        .first()
+        .filter(CustomerReward.status == "ISSUED")
+        .all()
     )
-    if in_use:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Impossible de supprimer la récompense '{reward.name}' ({str(reward.id)}) car elle est déjà attribuée à au moins un client. "
-                "Action recommandée: désactivez la récompense (active=false) au lieu de la supprimer."
-            ),
-        )
+    cancelled_count = 0
+    for cr in issued:
+        cr.status = "CANCELLED"
+        cr.expires_at = cr.expires_at or now
+        payload = cr.payload if isinstance(cr.payload, dict) else {}
+        payload["cancelledAt"] = now.isoformat() + "Z"
+        payload["cancelReason"] = "REWARD_DELETED"
+        cr.payload = payload
+        cancelled_count += 1
 
     db.delete(reward)
     try:
@@ -310,4 +316,4 @@ def delete_reward(
                 "Action recommandée: désactivez la récompense (active=false) au lieu de la supprimer."
             ),
         )
-    return {"deleted": True}
+    return {"deleted": True, "cancelled_count": cancelled_count}

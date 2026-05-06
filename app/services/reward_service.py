@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from app.models.reward import Reward
 from app.models.customer_reward import CustomerReward
+from app.models.customer import Customer
 
 
 def _coerce_uuid(value):
@@ -161,8 +162,8 @@ def expire_rewards(db: Session, *, brand: str):
 
     expired = (
         db.query(CustomerReward)
-        .join(Reward, Reward.id == CustomerReward.reward_id)
-        .filter(Reward.brand == brand)
+        .join(Customer, Customer.id == CustomerReward.customer_id)
+        .filter(Customer.brand == brand)
         .filter(CustomerReward.status == "ISSUED")
         .filter(CustomerReward.expires_at.isnot(None))
         .filter(CustomerReward.expires_at < now)

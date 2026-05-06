@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
-from app.models.coupon_type import CouponType
 from app.models.reward import Reward
 from app.models.reward_category import RewardCategory
 from app.schemas.reward_category import RewardCategoryCreate, RewardCategoryOut, RewardCategoryUpdate
@@ -47,19 +46,8 @@ def create_reward_category(
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
 
-    ct = db.query(CouponType).filter(CouponType.id == payload.coupon_type_id).first()
-    if not ct or ct.brand != active_brand:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"coupon_type_id not found: '{str(payload.coupon_type_id)}'. "
-                "Veuillez sélectionner un type de coupon existant pour cette marque."
-            ),
-        )
-
     obj = RewardCategory(
         brand=active_brand,
-        coupon_type_id=payload.coupon_type_id,
         name=payload.name,
         description=payload.description,
         active=payload.active,
@@ -73,7 +61,7 @@ def create_reward_category(
             status_code=400,
             detail=(
                 "Reward category could not be saved. "
-                "Causes possibles: une catégorie existe déjà pour ce coupon_type_id, ou des données invalides."
+                "Causes possibles: des données invalides."
             ),
         )
     db.refresh(obj)
@@ -104,17 +92,6 @@ def update_reward_category(
         raise HTTPException(status_code=404, detail="Reward category not found")
 
     data = payload.model_dump(exclude_unset=True)
-
-    if "coupon_type_id" in data and data["coupon_type_id"] is not None:
-        ct = db.query(CouponType).filter(CouponType.id == data["coupon_type_id"]).first()
-        if not ct or ct.brand != active_brand:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"coupon_type_id not found: '{str(data['coupon_type_id'])}'. "
-                    "Veuillez sélectionner un type de coupon existant pour cette marque."
-                ),
-            )
 
     for k, v in data.items():
         setattr(obj, k, v)

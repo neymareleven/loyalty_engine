@@ -53,14 +53,21 @@ def create_coupon_type(
             validity_days = int(validity_days)
         except Exception:
             raise HTTPException(status_code=400, detail="validity_days must be an integer")
-        if validity_days < 0:
+        if validity_days is not None and validity_days < 0:
             raise HTTPException(status_code=400, detail="validity_days must be >= 0")
+
+    reward_category_id = payload.reward_category_id
+    if reward_category_id is not None:
+        cat = db.query(RewardCategory).filter(RewardCategory.id == reward_category_id).first()
+        if not cat or cat.brand != active_brand:
+            raise HTTPException(status_code=400, detail="reward_category_id not found in active brand")
 
     obj = CouponType(
         brand=active_brand,
         name=payload.name,
         description=payload.description,
         validity_days=validity_days,
+        reward_category_id=reward_category_id,
         active=payload.active,
     )
     db.add(obj)
@@ -113,6 +120,11 @@ def update_coupon_type(
             raise HTTPException(status_code=400, detail="validity_days must be >= 0")
         data["validity_days"] = v
 
+    if "reward_category_id" in data and data["reward_category_id"] is not None:
+        cat = db.query(RewardCategory).filter(RewardCategory.id == data["reward_category_id"]).first()
+        if not cat or cat.brand != active_brand:
+            raise HTTPException(status_code=400, detail="reward_category_id not found in active brand")
+
     for k, v in data.items():
         setattr(obj, k, v)
 
@@ -140,24 +152,6 @@ def delete_coupon_type(
     obj = db.query(CouponType).filter(CouponType.id == coupon_type_id).first()
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Coupon type not found")
-
-    linked_categories = (
-        db.query(RewardCategory.id, RewardCategory.name)
-        .filter(RewardCategory.brand == active_brand)
-        .filter(RewardCategory.coupon_type_id == obj.id)
-        .order_by(RewardCategory.created_at.asc())
-        .limit(10)
-        .all()
-    )
-    if linked_categories:
-        linked_label = ", ".join([f"{str(cid)} ({cname})" for cid, cname in linked_categories])
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Impossible de supprimer ce type de coupon car il est lié à une ou plusieurs catégories de récompense: {linked_label}. "
-                "Action requise: supprimez ces catégories ou réaffectez-les à un autre type de coupon, puis réessayez."
-            ),
-        )
 
     linked_customer_coupon = (
         db.query(CustomerCoupon.id)

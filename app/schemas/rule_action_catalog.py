@@ -13,6 +13,7 @@ class IssueCouponAction(BaseModel):
     type: Literal["issue_coupon"] = "issue_coupon"
     coupon_type_id: str
     frequency: Literal["ALWAYS", "ONCE_PER_CALENDAR_YEAR", "ONCE_PER_CUSTOMER"] = "ONCE_PER_CALENDAR_YEAR"
+    reward_ids: Optional[list[str]] = None
 
 
 class ResetStatusPointsAction(BaseModel):

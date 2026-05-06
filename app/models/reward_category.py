@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, Column, ForeignKey, String, TIMESTAMP, UniqueConstraint
+from sqlalchemy import Boolean, Column, String, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -10,17 +10,9 @@ from app.db import Base
 class RewardCategory(Base):
     __tablename__ = "reward_categories"
 
-    __table_args__ = (UniqueConstraint("coupon_type_id", name="uq_reward_categories_coupon_type_id"),)
-
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     brand = Column(String(50), nullable=False)
-
-    coupon_type_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("coupon_types.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
 
     name = Column(String(200), nullable=False)
     description = Column(String(1000), nullable=True)

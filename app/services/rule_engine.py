@@ -672,6 +672,12 @@ def _execute_actions(db: Session, customer, transaction, actions):
             frequency = action.get("frequency") or "ONCE_PER_CALENDAR_YEAR"
             frequency = str(frequency)
 
+            reward_ids = action.get("reward_ids")
+            if reward_ids is None:
+                reward_ids = action.get("rewardIds")
+            if reward_ids is not None and not isinstance(reward_ids, list):
+                raise ValueError("issue_coupon: reward_ids must be a list")
+
             rule_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_id")
             rule_execution_id = _get_by_path(transaction.payload or {}, "_ruleContext.rule_execution_id")
 
@@ -685,11 +691,19 @@ def _execute_actions(db: Session, customer, transaction, actions):
                 transaction=transaction,
                 coupon_type_id=coupon_type_id,
                 frequency=frequency,  # validated in service
+                reward_ids=reward_ids,
                 rule_id=str(rule_id) if rule_id is not None else None,
                 rule_execution_id=str(rule_execution_id) if rule_execution_id is not None else None,
                 idempotency_key=idempotency_key,
             )
-            executed.append({"type": action_type, "couponTypeId": coupon_type_id, "frequency": frequency})
+            executed.append(
+                {
+                    "type": action_type,
+                    "couponTypeId": coupon_type_id,
+                    "frequency": frequency,
+                    "reward_ids": reward_ids,
+                }
+            )
 
         elif action_type == "reset_status_points":
             locked_customer = db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()

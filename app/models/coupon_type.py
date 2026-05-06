@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, Column, Integer, String, TIMESTAMP
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -18,6 +18,12 @@ class CouponType(Base):
     description = Column(String(1000), nullable=True)
 
     validity_days = Column(Integer, nullable=True)
+
+    reward_category_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("reward_categories.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
 
     active = Column(Boolean, default=True)
 

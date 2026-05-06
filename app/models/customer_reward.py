@@ -11,7 +11,7 @@ class CustomerReward(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     customer_id = Column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
-    reward_id = Column(UUID(as_uuid=True), ForeignKey("rewards.id"), nullable=False)
+    reward_id = Column(UUID(as_uuid=True), ForeignKey("rewards.id", ondelete="SET NULL"), nullable=True)
 
     customer_coupon_id = Column(
         UUID(as_uuid=True),

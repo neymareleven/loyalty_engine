@@ -66,6 +66,7 @@ def issue_coupon(
     transaction,
     coupon_type_id: str,
     frequency: IssueCouponFrequency = "ONCE_PER_CALENDAR_YEAR",
+    reward_ids: list[str] | None = None,
     rule_id: str | None = None,
     rule_execution_id: str | None = None,
     idempotency_key: str | None = None,
@@ -86,12 +87,23 @@ def issue_coupon(
     if not ct:
         raise HTTPException(status_code=404, detail="Coupon type not found")
 
-    rc = (
-        db.query(RewardCategory)
-        .filter(RewardCategory.coupon_type_id == ct.id)
-        .filter(RewardCategory.brand == customer.brand)
-        .first()
-    )
+    rc = None
+    if getattr(ct, "reward_category_id", None) is not None:
+        rc = (
+            db.query(RewardCategory)
+            .filter(RewardCategory.id == ct.reward_category_id)
+            .filter(RewardCategory.brand == customer.brand)
+            .first()
+        )
+
+    # Backward-compatibility: legacy schema linked reward_categories.coupon_type_id.
+    if rc is None and hasattr(RewardCategory, "coupon_type_id"):
+        rc = (
+            db.query(RewardCategory)
+            .filter(getattr(RewardCategory, "coupon_type_id") == ct.id)
+            .filter(RewardCategory.brand == customer.brand)
+            .first()
+        )
     if not rc:
         raise HTTPException(status_code=400, detail="Reward category not linked to coupon type")
 
@@ -156,15 +168,36 @@ def issue_coupon(
             db.add(coupon)
             db.flush()
 
-            # Snapshot: all active rewards in category at issue time.
-            rewards = (
+            rewards_q = (
                 db.query(Reward)
                 .filter(Reward.brand == customer.brand)
                 .filter(Reward.active.is_(True))
                 .filter(Reward.reward_category_id == rc.id)
                 .order_by(Reward.created_at.asc())
-                .all()
             )
+
+            # Snapshot: either all active rewards in category (default) or a subset.
+            if reward_ids is not None:
+                # Allow empty list: coupon is issued but no rewards are emitted.
+                if not isinstance(reward_ids, list):
+                    raise HTTPException(status_code=400, detail="reward_ids must be a list")
+
+                normalized: list[str] = []
+                for rid in reward_ids:
+                    if rid is None:
+                        continue
+                    s = str(rid).strip()
+                    if not s:
+                        continue
+                    if s not in normalized:
+                        normalized.append(s)
+
+                if not normalized:
+                    rewards = []
+                else:
+                    rewards = rewards_q.filter(Reward.id.in_(normalized)).all()
+            else:
+                rewards = rewards_q.all()
 
             for r in rewards:
                 # deterministically idempotent per coupon+reward.
