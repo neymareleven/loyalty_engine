@@ -1,21 +1,26 @@
-import asyncio
+"""Inspect the rules table schema (sync SQLAlchemy, same as the API)."""
+
 import os
 import sys
 
 from sqlalchemy import text
 
-# Add backend directory to sys.path so we can import app modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from app.db import async_session_maker
 
-async def check_schema():
-    async with async_session_maker() as session:
-        result = await session.execute(
-            text("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'rules';")
+from app.db import SessionLocal
+
+
+def check_schema():
+    with SessionLocal() as session:
+        result = session.execute(
+            text(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name = 'rules' ORDER BY ordinal_position;"
+            )
         )
-        columns = result.fetchall()
-        for col in columns:
+        for col in result.fetchall():
             print(f"- {col[0]}: {col[1]}")
 
+
 if __name__ == "__main__":
-    asyncio.run(check_schema())
+    check_schema()

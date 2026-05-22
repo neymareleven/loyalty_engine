@@ -1,8 +1,14 @@
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class CustomerCouponStatusUpdate(BaseModel):
+    status: Literal["ISSUED", "USED", "EXPIRED"] = Field(
+        description="Statut cible du coupon client (et synchronisation des rewards liées).",
+    )
 
 
 class CustomerCouponOut(BaseModel):

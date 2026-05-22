@@ -1,20 +1,13 @@
 from datetime import date, datetime
-from typing import Optional
-
+from typing import Any, Dict, Optional
 from uuid import UUID
 
 from pydantic import BaseModel
-
-from typing import Any, Dict
 
 
 class CustomerCreate(BaseModel):
     gender: Optional[str] = None
     birthdate: Optional[str] = None
-
-
-class CustomerSetTierMinOnly(BaseModel):
-    tierKey: str
 
 
 class CustomerUpsert(BaseModel):
@@ -34,7 +27,7 @@ class CustomerOut(BaseModel):
 
     gender: Optional[str] = None
     birthdate: Optional[date | str] = None
-    
+
     status: str
     loyalty_status: Optional[str] = None
     loyalty_status_name: Optional[str] = None
@@ -52,3 +45,26 @@ class CustomerOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CustomerLoyaltyStatusUpdate(BaseModel):
+    tierKey: str
+    reason: Optional[str] = None
+
+
+class CustomerLoyaltyOverrideSummary(BaseModel):
+    fromTier: Optional[str] = None
+    toTier: str
+    fromPointsBalance: int
+    toPointsBalance: int
+    pointsDelta: int
+    auditTransactionId: UUID
+
+
+class CustomerLoyaltyStatusOut(CustomerOut):
+    loyaltyOverride: CustomerLoyaltyOverrideSummary
+
+
+# Deprecated alias — use CustomerLoyaltyStatusUpdate
+class CustomerSetTierMinOnly(CustomerLoyaltyStatusUpdate):
+    pass

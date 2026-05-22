@@ -1,25 +1,29 @@
-from datetime import date, datetime, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.customer import Customer
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
-from app.models.point_movement import PointMovement
-from app.models.transaction import Transaction
 from app.models.loyalty_tier import LoyaltyTier
-from app.schemas.customer import CustomerOut, CustomerUpsert
-from app.schemas.customer import CustomerSetTierMinOnly
-from app.schemas.customer_coupon import CustomerCouponOut
+from app.models.transaction import Transaction
+from app.schemas.customer import (
+    CustomerLoyaltyStatusOut,
+    CustomerLoyaltyStatusUpdate,
+    CustomerOut,
+    CustomerUpsert,
+)
+from app.schemas.customer_coupon import CustomerCouponOut, CustomerCouponStatusUpdate
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.contact_service import get_or_create_customer
+from app.services.customer_coupon_service import set_customer_coupon_status
+from app.services.customer_loyalty_service import set_customer_loyalty_tier
+from app.services.customer_serialization import serialize_customer_out
 from app.services.loyalty_status_service import update_customer_status
-from app.services.wallet_service import get_status_points_balance
-from app.services.loyalty_settings_service import get_loyalty_settings
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -57,25 +61,7 @@ def list_customers(
         .all()
     )
 
-    tiers = (
-        db.query(LoyaltyTier.key, LoyaltyTier.name)
-        .filter(LoyaltyTier.brand == active_brand)
-        .all()
-    )
-    tier_name_by_key = {row[0]: row[1] for row in tiers}
-
-    out_items = []
-    for c in items:
-        data = CustomerOut.model_validate(c).model_dump()
-        if getattr(c, "birth_year", None) and getattr(c, "birth_month", None) and getattr(c, "birth_day", None):
-            data["birthdate"] = f"{int(c.birth_year):04d}-{int(c.birth_month):02d}-{int(c.birth_day):02d}"
-        elif getattr(c, "birth_month", None) and getattr(c, "birth_day", None):
-            data["birthdate"] = f"{int(c.birth_month):02d}-{int(c.birth_day):02d}"
-        else:
-            data["birthdate"] = None
-        data["loyalty_status_name"] = tier_name_by_key.get(c.loyalty_status)
-        data["points_balance"] = get_status_points_balance(db, c.id)
-        out_items.append(data)
+    out_items = [serialize_customer_out(db, customer=c, brand=active_brand) for c in items]
 
     return {
         "brand": active_brand,
@@ -103,24 +89,7 @@ def get_customer(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    tier_name = (
-        db.query(LoyaltyTier.name)
-        .filter(LoyaltyTier.brand == brand)
-        .filter(LoyaltyTier.key == customer.loyalty_status)
-        .scalar()
-        if customer.loyalty_status
-        else None
-    )
-    data = CustomerOut.model_validate(customer).model_dump()
-    if getattr(customer, "birth_year", None) and getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        data["birthdate"] = f"{int(customer.birth_year):04d}-{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    elif getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        data["birthdate"] = f"{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    else:
-        data["birthdate"] = None
-    data["loyalty_status_name"] = tier_name
-    data["points_balance"] = get_status_points_balance(db, customer.id)
-    return data
+    return serialize_customer_out(db, customer=customer, brand=brand)
 
 
 @router.post("/upsert", response_model=CustomerOut)
@@ -204,23 +173,7 @@ def upsert_customer(
     db.commit()
     db.refresh(customer)
 
-    tier_name = (
-        db.query(LoyaltyTier.name)
-        .filter(LoyaltyTier.brand == brand)
-        .filter(LoyaltyTier.key == customer.loyalty_status)
-        .scalar()
-        if customer.loyalty_status
-        else None
-    )
-    data = CustomerOut.model_validate(customer).model_dump()
-    if getattr(customer, "birth_year", None) and getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        data["birthdate"] = f"{int(customer.birth_year):04d}-{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    elif getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        data["birthdate"] = f"{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    else:
-        data["birthdate"] = None
-    data["loyalty_status_name"] = tier_name
-    return data
+    return serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
 
 
 @router.get("/{brand}/{profile_id}/point-movements", response_model=list[PointMovementOut])
@@ -241,6 +194,8 @@ def list_point_movements(
     )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
+
+    from app.models.point_movement import PointMovement
 
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
@@ -346,15 +301,13 @@ def list_customer_coupons_with_rewards(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
+    q = db.query(CustomerCoupon).filter(CustomerCoupon.customer_id == customer.id)
+    if status:
+        q = q.filter(CustomerCoupon.status == status)
     coupon_limit = max(1, min(coupon_limit, 500))
     coupon_offset = max(0, coupon_offset)
-
-    cq = db.query(CustomerCoupon).filter(CustomerCoupon.customer_id == customer.id)
-    if status:
-        cq = cq.filter(CustomerCoupon.status == status)
-
     coupons = (
-        cq.order_by(CustomerCoupon.issued_at.desc(), CustomerCoupon.created_at.desc())
+        q.order_by(CustomerCoupon.issued_at.desc(), CustomerCoupon.created_at.desc())
         .offset(coupon_offset)
         .limit(coupon_limit)
         .all()
@@ -363,11 +316,12 @@ def list_customer_coupons_with_rewards(
     coupon_ids = [c.id for c in coupons if c and getattr(c, "id", None) is not None]
     rewards_by_coupon_id: dict[str, list[CustomerRewardOut]] = {}
     if coupon_ids:
-        rq = db.query(CustomerReward).filter(CustomerReward.customer_id == customer.id).filter(CustomerReward.customer_coupon_id.in_(coupon_ids))
+        rq = db.query(CustomerReward).filter(CustomerReward.customer_id == customer.id).filter(
+            CustomerReward.customer_coupon_id.in_(coupon_ids)
+        )
         if reward_status:
             rq = rq.filter(CustomerReward.status == reward_status)
-        rewards = rq.order_by(CustomerReward.issued_at.desc()).all()
-        for r in rewards:
+        for r in rq.order_by(CustomerReward.issued_at.desc()).all():
             key = str(r.customer_coupon_id) if r.customer_coupon_id is not None else None
             if not key:
                 continue
@@ -388,331 +342,61 @@ def list_customer_coupons_with_rewards(
     }
 
 
-@router.post("/{brand}/{profile_id}/coupons/{customer_coupon_id}/use", response_model=CustomerCouponOut)
-def use_customer_coupon(
+@router.patch("/{brand}/{profile_id}/coupons/{customer_coupon_id}/status", response_model=CustomerCouponOut)
+def patch_customer_coupon_status(
     brand: str,
     profile_id: str,
     customer_coupon_id: str,
+    payload: CustomerCouponStatusUpdate,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
 
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    now = datetime.utcnow()
-
-    coupon = (
-        db.query(CustomerCoupon)
-        .filter(CustomerCoupon.id == customer_coupon_id)
-        .filter(CustomerCoupon.customer_id == customer.id)
-        .with_for_update()
-        .first()
-    )
-    if not coupon:
-        raise HTTPException(status_code=404, detail="Customer coupon not found")
-
-    if coupon.expires_at is not None and coupon.expires_at < now:
-        coupon.status = "EXPIRED"
-        db.commit()
-        raise HTTPException(status_code=400, detail="Coupon not usable")
-
-    if coupon.status != "ISSUED":
-        raise HTTPException(status_code=400, detail="Coupon not usable")
-
-    tx = Transaction(
-        transaction_id=f"admin_use_coupon_{brand}_{profile_id}_{customer_coupon_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
-        brand=brand,
-        profile_id=profile_id,
-        transaction_type="ADMIN_USE_COUPON",
-        source="ADMIN_UI",
-        payload={
-            "couponId": str(coupon.id),
-            "fromStatus": coupon.status,
-            "toStatus": "USED",
-        },
-        status="PROCESSED",
-        processed_at=datetime.utcnow(),
-    )
-    db.add(tx)
-    db.flush()
-
-    coupon.status = "USED"
-    coupon.used_at = now
-    coupon.source_transaction_id = tx.id
-
-    rewards = (
-        db.query(CustomerReward)
-        .filter(CustomerReward.customer_id == customer.id)
-        .filter(CustomerReward.customer_coupon_id == coupon.id)
-        .filter(CustomerReward.status == "ISSUED")
-        .all()
-    )
-    for cr in rewards:
-        if cr.expires_at is not None and cr.expires_at < now:
-            cr.status = "EXPIRED"
-        else:
-            cr.status = "USED"
-            cr.used_at = now
-        cr.source_transaction_id = tx.id
-
-    db.commit()
-    db.refresh(coupon)
-    return coupon
-
-
-@router.patch("/{brand}/{profile_id}/coupons/{customer_coupon_id}/reopen", response_model=CustomerCouponOut)
-def patch_reopen_customer_coupon(
-    brand: str,
-    profile_id: str,
-    customer_coupon_id: str,
-    active_brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    return reopen_customer_coupon(
-        brand=brand,
-        profile_id=profile_id,
-        customer_coupon_id=customer_coupon_id,
-        active_brand=active_brand,
-        db=db,
-    )
-
-
-@router.patch("/{brand}/{profile_id}/coupons/{customer_coupon_id}/use", response_model=CustomerCouponOut)
-def patch_use_customer_coupon(
-    brand: str,
-    profile_id: str,
-    customer_coupon_id: str,
-    active_brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    return use_customer_coupon(
-        brand=brand,
-        profile_id=profile_id,
-        customer_coupon_id=customer_coupon_id,
-        active_brand=active_brand,
-        db=db,
-    )
-
-
-@router.post("/{brand}/{profile_id}/coupons/{customer_coupon_id}/reopen", response_model=CustomerCouponOut)
-def reopen_customer_coupon(
-    brand: str,
-    profile_id: str,
-    customer_coupon_id: str,
-    active_brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    now = datetime.utcnow()
-
-    coupon = (
-        db.query(CustomerCoupon)
-        .filter(CustomerCoupon.id == customer_coupon_id)
-        .filter(CustomerCoupon.customer_id == customer.id)
-        .with_for_update()
-        .first()
-    )
-    if not coupon:
-        raise HTTPException(status_code=404, detail="Customer coupon not found")
-
-    if coupon.expires_at is not None and coupon.expires_at < now:
-        coupon.status = "EXPIRED"
-        db.commit()
-        raise HTTPException(status_code=400, detail="Coupon not usable")
-
-    if coupon.status != "USED":
-        raise HTTPException(status_code=400, detail="Coupon not usable")
-
-    tx = Transaction(
-        transaction_id=f"admin_reopen_coupon_{brand}_{profile_id}_{customer_coupon_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
-        brand=brand,
-        profile_id=profile_id,
-        transaction_type="ADMIN_REOPEN_COUPON",
-        source="ADMIN_UI",
-        payload={
-            "couponId": str(coupon.id),
-            "fromStatus": coupon.status,
-            "toStatus": "ISSUED",
-        },
-        status="PROCESSED",
-        processed_at=datetime.utcnow(),
-    )
-    db.add(tx)
-    db.flush()
-
-    coupon.status = "ISSUED"
-    coupon.used_at = None
-    coupon.source_transaction_id = tx.id
-
-    rewards = (
-        db.query(CustomerReward)
-        .filter(CustomerReward.customer_id == customer.id)
-        .filter(CustomerReward.customer_coupon_id == coupon.id)
-        .filter(CustomerReward.status == "USED")
-        .all()
-    )
-    for cr in rewards:
-        if cr.expires_at is not None and cr.expires_at < now:
-            cr.status = "EXPIRED"
-        else:
-            cr.status = "ISSUED"
-            cr.used_at = None
-        cr.source_transaction_id = tx.id
-
-    db.commit()
-    db.refresh(coupon)
-    return coupon
-
-
-@router.post("/{brand}/{profile_id}/loyalty/set-tier", response_model=CustomerOut)
-def set_customer_tier_min_only(
-    brand: str,
-    profile_id: str,
-    payload: CustomerSetTierMinOnly,
-    active_brand: str = Depends(get_active_brand),
-    db: Session = Depends(get_db),
-):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-
-    tier_key = (payload.tierKey or "").strip()
-    if not tier_key:
-        raise HTTPException(status_code=400, detail="tierKey is required")
-
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .with_for_update()
-        .first()
-    )
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    tier = (
-        db.query(LoyaltyTier)
-        .filter(LoyaltyTier.brand == brand)
-        .filter(LoyaltyTier.active.is_(True))
-        .filter(LoyaltyTier.key == tier_key)
-        .first()
-    )
-    if not tier:
-        raise HTTPException(status_code=400, detail="Target loyalty tier not found")
-
-    target_points = int(tier.min_status_points or 0)
-
-    current_balance = int(get_status_points_balance(db, customer.id) or 0)
-    delta = int(target_points) - int(current_balance)
-
-    # Create an audit transaction WITHOUT running rules.
-    tx = Transaction(
-        transaction_id=f"admin_set_tier_{brand}_{profile_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
-        brand=brand,
-        profile_id=profile_id,
-        transaction_type="ADMIN_SET_TIER",
-        source="ADMIN_UI",
-        payload={
-            "tierKey": tier_key,
-            "fromStatus": customer.loyalty_status,
-            "toStatus": tier_key,
-            "fromPointsBalance": int(current_balance),
-            "toPointsBalance": int(target_points),
-            "delta": int(delta),
-        },
-        status="PROCESSED",
-        processed_at=datetime.utcnow(),
-    )
-    db.add(tx)
-    db.flush()
-
-    if delta != 0:
-        pm_type = "EARN" if delta > 0 else "DEDUCT"
-        expires_at = None
-        if delta > 0:
-            settings = get_loyalty_settings(db, brand=customer.brand)
-            points_days = getattr(settings, "points_validity_days", None) if settings else None
-            expires_at = (date.today() + timedelta(days=int(points_days))) if points_days is not None else None
-        db.add(
-            PointMovement(
-                customer_id=customer.id,
-                points=int(delta),
-                type=pm_type,
-                source_transaction_id=tx.id,
-                expires_at=expires_at,
-            )
-        )
-        db.flush()
-
-    # Keep cache consistent with ledger.
-    customer.status_points = int(get_status_points_balance(db, customer.id) or 0)
-    customer.status_points_reset_at = datetime.utcnow()
-
-    update_customer_status(
+    coupon = set_customer_coupon_status(
         db,
-        customer,
-        reason="ADMIN_OVERRIDE",
-        source_transaction_id=tx.id,
-        depth=0,
-        refresh_window=True,
-        emit_events=False,
-        allow_downgrade_before_expiry=True,
+        brand=brand,
+        profile_id=profile_id,
+        customer_coupon_id=customer_coupon_id,
+        status=payload.status,
     )
-
     db.commit()
-    db.refresh(customer)
-
-    tier_name = (
-        db.query(LoyaltyTier.name)
-        .filter(LoyaltyTier.brand == brand)
-        .filter(LoyaltyTier.key == customer.loyalty_status)
-        .scalar()
-        if customer.loyalty_status
-        else None
-    )
-    data = CustomerOut.model_validate(customer).model_dump()
-    if getattr(customer, "birth_year", None) and getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        data["birthdate"] = f"{int(customer.birth_year):04d}-{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    elif getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        data["birthdate"] = f"{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    else:
-        data["birthdate"] = None
-    data["loyalty_status_name"] = tier_name
-    data["points_balance"] = get_status_points_balance(db, customer.id)
-    return data
+    db.refresh(coupon)
+    return coupon
 
 
-@router.patch("/{brand}/{profile_id}/loyalty/set-tier", response_model=CustomerOut)
-def patch_set_customer_tier_min_only(
+@router.patch("/{brand}/{profile_id}/loyalty/status", response_model=CustomerLoyaltyStatusOut)
+def patch_customer_loyalty_status(
     brand: str,
     profile_id: str,
-    payload: CustomerSetTierMinOnly,
+    payload: CustomerLoyaltyStatusUpdate,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    return set_customer_tier_min_only(
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+
+    result = set_customer_loyalty_tier(
+        db,
         brand=brand,
         profile_id=profile_id,
-        payload=payload,
-        active_brand=active_brand,
-        db=db,
+        tier_key=payload.tierKey,
+        reason=payload.reason,
     )
+    db.commit()
+    db.refresh(result.customer)
+
+    data = serialize_customer_out(db, customer=result.customer, brand=brand)
+    data["loyaltyOverride"] = {
+        "fromTier": result.from_tier_key,
+        "toTier": result.to_tier_key,
+        "fromPointsBalance": result.from_points_balance,
+        "toPointsBalance": result.to_points_balance,
+        "pointsDelta": result.points_delta,
+        "auditTransactionId": str(result.transaction.id),
+    }
+    return data
 
 
 @router.get("/{brand}/{profile_id}/loyalty")
@@ -748,7 +432,6 @@ def get_customer_loyalty(
     if current_min is not None:
         next_tier = next((t for t in tiers if int(t.min_status_points) > current_min), None)
     elif tiers:
-        # If current tier isn't found, best-effort: choose the first tier above current status_points.
         sp = int(customer.status_points or 0)
         for t in tiers:
             if int(t.min_status_points) > sp:
@@ -765,8 +448,24 @@ def get_customer_loyalty(
             db.query(Transaction.transaction_type)
             .filter(Transaction.brand == brand)
             .filter(Transaction.profile_id == profile_id)
-            .filter(Transaction.transaction_type.in_(["TIER_UPGRADED", "TIER_DOWNGRADED", "TIER_RENEWED"]))
-            .filter(Transaction.payload["toTier"].as_string() == current_tier.key)
+            .filter(
+                Transaction.transaction_type.in_(
+                    [
+                        "CUSTOMER_REGISTRATION",
+                        "TIER_UPGRADED",
+                        "TIER_DOWNGRADED",
+                        "TIER_RENEWED",
+                        "STATUS_RESET",
+                        "ADMIN_SET_TIER",
+                    ]
+                )
+            )
+            .filter(
+                or_(
+                    Transaction.payload["toTier"].as_string() == current_tier.key,
+                    Transaction.payload["toStatus"].as_string() == current_tier.key,
+                )
+            )
             .order_by(Transaction.created_at.desc())
             .first()
         )
@@ -778,12 +477,15 @@ def get_customer_loyalty(
                 last_change = "downgrade"
             elif ttype == "TIER_RENEWED":
                 last_change = "no_change"
+            elif ttype == "ADMIN_SET_TIER":
+                last_change = "admin_override"
 
     return {
         "brand": brand,
         "profileId": profile_id,
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": sp,
+        "pointsBalance": get_status_points_balance(db, customer.id),
         "lastActivityAt": customer.last_activity_at,
         "lastChange": last_change,
         "currentTier": (
@@ -847,6 +549,7 @@ def get_customer_loyalty_history(
         "TIER_DOWNGRADED",
         "TIER_RENEWED",
         "STATUS_RESET",
+        "ADMIN_SET_TIER",
     ]
 
     q = (
@@ -881,5 +584,3 @@ def get_customer_loyalty_history(
             for tx in items
         ],
     }
-
-

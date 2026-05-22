@@ -4,9 +4,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 
+from app.models.coupon_type import CouponType
 from app.models.reward import Reward
 from app.models.customer_reward import CustomerReward
 from app.models.customer import Customer
+from app.services.catalog_admin_service import build_customer_reward_snapshot_payload
 
 
 def _coerce_uuid(value):
@@ -50,6 +52,7 @@ def issue_reward(
     rule_execution_id: str | None = None,
     idempotency_key: str | None = None,
     expires_at_override: datetime | None = None,
+    coupon_type: CouponType | None = None,
 ):
     if not reward_id:
         raise HTTPException(status_code=400, detail="reward_id is required")
@@ -79,11 +82,7 @@ def issue_reward(
             db.flush()
             return existing
 
-    payload = {
-        "name": reward.name,
-        "description": reward.description,
-        "rewardCategoryId": str(reward.reward_category_id) if reward.reward_category_id is not None else None,
-    }
+    payload = build_customer_reward_snapshot_payload(reward=reward, coupon_type=coupon_type)
 
     customer_reward = CustomerReward(
         customer_id=customer.id,

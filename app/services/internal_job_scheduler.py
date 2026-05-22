@@ -13,6 +13,7 @@ from app.models.customer import Customer
 from app.models.coupon_type import CouponType
 from app.models.internal_job import InternalJob
 from app.models.reward import Reward
+from app.models.segment import Segment
 from app.services.internal_job_runner import compute_next_run_at_from_schedule, run_internal_job_once
 
 

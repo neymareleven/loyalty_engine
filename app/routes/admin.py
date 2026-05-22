@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import desc, func
@@ -15,7 +16,6 @@ from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.models.rule import Rule
 from app.models.reward import Reward
-from app.models.reward_category import RewardCategory
 from app.models.coupon_type import CouponType
 from app.models.product_category import ProductCategory
 from app.models.product import Product
@@ -63,23 +63,53 @@ def list_ui_options_coupon_types(
     if active is not None:
         q = q.filter(CouponType.active.is_(active))
     items = q.order_by(CouponType.name.asc()).all()
-    return {
-        "brand": brand,
-        "items": [
+    from app.services.catalog_admin_service import coupon_type_deletion_meta
+    from app.services.coupon_rewards_service import list_coupon_type_reward_ids, resolve_rewards_catalog
+
+    out_items = []
+    for ct in items:
+        catalog = resolve_rewards_catalog(db, coupon_type=ct, active_only=True)
+        linked_ids = [str(rid) for rid in list_coupon_type_reward_ids(db, coupon_type_id=ct.id)]
+        deletion = coupon_type_deletion_meta(db, coupon_type_id=ct.id)
+        out_items.append(
             {
                 "id": str(ct.id),
                 "name": ct.name,
                 "active": ct.active,
-                "rewardCategoryId": str(
-                    (
-                        db.query(RewardCategory.id)
-                        .filter(RewardCategory.brand == brand)
-                        .filter(RewardCategory.coupon_type_id == ct.id)
-                        .scalar()
-                    )
-                ),
+                "rewardIds": linked_ids or [str(r.id) for r in catalog],
+                "rewardCount": len(catalog),
+                "customerCouponCount": deletion["customer_coupon_count"],
+                "canDelete": deletion["can_delete"],
+                "recommendedAction": deletion["recommended_action"],
             }
-            for ct in items
+        )
+    return {"brand": brand, "items": out_items}
+
+
+@router.get("/ui-options/coupon-types/{coupon_type_id}/rewards")
+def list_ui_options_coupon_type_rewards(
+    coupon_type_id: UUID,
+    brand: str = Depends(get_active_brand),
+    active: bool | None = True,
+    db: Session = Depends(get_db),
+):
+    from app.models.coupon_type import CouponType
+    from app.services.coupon_rewards_service import resolve_rewards_catalog
+
+    ct = db.query(CouponType).filter(CouponType.id == coupon_type_id).first()
+    if not ct or ct.brand != brand:
+        raise HTTPException(status_code=404, detail="Coupon type not found")
+    rewards = resolve_rewards_catalog(db, coupon_type=ct, active_only=active)
+    return {
+        "brand": brand,
+        "couponTypeId": str(ct.id),
+        "items": [
+            {
+                "id": str(r.id),
+                "name": r.name,
+                "active": r.active,
+            }
+            for r in rewards
         ],
     }
 
@@ -628,13 +658,74 @@ def _reward_type_catalog_item(
     }
 
 
+@router.get("/coupon-types/ui-catalog")
+def get_coupon_types_ui_catalog():
+    return {
+        "workflow": {
+            "order": [
+                "create_coupon_type",
+                "create_rewards_with_coupon_type_ids",
+                "optional_put_coupon_type_rewards",
+                "configure_rules_issue_coupon",
+            ],
+            "summary": (
+                "Flux catalogue recommandé : créer le type de coupon, puis les rewards via coupon_type_ids. "
+                "Gérer les liens depuis le coupon (PUT …/rewards) ; éviter de recâbler coupon_type_ids sur une reward existante sauf migration."
+            ),
+        },
+        "create": {
+            "fieldHelp": {
+                "name": "Nom du type de coupon (ex. Anniversaire, VIP).",
+                "validity_days": "Durée de validité des coupons émis (jours). Laisser vide = pas d'expiration automatique.",
+            },
+            "jsonSchema": {
+                "note": "POST /admin/coupon-types — aucune reward à la création.",
+            },
+        },
+        "update": {
+            "fieldHelp": {
+                "reward_ids": "Remplace toutes les rewards liées (coupon_type_rewards). Préférer PUT /admin/coupon-types/{id}/rewards.",
+                "active": "Désactiver empêche les nouvelles émissions via issue_coupon.",
+            },
+        },
+        "delete": {
+            "policy": (
+                "DELETE autorisé seulement si customer_coupon_count = 0 (voir can_delete sur CouponTypeOut). "
+                "Sinon recommended_action = deactivate."
+            ),
+            "fieldsOnList": ["canDelete", "customerCouponCount", "recommendedAction"],
+        },
+        "linkRewards": {
+            "preferredEndpoint": "PUT /admin/coupon-types/{coupon_type_id}/rewards",
+            "alternateEndpoint": "PATCH /rewards/{id} avec coupon_type_ids (usage exceptionnel)",
+        },
+        "uiOptions": {
+            "listCouponTypes": "/admin/ui-options/coupon-types",
+            "listRewardsForCouponType": "/admin/ui-options/coupon-types/{coupon_type_id}/rewards",
+        },
+    }
+
+
 @router.get("/rewards/ui-catalog")
 def get_rewards_ui_catalog():
     return {
+        "workflow": {
+            "order": [
+                "create_coupon_type_first",
+                "create_reward_with_coupon_type_ids",
+            ],
+            "summary": (
+                "Après création du coupon type, POST /rewards avec coupon_type_ids (obligatoire, min. 1). "
+                "Pour modifier les liens d'une reward existante, privilégier PUT /admin/coupon-types/{id}/rewards."
+            ),
+        },
         "create": {
             "fieldHelp": {
                 "name": "Nom lisible de la récompense (affiché dans le backoffice).",
                 "description": "Description (optionnelle) affichée au support/ops.",
+                "coupon_type_ids": (
+                    "Types de coupon existants (obligatoire à la création). Créer le coupon type avant la reward."
+                ),
             },
             "rewardTypes": [
                 _reward_type_catalog_item(
@@ -644,8 +735,53 @@ def get_rewards_ui_catalog():
                     required=[],
                     visible=["name", "description", "active"],
                 ),
-            ]
-        }
+            ],
+        },
+        "update": {
+            "fieldHelp": {
+                "coupon_type_ids": (
+                    "Remplace tous les liens coupon ↔ reward. Usage exceptionnel ; préférer la gestion depuis le coupon type."
+                ),
+                "active": "Désactiver pour stopper les nouvelles émissions ; ne supprime pas l'historique client.",
+            },
+        },
+        "delete": {
+            "policy": (
+                "DELETE refusé (409) si des customer_rewards USED/EXPIRED existent — désactiver (active=false). "
+                "Sinon les ISSUED sont annulés puis la reward est supprimée."
+            ),
+        },
+    }
+
+
+@router.get("/customer-entitlements/ui-catalog")
+def get_customer_entitlements_ui_catalog():
+    return {
+        "customerCoupons": {
+            "summary": (
+                "Les coupons émis chez un client ne se suppriment pas. Utiliser uniquement le changement de statut."
+            ),
+            "endpoint": "PATCH /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/status",
+            "allowedStatuses": ["ISSUED", "USED", "EXPIRED"],
+            "transitions": {
+                "ISSUED": ["USED", "EXPIRED"],
+                "USED": ["ISSUED", "EXPIRED"],
+                "EXPIRED": [],
+            },
+            "labels": {
+                "ISSUED": "Rouvrir / marquer non utilisé",
+                "USED": "Marquer comme utilisé",
+                "EXPIRED": "Marquer comme expiré",
+            },
+            "forbiddenActions": ["DELETE"],
+        },
+        "customerRewards": {
+            "summary": (
+                "Pas de DELETE sur les droits client. Afficher rewardSnapshot / couponTypeSnapshot depuis payload "
+                "(renseignés à l'émission ; backfill migration fe67ab89cd01 pour l'historique)."
+            ),
+            "displayFields": ["payload.rewardSnapshot", "payload.couponTypeSnapshot", "status"],
+        },
     }
 
 
@@ -835,6 +971,8 @@ def list_ui_options_rewards(
     q = db.query(Reward).filter(Reward.brand == brand)
     if active is not None:
         q = q.filter(Reward.active.is_(active))
+    from app.services.coupon_rewards_service import list_reward_coupon_type_ids
+
     items = q.order_by(Reward.name.asc()).all()
     return {
         "brand": brand,
@@ -843,7 +981,7 @@ def list_ui_options_rewards(
                 "id": str(r.id),
                 "name": r.name,
                 "active": r.active,
-                "type": r.type,
+                "couponTypeIds": [str(cid) for cid in list_reward_coupon_type_ids(db, reward_id=r.id)],
             }
             for r in items
         ],
@@ -954,16 +1092,33 @@ def list_rule_actions_catalog():
             {
                 "type": "issue_coupon",
                 "title": "Attribuer un coupon",
-                "description": "Émet un coupon pour le client et lui attribue toutes les récompenses actives de la catégorie associée (snapshot au moment de l’émission).",
-                "params": {"coupon_type_id": "uuid", "frequency": "ALWAYS | ONCE_PER_CALENDAR_YEAR (1 calendar year) | ONCE_PER_CUSTOMER"},
+                "description": (
+                    "Émet un coupon pour le client et les récompenses liées au type de coupon (coupon_type_rewards). "
+                    "Flux catalogue : créer le coupon type, puis les rewards (coupon_type_ids). "
+                    "Sans reward_ids: toutes les rewards liées actives. Avec reward_ids: sous-ensemble strict (erreur si ID hors bundle)."
+                ),
+                "params": {
+                    "coupon_type_id": "uuid",
+                    "frequency": "ALWAYS | ONCE_PER_CALENDAR_YEAR (1 calendar year) | ONCE_PER_CUSTOMER",
+                    "reward_ids": "uuid[] (optional subset)",
+                },
                 "jsonSchema": _model_json_schema(IssueCouponAction),
                 "examples": [
                     {"type": "issue_coupon", "coupon_type_id": "<uuid>"},
                     {"type": "issue_coupon", "coupon_type_id": "<uuid>", "frequency": "ALWAYS"},
+                    {
+                        "type": "issue_coupon",
+                        "coupon_type_id": "<uuid>",
+                        "reward_ids": ["<reward-uuid-1>", "<reward-uuid-2>"],
+                    },
                 ],
                 "uiHints": {
                     "coupon_type_id": {
                         "widget": "remote_select",
+                        "help": (
+                            "Choisir un type de coupon actif. Créer le coupon type avant les rewards "
+                            "(voir GET /admin/coupon-types/ui-catalog)."
+                        ),
                         "datasource": {
                             "endpoint": "/admin/ui-options/coupon-types",
                             "method": "GET",
@@ -971,6 +1126,19 @@ def list_rule_actions_catalog():
                             "labelField": "name",
                             "brandVia": "X-Brand",
                         },
+                    },
+                    "reward_ids": {
+                        "widget": "remote_multi_select",
+                        "optional": True,
+                        "dependsOn": {"coupon_type_id": "coupon_type_id"},
+                        "datasource": {
+                            "endpoint": "/admin/ui-options/coupon-types/{coupon_type_id}/rewards",
+                            "method": "GET",
+                            "brandVia": "X-Brand",
+                            "valueField": "id",
+                            "labelField": "name",
+                        },
+                        "help": "Laisser vide pour émettre toutes les récompenses par défaut du type de coupon.",
                     },
                     "frequency": {
                         "widget": "select",
@@ -985,7 +1153,13 @@ def list_rule_actions_catalog():
                     "atomicity": "Per-rule: all actions rollback if one fails.",
                     "idempotent": True,
                     "sideEffects": ["Creates customer coupon", "Creates customer rewards snapshot"],
-                    "commonErrors": ["coupon_type_id missing", "coupon type not found", "invalid frequency"],
+                    "commonErrors": [
+                        "coupon_type_id missing",
+                        "coupon type not found",
+                        "invalid frequency",
+                        "reward_ids not linked to coupon type",
+                        "reward_ids contains inactive rewards",
+                    ],
                 },
             },
             {
@@ -1101,7 +1275,6 @@ def get_rules_ui_bundle(
                         "id": str(r.id),
                         "name": r.name,
                         "active": r.active,
-                        "type": r.type,
                     }
                     for r in rewards
                 ],

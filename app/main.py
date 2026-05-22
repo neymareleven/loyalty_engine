@@ -16,8 +16,8 @@ from app.models.point_movement import PointMovement
 from app.models.cash_movement import CashMovement
 from app.models.reward import Reward
 from app.models.customer_reward import CustomerReward
-from app.models.reward_category import RewardCategory
 from app.models.coupon_type import CouponType
+from app.models.coupon_type_reward import CouponTypeReward
 from app.models.customer_coupon import CustomerCoupon
 from app.models.internal_job import InternalJob
 from app.models.event_type import TransactionType
@@ -28,7 +28,6 @@ from app.routes.customers import router as customers_router
 from app.routes.transactions import router as transactions_router
 from app.routes.rules import router as rules_router
 from app.routes.rewards import router as rewards_router
-from app.routes.reward_categories import router as reward_categories_router
 from app.routes.coupon_types import router as coupon_types_router
 from app.routes.product_categories import router as product_categories_router
 from app.routes.products import router as products_router
@@ -112,7 +111,6 @@ app.include_router(customers_router)
 app.include_router(transactions_router)
 app.include_router(rules_router)
 app.include_router(rewards_router)
-app.include_router(reward_categories_router)
 app.include_router(coupon_types_router)
 app.include_router(product_categories_router)
 app.include_router(products_router)

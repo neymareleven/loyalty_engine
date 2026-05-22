@@ -10,8 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from app.models.coupon_type import CouponType
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
-from app.models.reward import Reward
-from app.models.reward_category import RewardCategory
+from app.services.coupon_rewards_service import resolve_rewards_catalog, resolve_rewards_to_issue
 from app.services.reward_service import issue_reward
 
 
@@ -87,27 +86,10 @@ def issue_coupon(
     if not ct:
         raise HTTPException(status_code=404, detail="Coupon type not found")
 
-    rc = None
-    if getattr(ct, "reward_category_id", None) is not None:
-        rc = (
-            db.query(RewardCategory)
-            .filter(RewardCategory.id == ct.reward_category_id)
-            .filter(RewardCategory.brand == customer.brand)
-            .first()
-        )
-
-    # Backward-compatibility: legacy schema linked reward_categories.coupon_type_id.
-    if rc is None and hasattr(RewardCategory, "coupon_type_id"):
-        rc = (
-            db.query(RewardCategory)
-            .filter(getattr(RewardCategory, "coupon_type_id") == ct.id)
-            .filter(RewardCategory.brand == customer.brand)
-            .first()
-        )
-    if not rc:
-        raise HTTPException(status_code=400, detail="Reward category not linked to coupon type")
-
     now = datetime.utcnow()
+
+    def _mark_issued_reward_ids(coupon_obj, ids: list[str]):
+        coupon_obj._issued_reward_ids = ids  # type: ignore[attr-defined]
 
     if frequency == "ONCE_PER_CUSTOMER":
         existing = (
@@ -118,6 +100,7 @@ def issue_coupon(
             .first()
         )
         if existing:
+            _mark_issued_reward_ids(existing, [])
             return existing
 
     if frequency == "ONCE_PER_CALENDAR_YEAR":
@@ -131,6 +114,7 @@ def issue_coupon(
             .first()
         )
         if existing:
+            _mark_issued_reward_ids(existing, [])
             return existing
 
     validity_days = getattr(ct, "validity_days", None)
@@ -159,7 +143,6 @@ def issue_coupon(
                 "id": str(ct.id),
                 "name": ct.name,
             },
-            "rewardCategoryId": str(rc.id),
         },
     )
 
@@ -168,36 +151,12 @@ def issue_coupon(
             db.add(coupon)
             db.flush()
 
-            rewards_q = (
-                db.query(Reward)
-                .filter(Reward.brand == customer.brand)
-                .filter(Reward.active.is_(True))
-                .filter(Reward.reward_category_id == rc.id)
-                .order_by(Reward.created_at.asc())
+            rewards = resolve_rewards_to_issue(
+                db,
+                coupon_type=ct,
+                reward_ids_override=reward_ids,
             )
-
-            # Snapshot: either all active rewards in category (default) or a subset.
-            if reward_ids is not None:
-                # Allow empty list: coupon is issued but no rewards are emitted.
-                if not isinstance(reward_ids, list):
-                    raise HTTPException(status_code=400, detail="reward_ids must be a list")
-
-                normalized: list[str] = []
-                for rid in reward_ids:
-                    if rid is None:
-                        continue
-                    s = str(rid).strip()
-                    if not s:
-                        continue
-                    if s not in normalized:
-                        normalized.append(s)
-
-                if not normalized:
-                    rewards = []
-                else:
-                    rewards = rewards_q.filter(Reward.id.in_(normalized)).all()
-            else:
-                rewards = rewards_q.all()
+            issued_reward_ids: list[str] = []
 
             for r in rewards:
                 # deterministically idempotent per coupon+reward.
@@ -215,8 +174,11 @@ def issue_coupon(
                     rule_execution_id=str(rule_execution_id) if rule_execution_id is not None else None,
                     idempotency_key=cr_idem,
                     expires_at_override=coupon.expires_at,
+                    coupon_type=ct,
                 )
+                issued_reward_ids.append(str(r.id))
 
+            _mark_issued_reward_ids(coupon, issued_reward_ids)
             db.flush()
 
     except IntegrityError:
@@ -224,6 +186,7 @@ def issue_coupon(
         if idempotency_key:
             existing = db.query(CustomerCoupon).filter(CustomerCoupon.idempotency_key == idempotency_key).first()
             if existing:
+                _mark_issued_reward_ids(existing, [])
                 return existing
 
         if frequency == "ONCE_PER_CUSTOMER":
@@ -235,6 +198,7 @@ def issue_coupon(
                 .first()
             )
             if existing:
+                _mark_issued_reward_ids(existing, [])
                 return existing
 
         # Concurrency safe fallback for rolling-year uniqueness.
@@ -249,9 +213,11 @@ def issue_coupon(
                 .first()
             )
             if existing:
+                _mark_issued_reward_ids(existing, [])
                 return existing
         raise
 
+    _mark_issued_reward_ids(coupon, getattr(coupon, "_issued_reward_ids", []))
     return coupon
 
 
@@ -264,6 +230,7 @@ def use_coupon(
     rule_id: str | None = None,
     rule_execution_id: str | None = None,
 ):
+    """Consume the oldest ISSUED customer coupon for a coupon type (rule engine / legacy)."""
     if not coupon_type_id:
         raise HTTPException(status_code=400, detail="coupon_type_id is required")
 
@@ -278,8 +245,6 @@ def use_coupon(
 
     now = datetime.utcnow()
 
-    # Find the first actually usable coupon. If the oldest ISSUED one is already expired,
-    # expire it and retry (so we can consume a newer one if it exists).
     while True:
         coupon = (
             db.query(CustomerCoupon)
@@ -293,9 +258,13 @@ def use_coupon(
             raise HTTPException(status_code=400, detail="No usable coupon")
 
         with db.begin_nested():
-            locked = db.query(CustomerCoupon).filter(CustomerCoupon.id == coupon.id).with_for_update().one()
+            locked = (
+                db.query(CustomerCoupon)
+                .filter(CustomerCoupon.id == coupon.id)
+                .with_for_update()
+                .one()
+            )
             if locked.status != "ISSUED":
-                # Concurrency: another worker consumed it. Retry selection.
                 db.flush()
                 continue
             if locked.expires_at is not None and locked.expires_at < now:
@@ -303,27 +272,26 @@ def use_coupon(
                 db.flush()
                 continue
 
+            if rule_id is not None:
+                locked.rule_id = _coerce_uuid(rule_id)
+            if rule_execution_id is not None:
+                locked.rule_execution_id = _coerce_uuid(rule_execution_id)
+            if transaction is not None and transaction.id is not None:
+                locked.source_transaction_id = transaction.id
+
+            from app.services.customer_coupon_service import sync_rewards_on_coupon_status
+
             locked.status = "USED"
             locked.used_at = now
-            locked.source_transaction_id = transaction.id if transaction is not None else locked.source_transaction_id
-            locked.rule_id = _coerce_uuid(rule_id) if rule_id is not None else locked.rule_id
-            locked.rule_execution_id = _coerce_uuid(rule_execution_id) if rule_execution_id is not None else locked.rule_execution_id
-
-            rewards = (
-                db.query(CustomerReward)
-                .filter(CustomerReward.customer_coupon_id == locked.id)
-                .filter(CustomerReward.status == "ISSUED")
-                .all()
+            sync_rewards_on_coupon_status(
+                db,
+                customer=customer,
+                coupon=locked,
+                to_status="USED",
+                tx=transaction,
+                now=now,
             )
-            for cr in rewards:
-                if cr.expires_at is not None and cr.expires_at < now:
-                    cr.status = "EXPIRED"
-                else:
-                    cr.status = "USED"
-                    cr.used_at = now
-
             db.flush()
-
             return locked
 
 

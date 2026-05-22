@@ -6,12 +6,14 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
+from app.models.coupon_type import CouponType
 from app.models.customer_reward import CustomerReward
 from app.models.product import Product
 from app.models.reward import Reward
-from app.models.reward_category import RewardCategory
 from app.models.reward_product import RewardProduct
-from app.schemas.reward import RewardCreate, RewardUpdate, RewardOut
+from app.schemas.reward import CouponTypeLinkSummary, RewardCreate, RewardUpdate, RewardOut
+from app.services.catalog_admin_service import reward_blocking_customer_reward_count
+from app.services.coupon_rewards_service import link_reward_to_coupon_types, list_reward_coupon_type_ids
 
 
 router = APIRouter(prefix="/rewards", tags=["rewards"])
@@ -33,13 +35,27 @@ def _serialize_reward_out(*, db: Session, reward: Reward) -> dict:
         products = db.query(Product).filter(Product.id.in_(product_ids)).all()
     prod_map = {p.id: p for p in products}
 
+    coupon_type_ids = list_reward_coupon_type_ids(db, reward_id=reward.id)
+    coupon_types = []
+    if coupon_type_ids:
+        coupon_types = (
+            db.query(CouponType)
+            .filter(CouponType.id.in_(coupon_type_ids))
+            .order_by(CouponType.name.asc())
+            .all()
+        )
+
     return {
         "id": reward.id,
         "brand": reward.brand,
-        "reward_category_id": reward.reward_category_id,
         "name": reward.name,
         "description": reward.description,
         "active": reward.active,
+        "coupon_type_ids": coupon_type_ids,
+        "coupon_types": [
+            CouponTypeLinkSummary(id=ct.id, name=ct.name, active=bool(ct.active))
+            for ct in coupon_types
+        ],
         "created_at": getattr(reward, "created_at", None),
         "products": [
             {
@@ -97,12 +113,12 @@ def _replace_reward_products(*, db: Session, reward: Reward, active_brand: str, 
         db.add(RewardProduct(reward_id=reward.id, product_id=pid, quantity=qty))
 
 
-
 @router.get("", response_model=list[RewardOut])
 def list_rewards(
     active_brand: str = Depends(get_active_brand),
     brand: str | None = None,
     active: bool | None = None,
+    coupon_type_id: str | None = None,
     db: Session = Depends(get_db),
 ):
     q = db.query(Reward)
@@ -111,6 +127,12 @@ def list_rewards(
     q = q.filter(Reward.brand == active_brand)
     if active is not None:
         q = q.filter(Reward.active.is_(active))
+    if coupon_type_id:
+        from app.models.coupon_type_reward import CouponTypeReward
+
+        q = q.join(CouponTypeReward, CouponTypeReward.reward_id == Reward.id).filter(
+            CouponTypeReward.coupon_type_id == coupon_type_id
+        )
     rewards = q.order_by(Reward.created_at.desc()).all()
     return [_serialize_reward_out(db=db, reward=r) for r in rewards]
 
@@ -124,21 +146,8 @@ def create_reward(
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
 
-    reward_category_id = payload.reward_category_id
-    if reward_category_id is not None:
-        cat = db.query(RewardCategory).filter(RewardCategory.id == reward_category_id).first()
-        if not cat or cat.brand != active_brand:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"reward_category_id not found: '{str(reward_category_id)}'. "
-                    "Veuillez sélectionner une catégorie de récompense existante pour cette marque."
-                ),
-            )
-
     reward = Reward(
         brand=active_brand,
-        reward_category_id=reward_category_id,
         name=payload.name,
         description=payload.description,
         active=payload.active,
@@ -157,14 +166,6 @@ def create_reward(
                     "Veuillez modifier le nom (ou la description) puis réessayer."
                 ),
             )
-        if code == "23503":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Impossible d'enregistrer la récompense car une référence est invalide (catégorie). "
-                    "Veuillez sélectionner une catégorie valide pour cette marque."
-                ),
-            )
         raise HTTPException(
             status_code=409,
             detail=(
@@ -173,6 +174,13 @@ def create_reward(
             ),
         )
     db.refresh(reward)
+
+    link_reward_to_coupon_types(
+        db,
+        reward=reward,
+        coupon_type_ids=payload.coupon_type_ids,
+        brand=active_brand,
+    )
 
     _replace_reward_products(
         db=db,
@@ -210,19 +218,9 @@ def update_reward(
 
     data = payload.model_dump(exclude_unset=True)
     products_items = data.pop("products", None) if "products" in data else None
+    coupon_type_ids = data.pop("coupon_type_ids", None)
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
-
-    if "reward_category_id" in data and data["reward_category_id"] is not None:
-        cat = db.query(RewardCategory).filter(RewardCategory.id == data["reward_category_id"]).first()
-        if not cat or cat.brand != active_brand:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"reward_category_id not found: '{str(data['reward_category_id'])}'. "
-                    "Veuillez sélectionner une catégorie de récompense existante pour cette marque."
-                ),
-            )
 
     for k, v in data.items():
         if k == "brand":
@@ -242,14 +240,6 @@ def update_reward(
                     "Veuillez modifier le nom (ou la description) puis réessayer."
                 ),
             )
-        if code == "23503":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Impossible de mettre à jour la récompense car la catégorie sélectionnée est invalide. "
-                    "Veuillez sélectionner une catégorie valide pour cette marque."
-                ),
-            )
         raise HTTPException(
             status_code=409,
             detail=(
@@ -258,6 +248,15 @@ def update_reward(
             ),
         )
     db.refresh(reward)
+
+    if coupon_type_ids is not None:
+        link_reward_to_coupon_types(
+            db,
+            reward=reward,
+            coupon_type_ids=coupon_type_ids,
+            brand=active_brand,
+            replace=True,
+        )
 
     _replace_reward_products(db=db, reward=reward, active_brand=active_brand, items=products_items)
     db.commit()
@@ -275,8 +274,20 @@ def delete_reward(
     if not reward or reward.brand != active_brand:
         raise HTTPException(status_code=404, detail="Reward not found")
 
-    # If a reward is deleted while still issued to customers, we must cancel those
-    # entitlements to avoid a misleading history (ISSUED reward that no longer exists).
+    blocking_count = reward_blocking_customer_reward_count(db, reward_id=reward.id)
+    if blocking_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Impossible de supprimer cette récompense car elle a déjà été utilisée ou a expiré "
+                    "chez au moins un client. Désactivez-la (active=false) pour arrêter les nouvelles émissions."
+                ),
+                "blockingCustomerRewardCount": blocking_count,
+                "recommendedAction": "deactivate",
+            },
+        )
+
     now = datetime.utcnow()
     issued = (
         db.query(CustomerReward)

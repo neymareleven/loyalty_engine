@@ -103,33 +103,118 @@
  - Rule conditions can read `payload.*`, `customer.*`, `customer.metrics.*`.
  - Internal job selectors can read `customer.*`, `customer.metrics.*`, and `system.*`.
 
-## Coupon types, reward categories, and issuing coupons from rules
+## Coupon types, rewards, and issuing coupons from rules
 
 Rules can issue coupons to customers via the `issue_coupon` action.
 
-- A `CustomerCoupon` is issued for a given `coupon_type_id`.
-- Each `CouponType` can be linked to a `RewardCategory` via `coupon_types.reward_category_id`.
-- A `RewardCategory` is a grouping mechanism and can be shared by multiple coupon types.
-- By default, coupon issuance emits `CustomerReward` rows for **all active Rewards** in the coupon type's reward category.
-- Optional: the rule action can specify `reward_ids` to emit **only a subset** of rewards.
-  - Best-effort: if one or more IDs are unknown / inactive / not in the coupon type's category, they are ignored (the issuance continues for valid IDs).
+### Data model
 
-Example action:
+```
+CouponType ◄──── coupon_type_rewards ────► Reward
+```
+
+- **`coupon_type_rewards`**: seule source de vérité — quelles récompenses sont offertes par un type de coupon.
+- **Ordre métier recommandé** : créer le **type de coupon** d’abord, puis les **rewards** rattachées via `coupon_type_ids`.
+- **UI / hints** : `GET /admin/coupon-types/ui-catalog`, `GET /admin/rewards/ui-catalog`, `GET /admin/customer-entitlements/ui-catalog`.
+
+### Admin workflow (catalogue vs client)
+
+**Catalogue (configuration)**
+
+1. `POST /admin/coupon-types` — sans rewards.
+2. `POST /rewards` avec `coupon_type_ids` (obligatoire).
+3. Liens optionnels / réordonnancement : `PUT /admin/coupon-types/{id}/rewards` (préféré) plutôt que `PATCH /rewards/{id}` avec `coupon_type_ids` (exception).
+4. Règles : action `issue_coupon` ; rewards disponibles via `GET /admin/ui-options/coupon-types/{id}/rewards`.
+
+**Suppression catalogue**
+
+| Ressource | Condition DELETE | Sinon |
+|-----------|------------------|--------|
+| Coupon type | `can_delete` / `customer_coupon_count == 0` | `PATCH` `active: false` |
+| Reward | Aucune `CustomerReward` `USED`/`EXPIRED` | `PATCH` `active: false` |
+
+**Client (émissions — pas de DELETE)**
+
+- Coupon client : `PATCH …/coupons/{id}/status` (`ISSUED` \| `USED` \| `EXPIRED`) — pas de suppression.
+- Rewards client : historique conservé ; libellés depuis `payload.rewardSnapshot` / `payload.couponTypeSnapshot`.
+
+### 1) Créer un type de coupon
+
+```json
+POST /admin/coupon-types
+{
+  "name": "Coupon anniversaire",
+  "description": "Offre anniversaire",
+  "validity_days": 365,
+  "active": true
+}
+```
+
+Aucune récompense à ce stade.
+
+### 2) Créer une récompense (rattachée au coupon)
+
+```json
+POST /rewards
+{
+  "name": "Bon -10%",
+  "description": "...",
+  "active": true,
+  "coupon_type_ids": ["<coupon-type-uuid>"],
+  "products": []
+}
+```
+
+`coupon_type_ids` est **obligatoire** (au moins un type de coupon existant).
+
+### 3) Règle `issue_coupon`
+
+- **`coupon_type_id`** (required)
+- **`frequency`** (optional): `ONCE_PER_CUSTOMER`, `ONCE_PER_CALENDAR_YEAR`, `ALWAYS`
+- **`reward_ids`** (optional):
+  - **omis** (`null`) → toutes les rewards actives liées au type de coupon
+  - **liste** → **strict** : uniquement ces IDs (doivent être liés au coupon type et actifs) ; erreur 400 si ID invalide
+  - **`[]`** → coupon sans rewards client
 
 ```json
 {
   "type": "issue_coupon",
   "coupon_type_id": "<coupon-type-uuid>",
   "frequency": "ONCE_PER_CALENDAR_YEAR",
-  "reward_ids": ["<reward-uuid-1>", "<reward-uuid-2>"]
+  "reward_ids": ["<reward-uuid-1>"]
 }
 ```
 
+### Endpoints utiles
+
+- `GET /admin/coupon-types/{id}/rewards` — rewards liées au coupon
+- `PUT /admin/coupon-types/{id}/rewards` — remplacer les liens `{ "reward_ids": [...] }` (réordonnancement admin)
+- `GET /rewards?coupon_type_id=<uuid>` — filtrer les rewards d’un coupon
+- `GET /admin/ui-options/coupon-types` — liste pour formulaires
+- `GET /admin/ui-options/coupon-types/{coupon_type_id}/rewards` — choix pour `issue_coupon.reward_ids`
+
+Coupon type API metadata (`CouponTypeOut`):
+
+- `customer_coupon_count` — number of issued customer coupons for this type
+- `can_delete` — `true` only when `customer_coupon_count == 0`
+- `recommended_action` — `"deactivate"` when delete is blocked; `null` when delete is allowed
+
+Customer reward snapshot (on `issue_coupon` / `issue_reward`):
+
+- `CustomerReward.payload` includes `rewardSnapshot` and, when issued with a coupon, `couponTypeSnapshot` (plus legacy `name` / `description` / `rewardId` keys).
+
 Reward deletion behavior:
 
-- `DELETE /rewards/{reward_id}` is allowed even if the reward was previously issued.
-- Any `CustomerReward` still in status `ISSUED` for that reward is automatically marked as `CANCELLED` to keep customer history accurate.
-- The delete endpoint returns a `cancelled_count` field indicating how many issued entitlements were cancelled.
+- `DELETE /rewards/{reward_id}` is **blocked (409)** if any `CustomerReward` is `USED` or `EXPIRED` for that reward (`recommendedAction: deactivate`).
+- Otherwise, any `ISSUED` entitlements are marked `CANCELLED` before delete; response includes `cancelled_count`.
+
+### Backfill snapshots (historique)
+
+Migration `fe67ab89cd01` remplit `rewardSnapshot` / `couponTypeSnapshot` sur les `customer_rewards` existants (à partir de `rewards`, `coupon_types`, ou champs legacy `payload.name` / `payload.couponType`).
+
+```bash
+alembic upgrade head
+```
 
  ### Internal Job schedule format (cron)
  
@@ -302,7 +387,7 @@ Reward deletion behavior:
      "active": true,
      "conditions": null,
      "actions": [
-       { "type": "earn_points_from_amount", "rate": 1.0, "amount_path": "amount" }
+       { "type": "earn_points", "points": { "$path": "amount" } }
      ]
    }'
  
@@ -413,13 +498,11 @@ Reward deletion behavior:
  - `GET /customers/{brand}/{profile_id}/rewards`
  - `POST /customers/{brand}/{profile_id}/rewards/{customer_reward_id}/use`
  - `GET /customers/{brand}/{profile_id}/coupons`
- - `POST /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/use`
- - `PATCH /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/use`
- - `POST /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/reopen`
- - `PATCH /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/reopen`
+ - `GET /customers/{brand}/{profile_id}/coupons-with-rewards`
+ - `PATCH /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/status` — `{ "status": "ISSUED" | "USED" | "EXPIRED" }` (coupon + rewards liées)
  - `GET /customers/{brand}/{profile_id}/loyalty`
- - `POST /customers/{brand}/{profile_id}/loyalty/set-tier`
- - `PATCH /customers/{brand}/{profile_id}/loyalty/set-tier`
+ - `GET /customers/{brand}/{profile_id}/loyalty/history` (inclut `ADMIN_SET_TIER`)
+ - `PATCH /customers/{brand}/{profile_id}/loyalty/status` — `{ "tierKey": "GOLD", "reason": "optional" }` (ajuste points + palier, réponse avec `loyaltyOverride`)
  
  - `GET /wallet/{brand}/{profile_id}`
    - Returns points balance for a customer.
@@ -441,15 +524,18 @@ Reward deletion behavior:
    - Segment targeting is supported via `segment_ids`.
  
  - **Rewards**: `GET/POST/PATCH/DELETE /rewards`
+   - `GET /admin/rewards/ui-catalog` (workflow + politique delete)
  
  - **Loyalty tiers**: `GET/POST/PATCH/DELETE /admin/loyalty-tiers`
    - Used to compute the customer loyalty status and next tier information.
  
 
- - **Bonus definitions**: `GET/POST/PATCH/DELETE /admin/bonus-definitions`
-   - Includes `GET /admin/bonus-definitions/ui-catalog`.
+ - **Coupon types**: `GET/POST/PATCH/DELETE /admin/coupon-types`
+   - `GET /admin/coupon-types/ui-catalog` (workflow + politique delete)
+   - `GET /admin/coupon-types/{id}/rewards`
+   - `PUT /admin/coupon-types/{id}/rewards`
 
- - **Bonus awards**: `GET /admin/bonus-awards` (read-only list) and `GET /admin/bonus-awards/{id}`
+ - **Customer entitlements (UI)**: `GET /admin/customer-entitlements/ui-catalog` (statuts coupon client, pas de DELETE)
 
  - **Internal jobs**: `GET/POST/PATCH/DELETE /admin/internal-jobs`
    - Includes:
@@ -459,9 +545,10 @@ Reward deletion behavior:
 
  - **UI options helpers**:
    - `GET /admin/ui-options/rewards`
+   - `GET /admin/ui-options/coupon-types`
+   - `GET /admin/ui-options/coupon-types/{coupon_type_id}/rewards`
    - `GET /admin/ui-options/event-types`
    - `GET /admin/ui-options/loyalty-tiers`
-   - `GET /admin/ui-options/customer-tags`
    - `GET /admin/ui-options/product-categories`
    - `GET /admin/ui-options/products`
    - `GET /admin/ui-options/segments`
@@ -605,6 +692,3 @@ Bulk helpers (recommended for multi-select UI):
  - If `segment_id` is null: job uses `selector` only.
  - If `segment_id` is set: job targets customers in the segment, then applies `selector` (AST) as an additional filter.
 
- ### Campaigns (legacy)
-
- There is a legacy campaigns router at `GET/POST/PATCH/DELETE /campaigns`. This feature is slated for removal in favor of Rules + Internal Jobs.

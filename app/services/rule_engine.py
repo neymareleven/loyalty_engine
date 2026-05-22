@@ -685,7 +685,7 @@ def _execute_actions(db: Session, customer, transaction, actions):
             if transaction.id and rule_id and rule_execution_id and coupon_type_id:
                 idempotency_key = f"issue_coupon:{transaction.id}:{rule_id}:{rule_execution_id}:{action_index}:{coupon_type_id}"
 
-            issue_coupon(
+            coupon = issue_coupon(
                 db,
                 customer=customer,
                 transaction=transaction,
@@ -696,12 +696,15 @@ def _execute_actions(db: Session, customer, transaction, actions):
                 rule_execution_id=str(rule_execution_id) if rule_execution_id is not None else None,
                 idempotency_key=idempotency_key,
             )
+            issued_reward_ids = getattr(coupon, "_issued_reward_ids", None)
             executed.append(
                 {
                     "type": action_type,
+                    "couponId": str(coupon.id) if coupon and getattr(coupon, "id", None) else None,
                     "couponTypeId": coupon_type_id,
                     "frequency": frequency,
-                    "reward_ids": reward_ids,
+                    "requestedRewardIds": reward_ids,
+                    "issuedRewardIds": issued_reward_ids,
                 }
             )
 

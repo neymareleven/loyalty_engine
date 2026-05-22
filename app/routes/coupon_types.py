@@ -8,11 +8,51 @@ from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.coupon_type import CouponType
 from app.models.customer_coupon import CustomerCoupon
-from app.models.reward_category import RewardCategory
-from app.schemas.coupon_type import CouponTypeCreate, CouponTypeOut, CouponTypeUpdate
+from app.schemas.coupon_type import (
+    CouponTypeCreate,
+    CouponTypeOut,
+    CouponTypeRewardSummary,
+    CouponTypeRewardsReplace,
+    CouponTypeUpdate,
+)
+from app.services.catalog_admin_service import coupon_type_deletion_meta
+from app.services.coupon_rewards_service import (
+    list_coupon_type_reward_ids,
+    replace_coupon_type_rewards,
+    resolve_rewards_catalog,
+)
 
 
 router = APIRouter(prefix="/admin/coupon-types", tags=["admin-coupon-types"])
+
+
+def _serialize_coupon_type_out(*, db: Session, obj: CouponType) -> dict:
+    rewards = resolve_rewards_catalog(db, coupon_type=obj, active_only=None)
+    reward_ids = list_coupon_type_reward_ids(db, coupon_type_id=obj.id)
+    deletion = coupon_type_deletion_meta(db, coupon_type_id=obj.id)
+    return {
+        "id": obj.id,
+        "brand": obj.brand,
+        "name": obj.name,
+        "description": obj.description,
+        "validity_days": obj.validity_days,
+        "reward_ids": reward_ids,
+        "rewards": [
+            CouponTypeRewardSummary(
+                id=r.id,
+                name=r.name,
+                active=bool(r.active),
+            )
+            for r in rewards
+        ],
+        "active": obj.active,
+        "customer_coupon_count": deletion["customer_coupon_count"],
+        "can_delete": deletion["can_delete"],
+        "recommended_action": deletion["recommended_action"],
+        "created_at": obj.created_at,
+        "updated_at": obj.updated_at,
+    }
+
 
 def _pgcode(err: IntegrityError) -> str | None:
     orig = getattr(err, "orig", None)
@@ -35,7 +75,8 @@ def list_coupon_types(
     q = q.filter(CouponType.brand == active_brand)
     if active is not None:
         q = q.filter(CouponType.active.is_(active))
-    return q.order_by(CouponType.created_at.desc()).all()
+    items = q.order_by(CouponType.created_at.desc()).all()
+    return [_serialize_coupon_type_out(db=db, obj=obj) for obj in items]
 
 
 @router.post("", response_model=CouponTypeOut)
@@ -53,21 +94,14 @@ def create_coupon_type(
             validity_days = int(validity_days)
         except Exception:
             raise HTTPException(status_code=400, detail="validity_days must be an integer")
-        if validity_days is not None and validity_days < 0:
+        if validity_days < 0:
             raise HTTPException(status_code=400, detail="validity_days must be >= 0")
-
-    reward_category_id = payload.reward_category_id
-    if reward_category_id is not None:
-        cat = db.query(RewardCategory).filter(RewardCategory.id == reward_category_id).first()
-        if not cat or cat.brand != active_brand:
-            raise HTTPException(status_code=400, detail="reward_category_id not found in active brand")
 
     obj = CouponType(
         brand=active_brand,
         name=payload.name,
         description=payload.description,
         validity_days=validity_days,
-        reward_category_id=reward_category_id,
         active=payload.active,
     )
     db.add(obj)
@@ -83,7 +117,7 @@ def create_coupon_type(
             ),
         )
     db.refresh(obj)
-    return obj
+    return _serialize_coupon_type_out(db=db, obj=obj)
 
 
 @router.get("/{coupon_type_id}", response_model=CouponTypeOut)
@@ -95,7 +129,44 @@ def get_coupon_type(
     obj = db.query(CouponType).filter(CouponType.id == coupon_type_id).first()
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Coupon type not found")
-    return obj
+    return _serialize_coupon_type_out(db=db, obj=obj)
+
+
+@router.get("/{coupon_type_id}/rewards", response_model=list[CouponTypeRewardSummary])
+def list_coupon_type_rewards_endpoint(
+    coupon_type_id: UUID,
+    active_brand: str = Depends(get_active_brand),
+    active: bool | None = True,
+    db: Session = Depends(get_db),
+):
+    obj = db.query(CouponType).filter(CouponType.id == coupon_type_id).first()
+    if not obj or obj.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Coupon type not found")
+    rewards = resolve_rewards_catalog(db, coupon_type=obj, active_only=active)
+    return [
+        CouponTypeRewardSummary(
+            id=r.id,
+            name=r.name,
+            active=bool(r.active),
+        )
+        for r in rewards
+    ]
+
+
+@router.put("/{coupon_type_id}/rewards", response_model=CouponTypeOut)
+def replace_coupon_type_rewards_endpoint(
+    coupon_type_id: UUID,
+    payload: CouponTypeRewardsReplace,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    obj = db.query(CouponType).filter(CouponType.id == coupon_type_id).first()
+    if not obj or obj.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Coupon type not found")
+    replace_coupon_type_rewards(db, coupon_type=obj, reward_ids=payload.reward_ids, brand=active_brand)
+    db.commit()
+    db.refresh(obj)
+    return _serialize_coupon_type_out(db=db, obj=obj)
 
 
 @router.patch("/{coupon_type_id}", response_model=CouponTypeOut)
@@ -110,6 +181,7 @@ def update_coupon_type(
         raise HTTPException(status_code=404, detail="Coupon type not found")
 
     data = payload.model_dump(exclude_unset=True)
+    reward_ids = data.pop("reward_ids", None)
 
     if "validity_days" in data and data["validity_days"] is not None:
         try:
@@ -119,11 +191,6 @@ def update_coupon_type(
         if v < 0:
             raise HTTPException(status_code=400, detail="validity_days must be >= 0")
         data["validity_days"] = v
-
-    if "reward_category_id" in data and data["reward_category_id"] is not None:
-        cat = db.query(RewardCategory).filter(RewardCategory.id == data["reward_category_id"]).first()
-        if not cat or cat.brand != active_brand:
-            raise HTTPException(status_code=400, detail="reward_category_id not found in active brand")
 
     for k, v in data.items():
         setattr(obj, k, v)
@@ -140,7 +207,11 @@ def update_coupon_type(
             ),
         )
     db.refresh(obj)
-    return obj
+    if reward_ids is not None:
+        replace_coupon_type_rewards(db, coupon_type=obj, reward_ids=reward_ids, brand=active_brand)
+        db.commit()
+        db.refresh(obj)
+    return _serialize_coupon_type_out(db=db, obj=obj)
 
 
 @router.delete("/{coupon_type_id}")

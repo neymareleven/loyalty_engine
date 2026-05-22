@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
 from app.models.internal_job import InternalJob
+from app.models.segment import Segment
 from app.models.segment_member import SegmentMember
 from app.models.transaction import Transaction
 from app.schemas.event import EventCreate
