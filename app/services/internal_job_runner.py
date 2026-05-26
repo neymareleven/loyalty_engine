@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer
 from app.models.internal_job import InternalJob
 from app.models.segment import Segment
-from app.models.segment_member import SegmentMember
+from app.models.segment import Segment
+from app.services.segment_membership_service import filter_customers_by_segment
 from app.models.transaction import Transaction
 from app.schemas.event import EventCreate
 from app.services.transaction_service import create_transaction
@@ -379,8 +380,11 @@ def run_internal_job_once(
         q = q.filter(Customer.brand == job.brand)
 
     if getattr(job, "segment_id", None) is not None:
-        q = q.join(SegmentMember, SegmentMember.customer_id == Customer.id)
-        q = q.filter(SegmentMember.segment_id == job.segment_id)
+        seg = db.query(Segment).filter(Segment.id == job.segment_id).first()
+        if seg:
+            q = filter_customers_by_segment(db, brand=job.brand or seg.brand, segment=seg, customer_query=q)
+        else:
+            q = q.filter(False)
 
     from app.routes.internal_jobs import _apply_selector
 

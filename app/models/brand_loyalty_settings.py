@@ -17,5 +17,12 @@ class BrandLoyaltySettings(Base):
     points_validity_days = Column(Integer, nullable=True)
     loyalty_status_validity_days = Column(Integer, nullable=True)
 
+    # Legacy columns (unused): Unomi is configured via .env — see UNOMI_* variables.
+    segmentation_mode = Column(String(20), nullable=False, default="INTERNAL")
+    unomi_base_url = Column(String(500), nullable=True)
+    unomi_username = Column(String(255), nullable=True)
+    unomi_password = Column(String(255), nullable=True)
+    unomi_scope = Column(String(100), nullable=True)
+
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())

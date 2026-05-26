@@ -10,10 +10,32 @@ from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.schemas.event import EventCreate, UnomiEventCreate
 from app.schemas.transaction import TransactionOut
 from app.schemas.execution import RuleExecutionOut
+from app.services.transaction_protection import transaction_deletion_meta
 from app.services.transaction_service import create_transaction
 
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
+
+
+def _serialize_transaction_out(tx: Transaction) -> dict:
+    meta = transaction_deletion_meta(tx)
+    return {
+        "id": tx.id,
+        "brand": tx.brand,
+        "profile_id": tx.profile_id,
+        "transaction_type": tx.transaction_type,
+        "transaction_id": tx.transaction_id,
+        "source": tx.source,
+        "payload": tx.payload,
+        "status": tx.status,
+        "idempotency_key": tx.idempotency_key,
+        "error_code": tx.error_code,
+        "error_message": tx.error_message,
+        "created_at": tx.created_at,
+        "processed_at": tx.processed_at,
+        "can_delete": meta["can_delete"],
+        "is_system_managed": meta["is_system_managed"],
+    }
 
 
 def _resolve_transaction(db: Session, *, active_brand: str, identifier: str) -> Transaction | None:
@@ -85,12 +107,8 @@ def list_transactions(
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
-    return (
-        q.order_by(Transaction.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    rows = q.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
+    return [_serialize_transaction_out(tx) for tx in rows]
 
 
 @router.get("/by-user", response_model=list[TransactionOut])
@@ -114,12 +132,8 @@ def list_transactions_by_user(
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
-    return (
-        q.order_by(Transaction.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    rows = q.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
+    return [_serialize_transaction_out(tx) for tx in rows]
 
 
 @router.get("/by-user-and-type", response_model=list[TransactionOut])
@@ -145,12 +159,8 @@ def list_transactions_by_user_and_type(
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
-    return (
-        q.order_by(Transaction.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    rows = q.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
+    return [_serialize_transaction_out(tx) for tx in rows]
 
 
 @router.get("/{transaction_id}", response_model=TransactionOut)
@@ -162,7 +172,7 @@ def get_transaction(
     tx = _resolve_transaction(db, active_brand=active_brand, identifier=transaction_id)
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    return tx
+    return _serialize_transaction_out(tx)
 
 
 @router.get("/{transaction_id}/executions", response_model=list[RuleExecutionOut])

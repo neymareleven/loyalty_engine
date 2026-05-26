@@ -25,5 +25,8 @@ class TransactionOut(BaseModel):
     created_at: Optional[datetime] = None
     processed_at: Optional[datetime] = None
 
+    can_delete: bool = True
+    is_system_managed: bool = False
+
     class Config:
         from_attributes = True

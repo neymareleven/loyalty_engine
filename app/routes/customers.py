@@ -21,6 +21,7 @@ from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.contact_service import get_or_create_customer
 from app.services.customer_coupon_service import set_customer_coupon_status
+from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
 from app.services.loyalty_status_service import update_customer_status
@@ -580,6 +581,8 @@ def get_customer_loyalty_history(
                 "source": tx.source,
                 "createdAt": tx.created_at,
                 "payload": tx.payload,
+                "canDelete": transaction_deletion_meta(tx)["can_delete"],
+                "isSystemManaged": transaction_deletion_meta(tx)["is_system_managed"],
             }
             for tx in items
         ],

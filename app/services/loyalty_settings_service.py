@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.models.brand_loyalty_settings import BrandLoyaltySettings
 from app.models.event_type import TransactionType
+from app.services.transaction_protection import SYSTEM_MANAGED_TRANSACTION_TYPE_KEYS
 
 
 def get_loyalty_settings(db: Session, *, brand: str) -> BrandLoyaltySettings | None:
@@ -9,43 +10,35 @@ def get_loyalty_settings(db: Session, *, brand: str) -> BrandLoyaltySettings | N
 
 
 def ensure_system_transaction_types(db: Session, *, brand: str) -> None:
+    descriptions = {
+        "TIER_UPGRADED": "System event emitted when the customer's loyalty tier increases.",
+        "TIER_DOWNGRADED": "System event emitted when the customer's loyalty tier decreases.",
+        "TIER_RENEWED": (
+            "System event emitted when the customer's loyalty tier validity window is "
+            "refreshed without a tier change."
+        ),
+        "STATUS_RESET": "System event emitted when status points are reset.",
+        "ADMIN_SET_TIER": "Audit event for manual tier overrides performed via admin UI.",
+        "CUSTOMER_REGISTRATION": (
+            "System event emitted once when a customer is created (first ingestion), not on updates."
+        ),
+    }
+    names = {
+        "TIER_UPGRADED": "Tier upgraded",
+        "TIER_DOWNGRADED": "Tier downgraded",
+        "TIER_RENEWED": "Tier renewed",
+        "STATUS_RESET": "Status reset",
+        "ADMIN_SET_TIER": "Admin set tier",
+        "CUSTOMER_REGISTRATION": "Customer registration",
+    }
     system_types = [
         {
-            "key": "TIER_UPGRADED",
+            "key": key,
             "origin": "INTERNAL",
-            "name": "Tier upgraded",
-            "description": "System event emitted when the customer's loyalty tier increases.",
-        },
-        {
-            "key": "TIER_DOWNGRADED",
-            "origin": "INTERNAL",
-            "name": "Tier downgraded",
-            "description": "System event emitted when the customer's loyalty tier decreases.",
-        },
-        {
-            "key": "TIER_RENEWED",
-            "origin": "INTERNAL",
-            "name": "Tier renewed",
-            "description": "System event emitted when the customer's loyalty tier validity window is refreshed without a tier change.",
-        },
-        {
-            "key": "STATUS_RESET",
-            "origin": "INTERNAL",
-            "name": "Status reset",
-            "description": "System event emitted when status points are reset.",
-        },
-        {
-            "key": "ADMIN_SET_TIER",
-            "origin": "INTERNAL",
-            "name": "Admin set tier",
-            "description": "Audit event for manual tier overrides performed via admin UI.",
-        },
-        {
-            "key": "CUSTOMER_REGISTRATION",
-            "origin": "INTERNAL",
-            "name": "Customer registration",
-            "description": "System event emitted once when a customer is created (first ingestion), not on updates.",
-        },
+            "name": names[key],
+            "description": descriptions[key],
+        }
+        for key in sorted(SYSTEM_MANAGED_TRANSACTION_TYPE_KEYS)
     ]
 
     for st in system_types:

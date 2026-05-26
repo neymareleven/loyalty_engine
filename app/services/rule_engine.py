@@ -14,7 +14,7 @@ from app.models.point_movement import PointMovement
 from app.models.customer_reward import CustomerReward
 from app.models.customer_metrics import CustomerMetrics
 from app.models.product import Product
-from app.models.segment_member import SegmentMember
+from app.services.segment_membership_service import is_customer_in_any_segment
 from app.services.contact_service import get_customer
 from app.services.loyalty_service import earn_points, burn_points
 from app.services.reward_service import issue_reward
@@ -801,13 +801,7 @@ def process_transaction_rules(db: Session, transaction):
             if seg_ids:
                 seg_ids = [s for s in seg_ids if s is not None]
             if seg_ids:
-                exists = (
-                    db.query(SegmentMember.customer_id)
-                    .filter(SegmentMember.customer_id == customer.id)
-                    .filter(SegmentMember.segment_id.in_(seg_ids))
-                    .first()
-                )
-                if not exists:
+                if not is_customer_in_any_segment(db, customer=customer, segment_ids=seg_ids):
                     execution = TransactionRuleExecution(
                         transaction_id=transaction.id,
                         rule_id=rule.id,

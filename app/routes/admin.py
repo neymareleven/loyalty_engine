@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -26,6 +27,7 @@ from app.services.reward_service import expire_rewards
 from app.services.coupon_service import expire_coupons
 from app.services.loyalty_settings_service import get_or_create_loyalty_settings
 from app.services.loyalty_validity_service import initialize_validity_windows_for_existing_customers
+from app.services.transaction_protection import delete_transaction_if_allowed
 from app.schemas.loyalty_settings import LoyaltySettingsOut, LoyaltySettingsUpdate
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
 from app.schemas.rule import RuleCreate, RuleUpdate
@@ -37,6 +39,31 @@ from app.schemas.rule_action_catalog import (
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _resolve_admin_transaction(db: Session, *, brand: str, identifier: str) -> Transaction | None:
+    try:
+        tx_uuid = uuid.UUID(str(identifier))
+    except Exception:
+        tx_uuid = None
+    q = db.query(Transaction).filter(Transaction.brand == brand)
+    if tx_uuid is not None:
+        return q.filter(Transaction.id == tx_uuid).first()
+    return q.filter(Transaction.transaction_id == identifier).first()
+
+
+@router.delete("/transactions/{transaction_id}")
+def delete_transaction_admin(
+    transaction_id: str,
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    tx = _resolve_admin_transaction(db, brand=brand, identifier=transaction_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    delete_transaction_if_allowed(db, tx)
+    db.commit()
+    return {"deleted": True}
 
 
 @router.get("/loyalty-settings", response_model=LoyaltySettingsOut)

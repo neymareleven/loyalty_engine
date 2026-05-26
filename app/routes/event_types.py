@@ -7,24 +7,13 @@ from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.event_type import TransactionType
 from app.schemas.event_type import TransactionTypeCreate, TransactionTypeOut, TransactionTypeUpdate
+from app.services.transaction_protection import (
+    assert_transaction_type_deletable,
+    assert_transaction_type_mutable,
+)
 
 
 router = APIRouter(prefix="/admin/transaction-types", tags=["admin-transaction-types"])
-
-
-def _is_system_transaction_type(obj: TransactionType) -> bool:
-    if not obj:
-        return False
-    if obj.origin != "INTERNAL":
-        return False
-    desc = (obj.description or "").strip()
-    return desc.startswith("System event emitted")
-
-
-def _is_hidden_transaction_type(obj: TransactionType) -> bool:
-    if not obj:
-        return False
-    return obj.key == "ADMIN_SET_TIER"
 
 
 def _slug_key(value: str) -> str:
@@ -137,8 +126,7 @@ def update_transaction_type(
     if obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Transaction type not found")
 
-    if _is_hidden_transaction_type(obj) or _is_system_transaction_type(obj):
-        raise HTTPException(status_code=403, detail="This transaction type is managed by the system and cannot be modified")
+    assert_transaction_type_mutable(obj)
 
     data = payload.model_dump(exclude_unset=True)
     if "brand" in data and data["brand"] is not None and data["brand"] != active_brand:
@@ -180,8 +168,7 @@ def delete_transaction_type(
     if obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Transaction type not found")
 
-    if _is_hidden_transaction_type(obj) or _is_system_transaction_type(obj):
-        raise HTTPException(status_code=403, detail="This transaction type is managed by the system and cannot be deleted")
+    assert_transaction_type_deletable(obj)
 
     db.delete(obj)
     db.commit()

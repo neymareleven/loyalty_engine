@@ -34,13 +34,19 @@
  
  The app reads environment variables from `.env` (via `python-dotenv`).
  
- Required:
- 
- - `DATABASE_URL`
-   - Example:
-     - `postgresql://postgres:postgres@localhost:5432/loyalty_engine`
- 
- ## Database & migrations
+Required:
+
+- `DATABASE_URL`
+  - Example:
+    - `postgresql://postgres:postgres@localhost:5432/loyalty_engine`
+
+ Optional (segmentation Unomi — see `.env.example`) :
+
+- `UNOMI_BASE_URL`, `UNOMI_USERNAME`, `UNOMI_PASSWORD` — suffisent pour **toutes** les marques
+- Marque courante : toujours `X-Brand` / `?brand=` (rien à lister dans le `.env`)
+- Optionnel : `UNOMI_INTERNAL_BRANDS` (exclusions) ou `UNOMI_BRANDS` (opt-in restreint)
+
+## Database & migrations
  
  Alembic is configured (see `alembic.ini`, `alembic/env.py`). Apply migrations with:
  
@@ -622,7 +628,46 @@ alembic upgrade head
 
  ## Segmentation
 
+ **Guide intégration frontend (INTERNAL + Unomi)** : [docs/SEGMENTS_FRONTEND.md](docs/SEGMENTS_FRONTEND.md) — détail Unomi statique (membres + suppression) : [section dédiée](docs/SEGMENTS_FRONTEND.md#unomi--segment-statique--membres-et-suppression)
+
  Segments are brand-scoped customer groups used for targeting:
+
+ ### Modes: INTERNAL vs Unomi (priorité CDP)
+
+ | Mode | Quand | Source de vérité membership |
+ |------|--------|------------------------------|
+ | **INTERNAL** | Marque sans Unomi (`segmentation_mode=INTERNAL`) | Table `segment_members` dans le moteur |
+ | **UNOMI** | Marque avec instance Unomi (`segmentation_mode=UNOMI` + URL/credentials) | Apache Unomi ; le moteur garde un **registre** (`segments.id` UUID) pour rules/jobs |
+
+ Configuration **uniquement via `.env`** (pas de credentials Unomi en base) :
+
+ ```env
+ UNOMI_BASE_URL=https://cdp.example.com:9443
+ UNOMI_USERNAME=karaf
+ UNOMI_PASSWORD=karaf
+ # Pas besoin de UNOMI_BRANDS si toutes les marques partagent ce CDP.
+ # Exceptions seulement (liste courte) :
+ # UNOMI_INTERNAL_BRANDS=demo_sandbox
+ ```
+
+ La marque active vient du **compte utilisateur** via `X-Brand` à chaque appel — pas d’une liste statique de 100 marques dans le `.env`. Le scope Unomi par défaut = clé de cette marque.
+
+ Vérification : `GET /admin/segments/segmentation-mode` + `X-Brand: <marque>` → `unomiPolicy: "all_brands"`, `activeBrand`, `currentBrandUsesUnomi`.
+
+ **Segments manuels Unomi** : pas de table `segment_members` ; chaque ajout pousse le `profileId` Unomi du client dans `manual_profile_ids` et reconstruit la condition Unomi :
+
+ ```text
+ OR( itemId = profileId_1, itemId = profileId_2, … )
+ ```
+
+ C'est le pattern recommandé quand Unomi ne permet pas d'« épingler » un profil sans condition. `POST …/members` et bulk appellent cette synchro automatiquement.
+
+ **Segments dynamiques Unomi** : la condition est stockée côté Unomi (`unomi_condition`) ; le recalcul membership est fait par Unomi (pas `MAINT_RECOMPUTE_SEGMENTS`).
+
+ - `GET /admin/segments/segmentation-mode` — mode actif + connectivité Unomi
+ - `POST /admin/segments/{id}/sync-unomi` — repousse la liste manuelle vers Unomi
+
+ Règles et jobs continuent de référencer le **UUID** du registre moteur ; l'appartenance est résolue via Unomi (`/segments/{id}/match/{profileId}`) ou la liste manuelle.
 
  - Rules (rule only applies if the customer is in one of the segments)
  - Internal Jobs (job processes only customers in the segment)
@@ -634,15 +679,19 @@ alembic upgrade head
 
  ### Segments CRUD
 
- - `GET /admin/segments`
- - `POST /admin/segments`
+ - `GET /admin/segments` — liste enrichie (`member_count`, `needs_recompute`, `can_delete`, …)
+ - `POST /admin/segments` — recalcul auto des segments dynamiques (`?recompute=true` par défaut)
  - `GET /admin/segments/{segment_id}`
- - `PATCH /admin/segments/{segment_id}`
- - `DELETE /admin/segments/{segment_id}`
+ - `PATCH /admin/segments/{segment_id}` — transition `is_dynamic` avec nettoyage membres ; recalcul auto si conditions / activation changent
+ - `DELETE /admin/segments/{segment_id}` — **409** si le segment est référencé par des règles (`segment_ids`) ou des jobs (`segment_id`)
+ - `POST /admin/segments/recompute` — recalcul manuel de tous les segments dynamiques actifs de la marque
+ - `POST /admin/segments/{segment_id}/recompute` — recalcul d’un segment dynamique
 
- UI helper:
+ UI helpers:
 
- - `GET /admin/ui-options/segments`
+ - `GET /admin/ui-options/segments` — liste simple pour sélecteurs
+ - `GET /admin/segments/ui-catalog` — workflow admin (create/update/delete/recompute)
+ - `GET /admin/segments/ui-options/condition-fields` — champs AST **client-only** (`customer.*`, `customer.metrics.*`, `system.*` ; pas de `payload.*`)
 
  ### Static segment membership
 
@@ -663,9 +712,15 @@ Bulk helpers (recommended for multi-select UI):
 
 ### Dynamic segment recomputation
 
- Dynamic segment membership is recomputed by the system-managed internal job:
+ Dynamic segment membership is recomputed by:
 
- - `MAINT_RECOMPUTE_SEGMENTS`
+ - **Automatique** : à la création / mise à jour d’un segment dynamique (query `recompute`, défaut `true`)
+ - **Manuel** : `POST /admin/segments/recompute` ou `POST /admin/segments/{segment_id}/recompute`
+ - **Planifié** : job système `MAINT_RECOMPUTE_SEGMENTS` (cron quotidien par défaut)
+
+ `SegmentOut.needs_recompute` est `true` si le segment est dynamique actif et que `updated_at` (ou l’absence de `last_computed_at`) indique un recalcul nécessaire.
+
+ Les segments dynamiques n’acceptent **pas** de membres `STATIC` (ajout manuel refusé). Au recalcul, d’éventuels membres `STATIC` résiduels sont supprimés. Passage static→dynamic : supprimer les `STATIC` via `?clear_static_on_dynamic=true` ou les retirer avant le PATCH.
 
  The worker process (`python -m app.services.internal_job_scheduler`) must be running for automatic daily recomputation.
 
