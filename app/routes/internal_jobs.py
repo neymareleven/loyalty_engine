@@ -131,6 +131,32 @@ def _resolve_selector_value(*, value, today: date, now_utc: datetime):
     return value
 
 
+def _coerce_bool_flag(value) -> bool | None:
+    """Accept legacy truthy strings from stored job selectors (e.g. \"true\")."""
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in {"true", "1", "yes", "y", "on"}:
+            return True
+        if s in {"false", "0", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _strip_inert_all_any(selector: dict) -> dict:
+    """Remove all/any when truthy so mixed legacy selectors still work."""
+    if not isinstance(selector, dict):
+        return selector
+    out = dict(selector)
+    for key in ("all", "any"):
+        if key in out and _coerce_bool_flag(out.get(key)) is True:
+            del out[key]
+    return out
+
+
 def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
     if not isinstance(field, str) or not field:
         raise HTTPException(status_code=400, detail="Selector leaf requires non-empty 'field'")
@@ -154,6 +180,9 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
             return Customer.status
         if key == "loyalty_status":
             return Customer.loyalty_status
+        if key in {"status_points", "lifetime_points"}:
+            # lifetime_points column removed; jobs may still reference the old field name
+            return Customer.status_points
         if key == "created_at":
             return Customer.created_at
         if key == "last_activity_at":
@@ -221,10 +250,12 @@ def _selector_compare(*, op: str, expr, value):
 def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime):
     if selector is None:
         return None
-    if selector == {}:
-        return None
     if not isinstance(selector, dict):
         raise HTTPException(status_code=400, detail="Invalid selector format: expected object")
+
+    selector = _strip_inert_all_any(selector)
+    if selector == {}:
+        return None
 
     # Strict AST combinators
     if "and" in selector:
@@ -324,7 +355,7 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
         return _selector_compare(op=op, expr=expr, value=value)
 
     # Legacy selector support (backward compatibility)
-    if selector.get("all") is True or selector.get("any") is True:
+    if _coerce_bool_flag(selector.get("all")) is True or _coerce_bool_flag(selector.get("any")) is True:
         return None
 
     if "status_in" in selector:
