@@ -148,3 +148,152 @@ def resolve_unomi_condition_for_segment(
 
         return profile_ids_or_condition(manual_profile_ids or [])
     return loyalty_ast_to_unomi_condition(conditions)
+
+
+# Unomi comparisonOperator -> loyalty operator (subset used by the segment builder).
+_UNOMI_OP_REVERSE = {
+    "equals": "eq",
+    "notEquals": "neq",
+    "greaterThan": "gt",
+    "greaterThanOrEqualTo": "gte",
+    "lessThan": "lt",
+    "lessThanOrEqualTo": "lte",
+    "contains": "contains",
+    "startsWith": "starts_with",
+    "endsWith": "ends_with",
+    "exists": "exists",
+}
+
+
+def _camel_leaf_to_snake(leaf: str) -> str:
+    out: list[str] = []
+    for i, ch in enumerate(leaf):
+        if ch.isupper() and i > 0 and (leaf[i - 1].islower() or (i + 1 < len(leaf) and leaf[i + 1].islower())):
+            out.append("_")
+        out.append(ch.lower())
+    return "".join(out)
+
+
+def _unomi_property_to_customer_field(property_name: str) -> str | None:
+    prop = (property_name or "").strip()
+    if not prop.startswith("properties."):
+        return None
+    rest = prop[len("properties.") :]
+    if rest.startswith("metrics."):
+        return f"customer.metrics.{rest[len('metrics.') :]}"
+    snake_from_camel = {
+        "loyaltyStatus": "loyalty_status",
+        "statusPoints": "status_points",
+        "lastActivityDate": "last_activity_at",
+        "creationDate": "created_at",
+        "birthDate": "birthdate",
+    }
+    if rest in snake_from_camel:
+        return f"customer.{snake_from_camel[rest]}"
+    if "." not in rest:
+        return f"customer.{_camel_leaf_to_snake(rest)}"
+    return None
+
+
+def _unomi_subconditions(node: dict[str, Any]) -> list[dict[str, Any]] | None:
+    params = node.get("parameterValues")
+    if isinstance(params, dict):
+        subs = params.get("subConditions")
+        if isinstance(subs, list):
+            return [x for x in subs if isinstance(x, dict)]
+    subs = node.get("subConditions")
+    if isinstance(subs, list):
+        return [x for x in subs if isinstance(x, dict)]
+    return None
+
+
+def _unomi_property_value(params: dict[str, Any]) -> Any:
+    for key in (
+        "propertyValue",
+        "propertyValueInteger",
+        "propertyValueDouble",
+        "propertyValueDate",
+        "propertyValueBoolean",
+    ):
+        if key in params and params[key] is not None:
+            return params[key]
+    return None
+
+
+def _try_unomi_or_as_in(field: str, subs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Detect OR-of-equals on one property (loyalty 'in' translated to Unomi)."""
+    values: list[Any] = []
+    for sub in subs:
+        if str(sub.get("type") or "") != "profilePropertyCondition":
+            return None
+        params = sub.get("parameterValues") or {}
+        if not isinstance(params, dict):
+            return None
+        if _unomi_property_to_customer_field(str(params.get("propertyName") or "")) != field:
+            return None
+        if str(params.get("comparisonOperator") or "") != "equals":
+            return None
+        values.append(_unomi_property_value(params))
+    if not values:
+        return None
+    return {"field": field, "operator": "in", "value": values}
+
+
+def unomi_condition_to_loyalty_ast(node: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Best-effort inverse of loyalty_ast_to_unomi_condition for CDP → engine UI."""
+    if node is None or not isinstance(node, dict):
+        return None
+    if _is_loyalty_ast(node):
+        return node
+    if not _is_unomi_condition(node):
+        return None
+    try:
+        return _unomi_to_loyalty_node(node)
+    except (ValueError, TypeError):
+        return None
+
+
+def _unomi_to_loyalty_node(node: dict[str, Any]) -> dict[str, Any]:
+    cond_type = str(node.get("type") or "").strip()
+
+    if cond_type == "booleanCondition":
+        params = node.get("parameterValues") or {}
+        if not isinstance(params, dict):
+            raise ValueError("invalid booleanCondition")
+        op = str(params.get("operator") or "").lower()
+        subs = _unomi_subconditions(node) or []
+        if not subs:
+            raise ValueError("booleanCondition without subConditions")
+        if op == "or":
+            field = _unomi_property_to_customer_field(
+                str((subs[0].get("parameterValues") or {}).get("propertyName") or "")
+            )
+            if field:
+                as_in = _try_unomi_or_as_in(field, subs)
+                if as_in:
+                    return as_in
+        key = "and" if op == "and" else "or"
+        return {key: [_unomi_to_loyalty_node(s) for s in subs]}
+
+    if cond_type == "notCondition":
+        subs = _unomi_subconditions(node) or []
+        if len(subs) != 1:
+            raise ValueError("notCondition requires exactly one subCondition")
+        return {"not": _unomi_to_loyalty_node(subs[0])}
+
+    if cond_type == "profilePropertyCondition":
+        params = node.get("parameterValues") or {}
+        if not isinstance(params, dict):
+            raise ValueError("invalid profilePropertyCondition")
+        field = _unomi_property_to_customer_field(str(params.get("propertyName") or ""))
+        if not field:
+            raise ValueError(f"unsupported Unomi property: {params.get('propertyName')}")
+        unomi_op = str(params.get("comparisonOperator") or "")
+        loyalty_op = _UNOMI_OP_REVERSE.get(unomi_op)
+        if not loyalty_op:
+            raise ValueError(f"unsupported Unomi operator: {unomi_op}")
+        if loyalty_op == "exists":
+            return {"field": field, "operator": "exists", "value": True}
+        return {"field": field, "operator": loyalty_op, "value": _unomi_property_value(params)}
+
+    raise ValueError(f"unsupported Unomi condition type: {cond_type}")

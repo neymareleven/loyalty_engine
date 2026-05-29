@@ -2,15 +2,67 @@
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
 from app.models.segment import Segment
 from app.models.segment_member import SegmentMember
-from app.services.segment_membership_service import resolve_unomi_segment_profile_ids
+from app.services.segment_admin_service import segment_needs_recompute
+from app.services.segment_membership_service import unomi_dynamic_uses_engine_membership
+from app.services.segment_service import recompute_dynamic_segment
 from app.services.unomi_segment_service import manual_profile_ids_list
+
+
+def _customer_matches_segment_conditions(db: Session, *, customer: Customer, seg: Segment) -> bool:
+    if not seg.is_dynamic or not seg.conditions:
+        return True
+    from app.services.rule_engine import _evaluate_ast_condition  # noqa: PLC0415
+
+    tx = type("SegTx", (), {"payload": {}, "brand": seg.brand})()
+    try:
+        return bool(
+            _evaluate_ast_condition(db=db, customer=customer, transaction=tx, node=seg.conditions)
+        )
+    except Exception:
+        return False
+
+
+def _enrich_members_payload(
+    db: Session,
+    *,
+    seg: Segment,
+    payload: dict,
+    verify: bool,
+) -> dict:
+    payload["last_computed_at"] = seg.last_computed_at
+    payload["membership_stale"] = segment_needs_recompute(seg)
+    payload["verified"] = bool(verify)
+    payload["page_mismatch_count"] = 0
+
+    if not verify or not seg.is_dynamic or not seg.conditions:
+        return payload
+
+    mismatch = 0
+    for item in payload.get("items") or []:
+        cid = item.get("customer_id")
+        if not cid:
+            item["matches_conditions"] = None
+            continue
+        cust = db.query(Customer).filter(Customer.id == cid, Customer.brand == seg.brand).first()
+        if not cust:
+            item["matches_conditions"] = None
+            continue
+        ok = _customer_matches_segment_conditions(db, customer=cust, seg=seg)
+        item["matches_conditions"] = ok
+        if not ok:
+            mismatch += 1
+    payload["page_mismatch_count"] = mismatch
+    if mismatch:
+        note = payload.get("note") or ""
+        payload["note"] = (
+            f"{note} " if note else ""
+        ) + f"{mismatch} member(s) on this page no longer match conditions (live verify)."
+    return payload
 
 
 def list_segment_members(
@@ -20,10 +72,34 @@ def list_segment_members(
     limit: int = 500,
     offset: int = 0,
     source: str | None = None,
+    refresh: bool = False,
+    verify: bool = False,
 ) -> dict:
-    if getattr(seg, "provider", "INTERNAL") == "UNOMI":
-        return _list_unomi_members(db, seg=seg, limit=limit, offset=offset, source=source)
-    return _list_internal_members(db, seg=seg, limit=limit, offset=offset, source=source)
+    refreshed = False
+    if refresh and seg.is_dynamic and seg.active and seg.conditions is not None:
+        recompute_dynamic_segment(db, segment=seg)
+        refreshed = True
+
+    if unomi_dynamic_uses_engine_membership(seg):
+        effective_source = source
+        if effective_source and effective_source.upper() == "UNOMI":
+            effective_source = "DYNAMIC"
+        payload = _list_internal_members(
+            db, seg=seg, limit=limit, offset=offset, source=effective_source or "DYNAMIC"
+        )
+        payload["provider"] = "UNOMI"
+        payload["unomi_segment_id"] = getattr(seg, "unomi_segment_id", None)
+        payload["note"] = (
+            "Dynamic UNOMI: membership from engine segment_members (AST on customers). "
+            "Use ?refresh=true before listing after condition changes; ?verify=true to audit the page."
+        )
+    elif getattr(seg, "provider", "INTERNAL") == "UNOMI":
+        payload = _list_unomi_members(db, seg=seg, limit=limit, offset=offset, source=source)
+    else:
+        payload = _list_internal_members(db, seg=seg, limit=limit, offset=offset, source=source)
+
+    payload["refreshed"] = refreshed
+    return _enrich_members_payload(db, seg=seg, payload=payload, verify=verify)
 
 
 def _list_internal_members(
@@ -77,12 +153,8 @@ def _list_unomi_members(
     offset: int,
     source: str | None,
 ) -> dict:
-    if seg.is_dynamic:
-        profile_ids = resolve_unomi_segment_profile_ids(db, segment=seg)
-        origin = "unomi_impacted"
-    else:
-        profile_ids = manual_profile_ids_list(seg)
-        origin = "manual_profile_ids"
+    profile_ids = manual_profile_ids_list(seg)
+    origin = "manual_profile_ids"
 
     if source and source.upper() not in ("UNOMI", "STATIC", "DYNAMIC"):
         profile_ids = []
@@ -125,8 +197,5 @@ def _list_unomi_members(
         "limit": limit,
         "offset": offset,
         "items": items,
-        "note": (
-            "Dynamic: members from Unomi impacted/match API. "
-            "Static: manual_profile_ids synced as OR(itemId) condition in Unomi."
-        ),
+        "note": "Static UNOMI: manual_profile_ids synced as OR(itemId) condition in Unomi.",
     }

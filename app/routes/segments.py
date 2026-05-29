@@ -35,8 +35,10 @@ from app.services.unomi_segment_service import (
     create_unomi_segment_mirror,
     delete_unomi_segment,
     remove_customers_from_unomi_manual_segment,
+    sync_unomi_scope_segments_to_registry,
     sync_manual_list_segment_to_unomi,
 )
+from app.services.unomi_client import UnomiClientError
 from app.services.unomi_settings_service import (
     unomi_enabled_for_brand,
     unomi_env_status,
@@ -81,8 +83,8 @@ def get_segments_ui_catalog():
                 "dynamicCreate": "POST /admin/segments { is_dynamic:true, conditions: loyaltyAST } → translated to Unomi",
                 "staticCreate": "POST /admin/segments { is_dynamic:false } → empty OR(itemId) list in Unomi",
                 "staticMembers": "POST …/members adds profileId to manual_profile_ids + sync Unomi",
-                "dynamicMembers": "Unomi evaluates condition; GET …/members calls Unomi impacted API",
-                "recompute": "Not on engine — membership maintained by Unomi",
+                "dynamicMembers": "segment_members source=DYNAMIC (engine AST on customers, same as INTERNAL)",
+                "recompute": "POST …/recompute — membership in engine; condition still synced to CDP",
                 "rulesJobsRef": "Always engine UUID (segment.id), never unomi_segment_id",
             },
         },
@@ -145,13 +147,19 @@ def get_segments_ui_catalog():
             "segmentEndpoint": "POST /admin/segments/{segment_id}/recompute",
             "needsRecomputeField": "needsRecompute",
             "maintenanceJobKey": "MAINT_RECOMPUTE_SEGMENTS",
-            "note": "INTERNAL provider only; Unomi recalculates membership in the CDP.",
+            "note": (
+                "Dynamic membership is always recomputed in the engine (segment_members). "
+                "UNOMI mode still pushes segment definition to the CDP."
+            ),
         },
         "unomi": {
             "segmentationModeEndpoint": "GET /admin/segments/segmentation-mode",
             "manualMemberSync": "POST /admin/segments/{segment_id}/sync-unomi",
             "manualAddSemantics": "Adds customer.profileId to manual_profile_ids and rebuilds Unomi OR(itemId) condition.",
-            "membersList": "GET /admin/segments/{segment_id}/members?limit=&offset= (UNOMI + INTERNAL)",
+            "membersList": (
+                "GET /admin/segments/{segment_id}/members?limit=&offset= "
+                "(all modes; dynamic: ?refresh=true recompute, ?verify=true audit page)"
+            ),
         },
         "rules": {
             "field": "Rule.segment_ids",
@@ -278,10 +286,32 @@ def list_segments(
     active: bool | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Segment).filter(Segment.brand == active_brand)
+    if unomi_enabled_for_brand(brand=active_brand):
+        try:
+            sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
+            db.commit()
+            # Re-query after commit to avoid stale/deleted ORM instances.
+            q = db.query(Segment).filter(Segment.brand == active_brand).filter(Segment.provider == "UNOMI")
+            if active is not None:
+                q = q.filter(Segment.active.is_(active))
+            items = q.order_by(Segment.created_at.desc()).all()
+        except ValueError as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(e))
+        except UnomiClientError as e:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"Unomi segments fetch failed: {e}")
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"Unomi segments sync failed: {e}")
+    else:
+        q = db.query(Segment).filter(Segment.brand == active_brand)
+        if active is not None:
+            q = q.filter(Segment.active.is_(active))
+        items = q.order_by(Segment.created_at.desc()).all()
+
     if active is not None:
-        q = q.filter(Segment.active.is_(active))
-    items = q.order_by(Segment.created_at.desc()).all()
+        items = [seg for seg in items if bool(seg.active) is bool(active)]
     return [serialize_segment_out(db, seg=obj) for obj in items]
 
 
@@ -291,11 +321,6 @@ def recompute_brand_segments(
     batch_size: int = Query(500, ge=1, le=5000),
     db: Session = Depends(get_db),
 ):
-    if unomi_enabled_for_brand(brand=active_brand):
-        raise HTTPException(
-            status_code=400,
-            detail="Brand uses Unomi segmentation; recompute runs in the CDP, not via this endpoint.",
-        )
     stats = recompute_brand_dynamic_segments(db, brand=active_brand, batch_size=batch_size)
     db.commit()
     return stats
@@ -332,6 +357,7 @@ def create_segment(
                 active=payload.active,
                 unomi_condition_override=payload.unomi_condition,
             )
+            trigger_recompute_if_needed(db, seg=obj, recompute=recompute, batch_size=batch_size)
         else:
             obj = Segment(
                 brand=active_brand,
@@ -352,6 +378,12 @@ def create_segment(
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+    except UnomiClientError as e:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Unomi segment create failed: {e}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Unomi segment create failed: {e}")
     db.refresh(obj)
     return serialize_segment_out(db, seg=obj)
 
@@ -455,8 +487,6 @@ def update_segment(
             raise HTTPException(status_code=502, detail=f"Unomi segment update failed: {e}")
 
     should_recompute = (
-        obj.provider != "UNOMI"
-        and
         recompute
         and obj.is_dynamic
         and obj.active
@@ -493,11 +523,6 @@ def recompute_segment(
     obj = db.query(Segment).filter(Segment.id == segment_id).first()
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Segment not found")
-    if obj.provider == "UNOMI":
-        raise HTTPException(
-            status_code=400,
-            detail="Unomi segments are recomputed by the CDP; engine recompute is not applicable.",
-        )
     if not obj.is_dynamic:
         raise HTTPException(status_code=400, detail="Only dynamic segments can be recomputed")
     if not obj.active:
@@ -567,13 +592,52 @@ def list_segment_members(
     source: str | None = None,
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
+    refresh: bool = Query(
+        False,
+        description=(
+            "Dynamic segments only: recompute segment_members from conditions before listing "
+            "(same as POST …/recompute for this segment)."
+        ),
+    ),
+    verify: bool = Query(
+        False,
+        description=(
+            "Dynamic segments only: for each member on this page, re-evaluate conditions live "
+            "and set matches_conditions (audit drift since last_computed_at)."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     seg = db.query(Segment).filter(Segment.id == segment_id).first()
     if not seg or seg.brand != active_brand:
         raise HTTPException(status_code=404, detail="Segment not found")
 
-    return list_segment_members_payload(db, seg=seg, limit=limit, offset=offset, source=source)
+    if refresh and not seg.is_dynamic:
+        raise HTTPException(status_code=400, detail="refresh is only for dynamic segments")
+    if verify and not seg.is_dynamic:
+        raise HTTPException(status_code=400, detail="verify is only for dynamic segments")
+    if refresh and seg.is_dynamic and seg.conditions is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Dynamic segment has no loyalty conditions; cannot refresh membership",
+        )
+
+    try:
+        payload = list_segment_members_payload(
+            db,
+            seg=seg,
+            limit=limit,
+            offset=offset,
+            source=source,
+            refresh=refresh,
+            verify=verify,
+        )
+        if refresh or verify:
+            db.commit()
+        return payload
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/{segment_id}/members", response_model=SegmentMemberOut)

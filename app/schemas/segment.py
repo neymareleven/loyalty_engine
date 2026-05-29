@@ -67,6 +67,8 @@ class SegmentOut(BaseModel):
     can_delete: bool = True
     recommended_action: Optional[str] = None
     needs_recompute: bool = False
+    """loyalty_ast | unomi_only | null — CDP segments may only expose unomi_condition until reverse-translated."""
+    conditions_format: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -113,6 +115,8 @@ class SegmentMemberListItem(BaseModel):
     created_at: Optional[datetime] = None
     membership_origin: Optional[str] = None
     customer_found_in_engine: bool | None = None
+    """Dynamic segments only: live AST check at read time (use with ?verify=true)."""
+    matches_conditions: Optional[bool] = None
 
 
 class SegmentMembersListResponse(BaseModel):
@@ -125,3 +129,8 @@ class SegmentMembersListResponse(BaseModel):
     offset: int
     items: list[SegmentMemberListItem]
     note: str | None = None
+    last_computed_at: Optional[datetime] = None
+    membership_stale: bool = False
+    refreshed: bool = False
+    verified: bool = False
+    page_mismatch_count: int = 0

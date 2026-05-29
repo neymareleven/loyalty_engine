@@ -14,7 +14,7 @@ from app.models.rule import Rule
 from app.models.segment import Segment
 from app.models.segment_member import SegmentMember
 from app.services.segment_service import recompute_dynamic_segment, recompute_dynamic_segments_for_brand
-from app.services.segment_membership_service import resolve_unomi_segment_profile_ids
+from app.services.segment_membership_service import unomi_dynamic_uses_engine_membership
 from app.services.unomi_segment_service import manual_profile_ids_list
 
 
@@ -22,7 +22,7 @@ def segment_member_counts(db: Session, *, segment_id: UUID, seg: Segment | None 
     if seg is None:
         seg = db.query(Segment).filter(Segment.id == segment_id).first()
 
-    if seg and getattr(seg, "provider", "INTERNAL") == "UNOMI":
+    if seg and getattr(seg, "provider", "INTERNAL") == "UNOMI" and not unomi_dynamic_uses_engine_membership(seg):
         manual = len(manual_profile_ids_list(seg))
         return {
             "member_count": manual,
@@ -47,8 +47,6 @@ def segment_member_counts(db: Session, *, segment_id: UUID, seg: Segment | None 
 
 
 def segment_needs_recompute(seg: Segment) -> bool:
-    if getattr(seg, "provider", "INTERNAL") == "UNOMI":
-        return False
     if not seg.is_dynamic or not seg.active:
         return False
     if seg.last_computed_at is None:
@@ -129,6 +127,14 @@ def serialize_segment_out(db: Session, *, seg: Segment) -> dict:
     counts = segment_member_counts(db, segment_id=seg.id, seg=seg)
     refs = segment_deletion_meta(db, seg=seg)
     needs = segment_needs_recompute(seg)
+    has_loyalty_ast = seg.conditions is not None
+    has_unomi = getattr(seg, "unomi_condition", None) is not None
+    if has_loyalty_ast:
+        conditions_format = "loyalty_ast"
+    elif has_unomi:
+        conditions_format = "unomi_only"
+    else:
+        conditions_format = None
     return {
         "id": seg.id,
         "brand": seg.brand,
@@ -151,6 +157,7 @@ def serialize_segment_out(db: Session, *, seg: Segment) -> dict:
         "can_delete": refs["can_delete"],
         "recommended_action": refs["recommended_action"],
         "needs_recompute": needs,
+        "conditions_format": conditions_format,
     }
 
 

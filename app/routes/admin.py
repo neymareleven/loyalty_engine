@@ -25,7 +25,7 @@ from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.reward_service import expire_rewards
 from app.services.coupon_service import expire_coupons
-from app.services.loyalty_settings_service import get_or_create_loyalty_settings
+from app.services.loyalty_settings_service import ensure_brand_transaction_catalog, get_or_create_loyalty_settings
 from app.services.loyalty_validity_service import initialize_validity_windows_for_existing_customers
 from app.services.transaction_protection import delete_transaction_if_allowed
 from app.schemas.loyalty_settings import LoyaltySettingsOut, LoyaltySettingsUpdate
@@ -1024,6 +1024,9 @@ def list_ui_options_transaction_types(
     origin: str | None = None,
     db: Session = Depends(get_db),
 ):
+    ensure_brand_transaction_catalog(db, brand=brand)
+    db.flush()
+
     q = db.query(TransactionType).filter(TransactionType.brand == brand)
     q = q.filter(TransactionType.key != "ADMIN_SET_TIER")
     if active is not None:

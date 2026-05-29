@@ -25,6 +25,7 @@ from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
 from app.services.loyalty_status_service import update_customer_status
+from app.services.wallet_service import get_status_points_balance
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])

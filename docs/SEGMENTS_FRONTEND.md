@@ -14,6 +14,12 @@ X-Brand: batira
 
 Réponse clé : `segmentationMode` (`INTERNAL` | `UNOMI`), `currentBrandUsesUnomi`, `unomiPolicy`, `activeBrand`.
 
+### Garantie brand context (important)
+
+- La marque utilisée est **toujours** la marque courante du header `X-Brand` (ou `?brand=`), pas une marque codée en dur.
+- En mode Unomi, le backend résout le `scope` Unomi depuis cette marque (`unomiScope` dans `segmentation-mode`).
+- Changer de marque côté UI => toutes les lectures/écritures segments changent de contexte automatiquement.
+
 Catalogue UI machine-readable :
 
 ```http
@@ -31,6 +37,20 @@ GET /admin/segments/ui-catalog
 | **unomi_segment_id** | Identifiant du segment dans Unomi (`metadata.id`), ex. `loyalty-batira-vip`. |
 | **Segment statique** | `is_dynamic: false` — membres gérés manuellement. |
 | **Segment dynamique** | `is_dynamic: true` — membres calculés par des **conditions**. |
+| **conditions_format** | `loyalty_ast` (builder UI) ou `unomi_only` (segment CDP non traduisible — voir `unomi_condition`). |
+
+### Segments importés depuis le CDP (liste `GET /admin/segments`)
+
+En mode Unomi, la liste **synchronise** le registre depuis le CDP (`metadata.scope` = marque). Chaque ligne `SegmentOut` expose :
+
+| Champ | Segment créé dans le moteur | Segment créé dans le CDP |
+|-------|----------------------------|---------------------------|
+| `conditions` | AST loyalty (`customer.*`) | Rempli si traduction inverse réussie, sinon `null` |
+| `unomi_condition` | JSON poussé au CDP | JSON tel que dans Unomi |
+| `conditions_format` | `loyalty_ast` | `loyalty_ast` ou `unomi_only` |
+| `id` | UUID moteur (rules/jobs) | UUID attribué à l’import |
+
+L’UI du builder doit utiliser **`conditions`** quand `conditions_format === "loyalty_ast"`. Si `unomi_only`, afficher un message ou un éditeur JSON sur `unomi_condition` (types Unomi non supportés par le traducteur).
 
 ---
 
@@ -122,6 +142,45 @@ Réponse liste (`SegmentMembersListResponse`) : `total`, `items[]` avec `custome
 - **Pas d'ajout manuel** : `POST …/members` → **400**.
 - **Recalcul** : `POST /admin/segments/{id}/recompute` ou `POST /admin/segments/recompute`.
 
+### Consulter / auditer les membres (tous modes)
+
+**Une seule route** pour statique, dynamique, INTERNAL et UNOMI :
+
+```http
+GET /admin/segments/{segment_id}/members?limit=100&offset=0
+X-Brand: <marque>
+```
+
+| Type | Source des membres |
+|------|-------------------|
+| Dynamique (INTERNAL ou UNOMI) | Table `segment_members` (`source=DYNAMIC`) après recalcul |
+| Statique INTERNAL | `segment_members` (`source=STATIC`) |
+| Statique UNOMI | `manual_profile_ids` (+ résolution `customer_id`) |
+
+**Paramètres optionnels (segments dynamiques avec `conditions`)** :
+
+| Query | Effet |
+|-------|--------|
+| `refresh=true` | Recalcule la liste (`POST …/recompute` équivalent) **puis** renvoie les membres à jour |
+| `verify=true` | Pour chaque ligne de la **page**, réévalue l’AST sur le client **maintenant** → `matches_conditions` |
+
+Exemple écran d’audit :
+
+```http
+GET /admin/segments/{id}/members?limit=500&offset=0&refresh=true&verify=true
+```
+
+Champs utiles dans la réponse :
+
+- `total`, `items[]` (`customer_id`, `profile_id`, `source`, `computed_at`)
+- `last_computed_at`, `membership_stale` (= `needsRecompute` sur le segment)
+- `refreshed` : un recalcul vient d’être fait
+- `verified` : vérification live activée
+- `page_mismatch_count` : nombre de membres sur la page qui **ne matchent plus** les conditions (données client changées depuis le dernier recalcul)
+- `items[].matches_conditions` : `true` / `false` / `null` (si pas de `customer_id` en base)
+
+**Workflow UI recommandé** : bouton « Voir les membres » → `GET …/members` ; si `membership_stale` ou liste vide → proposer « Actualiser » (`refresh=true`) ; option « Vérifier les conditions » (`verify=true`).
+
 ---
 
 ## UNOMI (CDP configuré dans `.env`)
@@ -146,9 +205,9 @@ POST /admin/segments
 ```
 
 - Le moteur **traduit** l'AST loyalty → condition Unomi et crée le segment dans le CDP.
-- `conditions` reste stocké côté moteur (affichage UI).
+- `conditions` reste stocké côté moteur (affichage UI + **recalcul membership**).
 - `unomi_condition` dans la réponse = JSON Unomi poussé au CDP.
-- **Pas de** `POST …/recompute` (400) — le CDP recalcule les profils.
+- **Recalcul membership** : comme INTERNAL (`segment_members`, `source=DYNAMIC`) — `POST …/recompute` ou job `MAINT_RECOMPUTE_SEGMENTS`. Le CDP ne fait pas foi pour le décompte affiché.
 
 Alternative : envoyer directement du JSON Unomi :
 
@@ -212,9 +271,9 @@ En résumé : mêmes routes `/members` que INTERNAL, mais stockage dans `manual_
 GET /admin/segments/{segment_id}/members?limit=100&offset=0
 ```
 
-- Interroge Unomi (`/segments/{id}/impacted` + fallback match).
-- `items[].profile_id` toujours renseigné ; `customer_id` si le client existe dans le moteur.
-- `customer_found_in_engine: false` → profil Unomi sans fiche `customers` locale.
+- Lit `segment_members` (`source=DYNAMIC`) après recalcul moteur — **pas** l'API Unomi impacted.
+- `items[].customer_id` et `profile_id` depuis la table `customers`.
+- Recalcul : `POST /admin/segments/{id}/recompute?` ou `POST /admin/segments/recompute` (création avec `?recompute=true` par défaut).
 
 Pas d'ajout/suppression manuelle (400).
 
@@ -515,6 +574,15 @@ GET /admin/segments
 GET /admin/segments/{segment_id}
 ```
 
+En mode `UNOMI`, `GET /admin/segments` est aligné sur la CDP :
+
+- lecture des segments Unomi,
+- filtre par `metadata.scope == X-Brand` (scope effectif),
+- synchronisation du registre local (UUID moteur conservé pour rules/jobs),
+- retour JSON `SegmentOut` inchangé pour l'UI (même structure qu'avant).
+
+👉 Donc l'UI récupère bien tous les segments de la marque courante (scope courant), sans changer le contrat de réponse.
+
 `SegmentOut` champs utiles UI :
 
 | Champ | Usage |
@@ -634,3 +702,38 @@ X-Brand: ...
 ```
 
 Champs `customer.*` et `customer.metrics.*` uniquement (pas `payload.*`).
+
+---
+
+## Smoke test automatisé (Unomi)
+
+Script fourni : `scripts/smoke_unomi_segments.py`
+
+Il valide en chaîne (brand courante) :
+
+1. `segmentation-mode` en `UNOMI`
+2. création segment statique
+3. création segment dynamique
+4. liste + détail segments via backend
+5. add/list/remove membre statique
+6. `sync-unomi`
+7. update dynamique (`unomi_condition`)
+8. vérification directe dans Unomi (`scope == X-Brand`)
+9. suppression + vérification suppression CDP
+
+Exécution :
+
+```bash
+python scripts/smoke_unomi_segments.py --x-brand batira
+```
+
+Options utiles :
+
+- `--backend-base-url` (défaut `http://127.0.0.1:8000`)
+- `--api-username` / `--api-password`
+- `--unomi-base-url` / `--unomi-username` / `--unomi-password`
+
+Notes :
+
+- Le script charge `.env` automatiquement.
+- Le backend doit être démarré avant exécution.

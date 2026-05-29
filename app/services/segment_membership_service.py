@@ -9,7 +9,24 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer
 from app.models.segment import Segment
 from app.models.segment_member import SegmentMember
-from app.services.unomi_segment_service import get_unomi_client, manual_profile_ids_list
+from app.services.unomi_segment_service import manual_profile_ids_list
+
+
+def unomi_dynamic_uses_engine_membership(segment: Segment) -> bool:
+    """UNOMI dynamic segments: membership computed in the engine (same as INTERNAL)."""
+    return (getattr(segment, "provider", None) or "INTERNAL") == "UNOMI" and bool(segment.is_dynamic)
+
+
+def _dynamic_segment_profile_ids(db: Session, *, segment: Segment) -> list[str]:
+    rows = (
+        db.query(Customer.profile_id)
+        .join(SegmentMember, SegmentMember.customer_id == Customer.id)
+        .filter(SegmentMember.segment_id == segment.id)
+        .filter(SegmentMember.source == "DYNAMIC")
+        .filter(Customer.brand == segment.brand)
+        .all()
+    )
+    return sorted({str(pid).strip() for (pid,) in rows if pid and str(pid).strip()})
 
 
 def is_customer_in_segment(db: Session, *, customer: Customer, segment: Segment) -> bool:
@@ -56,6 +73,12 @@ def filter_customers_by_segment(
     customer_query,
 ):
     """Apply segment filter to a Customer query (for internal jobs)."""
+    if unomi_dynamic_uses_engine_membership(segment):
+        return customer_query.join(SegmentMember, SegmentMember.customer_id == Customer.id).filter(
+            SegmentMember.segment_id == segment.id,
+            SegmentMember.source == "DYNAMIC",
+        )
+
     if getattr(segment, "provider", "INTERNAL") == "UNOMI":
         profile_ids = resolve_unomi_segment_profile_ids(db, segment=segment)
         if not profile_ids:
@@ -68,55 +91,24 @@ def filter_customers_by_segment(
 
 
 def resolve_unomi_segment_profile_ids(db: Session, *, segment: Segment) -> list[str]:
-    """Profile IDs for targeting: manual list + Unomi impacted (union)."""
-    ids = set(manual_profile_ids_list(segment))
-
-    if segment.unomi_segment_id:
-        client = get_unomi_client(db, brand=segment.brand)
-        if client:
-            try:
-                ids.update(client.get_impacted_profile_ids(segment.unomi_segment_id))
-            except Exception:
-                pass
-            if not ids and segment.unomi_segment_id:
-                for cust in db.query(Customer.profile_id).filter(Customer.brand == segment.brand).all():
-                    pid = (cust.profile_id or "").strip()
-                    if not pid:
-                        continue
-                    try:
-                        if client.is_profile_in_segment(profile_id=pid, segment_id=segment.unomi_segment_id):
-                            ids.add(pid)
-                    except Exception:
-                        continue
-                    if len(ids) >= 500:
-                        break
-
-    return sorted(ids)
+    """Profile IDs for UNOMI static segments (manual_profile_ids only)."""
+    if unomi_dynamic_uses_engine_membership(segment):
+        return _dynamic_segment_profile_ids(db, segment=segment)
+    return manual_profile_ids_list(segment)
 
 
 def _is_customer_in_unomi_segment(db: Session, *, customer: Customer, segment: Segment) -> bool:
-    pid = (customer.profile_id or "").strip()
-    if not pid:
-        return False
-
-    manual = manual_profile_ids_list(segment)
-    if pid in manual:
-        return True
-
-    if not segment.unomi_segment_id:
-        return False
-
-    client = get_unomi_client(db, brand=segment.brand)
-    if not client:
+    if unomi_dynamic_uses_engine_membership(segment):
         return (
             db.query(SegmentMember.customer_id)
             .filter(SegmentMember.segment_id == segment.id)
             .filter(SegmentMember.customer_id == customer.id)
+            .filter(SegmentMember.source == "DYNAMIC")
             .first()
             is not None
         )
 
-    try:
-        return client.is_profile_in_segment(profile_id=pid, segment_id=segment.unomi_segment_id)
-    except Exception:
-        return pid in manual
+    pid = (customer.profile_id or "").strip()
+    if not pid:
+        return False
+    return pid in manual_profile_ids_list(segment)

@@ -662,10 +662,11 @@ alembic upgrade head
 
  C'est le pattern recommandé quand Unomi ne permet pas d'« épingler » un profil sans condition. `POST …/members` et bulk appellent cette synchro automatiquement.
 
- **Segments dynamiques Unomi** : la condition est stockée côté Unomi (`unomi_condition`) ; le recalcul membership est fait par Unomi (pas `MAINT_RECOMPUTE_SEGMENTS`).
+ **Segments dynamiques Unomi** : la définition (`unomi_condition`) est poussée au CDP ; le **membership** est recalculé dans le moteur (`segment_members`, AST sur `customers`, comme INTERNAL) via `POST …/recompute` ou `MAINT_RECOMPUTE_SEGMENTS`.
 
  - `GET /admin/segments/segmentation-mode` — mode actif + connectivité Unomi
  - `POST /admin/segments/{id}/sync-unomi` — repousse la liste manuelle vers Unomi
+- Smoke test E2E Unomi : `python scripts/smoke_unomi_segments.py --x-brand <brand>`
 
  Règles et jobs continuent de référencer le **UUID** du registre moteur ; l'appartenance est résolue via Unomi (`/segments/{id}/match/{profileId}`) ou la liste manuelle.
 

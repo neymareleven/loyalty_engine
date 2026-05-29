@@ -7,6 +7,7 @@ from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.event_type import TransactionType
 from app.schemas.event_type import TransactionTypeCreate, TransactionTypeOut, TransactionTypeUpdate
+from app.services.loyalty_settings_service import ensure_brand_transaction_catalog
 from app.services.transaction_protection import (
     assert_transaction_type_deletable,
     assert_transaction_type_mutable,
@@ -45,6 +46,10 @@ def list_transaction_types(
     q = db.query(TransactionType)
     if brand is not None and brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
+
+    ensure_brand_transaction_catalog(db, brand=active_brand)
+    db.flush()
+
     if include_global:
         q = q.filter((TransactionType.brand == active_brand) | (TransactionType.brand.is_(None)))
     else:

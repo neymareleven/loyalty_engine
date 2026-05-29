@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
 from app.models.segment import Segment
-from app.services.segment_condition_unomi import resolve_unomi_condition_for_segment
+from app.services.segment_condition_unomi import (
+    resolve_unomi_condition_for_segment,
+    unomi_condition_to_loyalty_ast,
+)
 from app.services.unomi_client import UnomiClient, UnomiClientError
 from app.services.unomi_settings_service import UnomiConnectionConfig, resolve_unomi_connection
 
@@ -104,6 +107,163 @@ def manual_profile_ids_list(seg: Segment) -> list[str]:
 
 def set_manual_profile_ids(seg: Segment, profile_ids: list[str]) -> None:
     seg.manual_profile_ids = sorted({str(p).strip() for p in profile_ids if str(p).strip()})
+
+
+def _manual_profile_ids_from_unomi_condition(condition: dict[str, Any] | None) -> list[str] | None:
+    if not isinstance(condition, dict):
+        return None
+
+    cond_type = str(condition.get("type") or "").strip()
+    params = condition.get("parameterValues") or {}
+    if not isinstance(params, dict):
+        return None
+
+    if cond_type == "profilePropertyCondition":
+        if str(params.get("propertyName") or "") != "itemId":
+            return None
+        if str(params.get("comparisonOperator") or "") != "equals":
+            return None
+        value = str(params.get("propertyValue") or "").strip()
+        if not value or value == "__no_profiles__":
+            return []
+        return [value]
+
+    if cond_type != "booleanCondition":
+        return None
+    if str(params.get("operator") or "").lower() != "or":
+        return None
+
+    sub = params.get("subConditions")
+    if not isinstance(sub, list):
+        return None
+    out: list[str] = []
+    for item in sub:
+        if not isinstance(item, dict):
+            return None
+        item_type = str(item.get("type") or "").strip()
+        if item_type != "profilePropertyCondition":
+            return None
+        item_params = item.get("parameterValues") or {}
+        if not isinstance(item_params, dict):
+            return None
+        if str(item_params.get("propertyName") or "") != "itemId":
+            return None
+        if str(item_params.get("comparisonOperator") or "") != "equals":
+            return None
+        value = str(item_params.get("propertyValue") or "").strip()
+        if not value or value == "__no_profiles__":
+            continue
+        out.append(value)
+    return sorted({x for x in out if x})
+
+
+def sync_unomi_scope_segments_to_registry(
+    db: Session,
+    *,
+    brand: str,
+    keep_orphans: bool = True,
+) -> list[Segment]:
+    """Sync local segment registry from Unomi scope (source of truth in UNOMI mode)."""
+    client = get_unomi_client(db, brand=brand)
+    cfg = resolve_unomi_connection(brand=brand)
+    if not client or not cfg:
+        raise ValueError("Unomi is not configured for this brand")
+
+    target_scope = (cfg.scope or brand).strip()
+    local_by_unomi_id = {
+        (seg.unomi_segment_id or "").strip(): seg
+        for seg in db.query(Segment).filter(Segment.brand == brand).filter(Segment.provider == "UNOMI").all()
+        if (seg.unomi_segment_id or "").strip()
+    }
+
+    remote_segments: list[dict[str, Any]] = []
+    offset = 0
+    size = 200
+    while True:
+        page = client.list_segment_metadata(offset=offset, size=size)
+        if not page:
+            break
+        remote_segments.extend(page)
+        if len(page) < size:
+            break
+        offset += size
+
+    synced_ids: set[str] = set()
+    synced_rows: list[Segment] = []
+
+    for item in remote_segments:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") or item
+        if not isinstance(metadata, dict):
+            continue
+        unomi_id = str(metadata.get("id") or "").strip()
+        if not unomi_id:
+            continue
+        scope = str(metadata.get("scope") or "").strip()
+        if scope != target_scope:
+            continue
+
+        full = client.get_segment(unomi_id)
+        if not isinstance(full, dict):
+            continue
+        full_meta = full.get("metadata") if isinstance(full.get("metadata"), dict) else metadata
+        condition = full.get("condition") if isinstance(full.get("condition"), dict) else None
+
+        name = str((full_meta or {}).get("name") or metadata.get("name") or unomi_id).strip() or unomi_id
+        description = str((full_meta or {}).get("description") or metadata.get("description") or "").strip() or None
+        active_raw = (full_meta or {}).get("enabled", metadata.get("enabled", True))
+        active = bool(active_raw) if active_raw is not None else True
+
+        existing = local_by_unomi_id.get(unomi_id)
+        manual_ids = _manual_profile_ids_from_unomi_condition(condition)
+        is_manual = manual_ids is not None
+        loyalty_conditions = None
+        if not is_manual and condition:
+            loyalty_conditions = unomi_condition_to_loyalty_ast(condition)
+
+        if existing is None:
+            existing = Segment(
+                brand=brand,
+                name=name,
+                description=description,
+                is_dynamic=not is_manual,
+                conditions=loyalty_conditions,
+                active=active,
+                provider="UNOMI",
+                unomi_segment_id=unomi_id,
+                unomi_scope=scope,
+                manual_profile_ids=manual_ids or None,
+                unomi_condition=condition,
+            )
+            db.add(existing)
+            local_by_unomi_id[unomi_id] = existing
+        else:
+            existing.name = name
+            existing.description = description
+            existing.unomi_scope = scope
+            existing.active = active
+            existing.unomi_condition = condition
+            if is_manual:
+                existing.is_dynamic = False
+                existing.manual_profile_ids = manual_ids or None
+            else:
+                existing.is_dynamic = True
+                if existing.manual_profile_ids:
+                    existing.manual_profile_ids = None
+                if existing.conditions is None and loyalty_conditions is not None:
+                    existing.conditions = loyalty_conditions
+
+        synced_ids.add(unomi_id)
+        synced_rows.append(existing)
+
+    if not keep_orphans:
+        for unomi_id, seg in local_by_unomi_id.items():
+            if unomi_id not in synced_ids:
+                db.delete(seg)
+
+    db.flush()
+    return sorted(synced_rows, key=lambda s: (s.name or "").lower())
 
 
 def sync_manual_list_segment_to_unomi(db: Session, *, seg: Segment) -> dict[str, Any]:
