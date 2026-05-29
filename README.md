@@ -34,19 +34,19 @@
  
  The app reads environment variables from `.env` (via `python-dotenv`).
  
-Required:
-
-- `DATABASE_URL`
-  - Example:
-    - `postgresql://postgres:postgres@localhost:5432/loyalty_engine`
-
+ Required:
+ 
+ - `DATABASE_URL`
+   - Example:
+     - `postgresql://postgres:postgres@localhost:5432/loyalty_engine`
+ 
  Optional (segmentation Unomi — see `.env.example`) :
 
 - `UNOMI_BASE_URL`, `UNOMI_USERNAME`, `UNOMI_PASSWORD` — suffisent pour **toutes** les marques
 - Marque courante : toujours `X-Brand` / `?brand=` (rien à lister dans le `.env`)
 - Optionnel : `UNOMI_INTERNAL_BRANDS` (exclusions) ou `UNOMI_BRANDS` (opt-in restreint)
 
-## Database & migrations
+ ## Database & migrations
  
  Alembic is configured (see `alembic.ini`, `alembic/env.py`). Apply migrations with:
  

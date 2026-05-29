@@ -41,7 +41,17 @@ GET /admin/segments/ui-catalog
 
 ### Segments importés depuis le CDP (liste `GET /admin/segments`)
 
-En mode Unomi, la liste **synchronise** le registre depuis le CDP (`metadata.scope` = marque). Chaque ligne `SegmentOut` expose :
+En mode Unomi, la liste lit le **registre local** par défaut (rapide). La synchro CDP est **optionnelle** :
+
+```http
+GET /admin/segments?sync_unomi=true
+```
+
+Sans `sync_unomi=true`, le CDP n’est pas appelé (`X-Unomi-Sync: skipped`). Utile pour éviter les timeouts (la synchro complète peut prendre ~1 min sur beaucoup de segments).
+
+Après sync réussie : en-tête `X-Unomi-Sync: ok`. Si le CDP est injoignable : **200** avec la liste locale + `X-Unomi-Sync: failed` et `X-Unomi-Sync-Detail` (plus de 502 bloquant).
+
+Chaque ligne `SegmentOut` expose :
 
 | Champ | Segment créé dans le moteur | Segment créé dans le CDP |
 |-------|----------------------------|---------------------------|

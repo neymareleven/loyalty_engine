@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from uuid import UUID
 
@@ -157,11 +158,22 @@ def _manual_profile_ids_from_unomi_condition(condition: dict[str, Any] | None) -
     return sorted({x for x in out if x})
 
 
+def _fetch_unomi_segment_definition(cfg: UnomiConnectionConfig, unomi_id: str) -> dict[str, Any] | None:
+    """Thread-safe: one client per fetch (UnomiClient is stateless)."""
+    client = UnomiClient(cfg)
+    try:
+        full = client.get_segment(unomi_id)
+    except UnomiClientError:
+        return None
+    return full if isinstance(full, dict) else None
+
+
 def sync_unomi_scope_segments_to_registry(
     db: Session,
     *,
     brand: str,
     keep_orphans: bool = True,
+    max_workers: int = 8,
 ) -> list[Segment]:
     """Sync local segment registry from Unomi scope (source of truth in UNOMI mode)."""
     client = get_unomi_client(db, brand=brand)
@@ -176,36 +188,50 @@ def sync_unomi_scope_segments_to_registry(
         if (seg.unomi_segment_id or "").strip()
     }
 
-    remote_segments: list[dict[str, Any]] = []
+    scoped_meta: list[tuple[str, dict[str, Any]]] = []
     offset = 0
     size = 200
     while True:
         page = client.list_segment_metadata(offset=offset, size=size)
         if not page:
             break
-        remote_segments.extend(page)
+        for item in page:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else item
+            if not isinstance(metadata, dict):
+                continue
+            unomi_id = str(metadata.get("id") or item.get("id") or "").strip()
+            if not unomi_id:
+                continue
+            scope = str(metadata.get("scope") or "").strip()
+            if scope != target_scope:
+                continue
+            scoped_meta.append((unomi_id, metadata))
         if len(page) < size:
             break
         offset += size
 
+    full_by_id: dict[str, dict[str, Any]] = {}
+    workers = max(1, min(max_workers, len(scoped_meta) or 1))
+    if scoped_meta:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_fetch_unomi_segment_definition, cfg, unomi_id): unomi_id
+                for unomi_id, _ in scoped_meta
+            }
+            for fut in as_completed(futures):
+                unomi_id = futures[fut]
+                full = fut.result()
+                if full:
+                    full_by_id[unomi_id] = full
+
     synced_ids: set[str] = set()
     synced_rows: list[Segment] = []
 
-    for item in remote_segments:
-        if not isinstance(item, dict):
-            continue
-        metadata = item.get("metadata") or item
-        if not isinstance(metadata, dict):
-            continue
-        unomi_id = str(metadata.get("id") or "").strip()
-        if not unomi_id:
-            continue
-        scope = str(metadata.get("scope") or "").strip()
-        if scope != target_scope:
-            continue
-
-        full = client.get_segment(unomi_id)
-        if not isinstance(full, dict):
+    for unomi_id, metadata in scoped_meta:
+        full = full_by_id.get(unomi_id)
+        if not full:
             continue
         full_meta = full.get("metadata") if isinstance(full.get("metadata"), dict) else metadata
         condition = full.get("condition") if isinstance(full.get("condition"), dict) else None

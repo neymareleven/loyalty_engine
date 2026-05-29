@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -282,28 +282,42 @@ def read_segmentation_mode(active_brand: str = Depends(get_active_brand)):
 
 @router.get("", response_model=list[SegmentOut])
 def list_segments(
+    response: Response,
     active_brand: str = Depends(get_active_brand),
     active: bool | None = None,
+    sync_unomi: bool = Query(
+        False,
+        description=(
+            "UNOMI mode only: pull segment definitions from the CDP before listing. "
+            "Can take tens of seconds for many segments; default is local registry only."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     if unomi_enabled_for_brand(brand=active_brand):
-        try:
-            sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
-            db.commit()
-            # Re-query after commit to avoid stale/deleted ORM instances.
-            q = db.query(Segment).filter(Segment.brand == active_brand).filter(Segment.provider == "UNOMI")
-            if active is not None:
-                q = q.filter(Segment.active.is_(active))
-            items = q.order_by(Segment.created_at.desc()).all()
-        except ValueError as e:
-            db.rollback()
-            raise HTTPException(status_code=400, detail=str(e))
-        except UnomiClientError as e:
-            db.rollback()
-            raise HTTPException(status_code=502, detail=f"Unomi segments fetch failed: {e}")
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(status_code=502, detail=f"Unomi segments sync failed: {e}")
+        q = db.query(Segment).filter(Segment.brand == active_brand).filter(Segment.provider == "UNOMI")
+        if sync_unomi:
+            try:
+                sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
+                db.commit()
+                response.headers["X-Unomi-Sync"] = "ok"
+            except ValueError as e:
+                db.rollback()
+                raise HTTPException(status_code=400, detail=str(e))
+            except UnomiClientError as e:
+                db.rollback()
+                response.headers["X-Unomi-Sync"] = "failed"
+                response.headers["X-Unomi-Sync-Detail"] = str(e)[:500]
+            except Exception as e:
+                db.rollback()
+                response.headers["X-Unomi-Sync"] = "failed"
+                response.headers["X-Unomi-Sync-Detail"] = str(e)[:500]
+        else:
+            response.headers["X-Unomi-Sync"] = "skipped"
+
+        if active is not None:
+            q = q.filter(Segment.active.is_(active))
+        items = q.order_by(Segment.created_at.desc()).all()
     else:
         q = db.query(Segment).filter(Segment.brand == active_brand)
         if active is not None:
