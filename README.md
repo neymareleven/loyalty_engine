@@ -40,7 +40,15 @@
    - Example:
      - `postgresql://postgres:postgres@localhost:5432/loyalty_engine`
  
- Optional (segmentation Unomi — see `.env.example`) :
+ Optional CORS (front admin sur Amplify / autre domaine) :
+
+- `CORS_ALLOW_ORIGINS` — origines supplémentaires, séparées par des virgules (ex. `https://uat.amplify.qilinsa.com`)
+- `CORS_ALLOW_ORIGIN_REGEX` — optionnel, ex. `https://([a-z0-9-]+\.)*amplify\.qilinsa\.com` pour tous les sous-domaines Amplify
+
+Par défaut le code autorise déjà `https://uat.amplify.qilinsa.com` et `https://amplify.qilinsa.com`.  
+Si le navigateur affiche une erreur CORS alors que l’API renvoie **502/504** (proxy/nginx), corriger d’abord le backend ou augmenter les timeouts proxy — la réponse d’erreur du proxy n’inclut souvent pas les en-têtes CORS.
+
+Optional (segmentation Unomi — see `.env.example`) :
 
 - `UNOMI_BASE_URL`, `UNOMI_USERNAME`, `UNOMI_PASSWORD` — suffisent pour **toutes** les marques
 - Marque courante : toujours `X-Brand` / `?brand=` (rien à lister dans le `.env`)

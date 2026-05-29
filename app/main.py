@@ -1,6 +1,7 @@
 import base64
 import hmac
 import os
+import re
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,20 +42,59 @@ from app.routes.loyalty_tiers import router as loyalty_tiers_router
 app = FastAPI(title="Loyalty Engine")
 
 # ─── CORS ─────────────────────────────────────────────────────────
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "https://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://127.0.0.1:3000",
+    "https://amplify.qilinsa.com",
+    "https://uat.amplify.qilinsa.com",
+]
+
+
+def _build_cors_origins() -> list[str]:
+    extra = os.getenv("CORS_ALLOW_ORIGINS", "")
+    merged = list(_DEFAULT_CORS_ORIGINS)
+    for origin in extra.split(","):
+        o = origin.strip()
+        if o and o not in merged:
+            merged.append(o)
+    return merged
+
+
+CORS_ALLOWED_ORIGINS = _build_cors_origins()
+# Optional: e.g. https://([a-z0-9-]+\.)*amplify\.qilinsa\.com — set "" to disable regex.
+CORS_ORIGIN_REGEX = (os.getenv("CORS_ALLOW_ORIGIN_REGEX") or "").strip() or None
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://127.0.0.1:3000",
-        "https://amplify.qilinsa.com",
-        "https://uat.amplify.qilinsa.com",
-    ],
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Unomi-Sync", "X-Unomi-Sync-Detail"],
 )
+
+
+def _cors_headers_for_request(request: Request) -> dict[str, str]:
+    """Ensure browser sees CORS on 401/early responses (not only 200 from routes)."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return {}
+    if origin in CORS_ALLOWED_ORIGINS:
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    if CORS_ORIGIN_REGEX and re.fullmatch(CORS_ORIGIN_REGEX, origin):
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    return {}
 
 
 @app.middleware("http")
@@ -75,7 +115,10 @@ async def basic_auth_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=401,
             content={"detail": "Not authenticated"},
-            headers={"WWW-Authenticate": 'Basic realm="Loyalty Engine"'},
+            headers={
+                "WWW-Authenticate": 'Basic realm="Loyalty Engine"',
+                **_cors_headers_for_request(request),
+            },
         )
 
     try:
@@ -86,7 +129,10 @@ async def basic_auth_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=401,
             content={"detail": "Invalid authentication credentials"},
-            headers={"WWW-Authenticate": 'Basic realm="Loyalty Engine"'},
+            headers={
+                "WWW-Authenticate": 'Basic realm="Loyalty Engine"',
+                **_cors_headers_for_request(request),
+            },
         )
 
     if not (
@@ -96,7 +142,10 @@ async def basic_auth_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=401,
             content={"detail": "Invalid authentication credentials"},
-            headers={"WWW-Authenticate": 'Basic realm="Loyalty Engine"'},
+            headers={
+                "WWW-Authenticate": 'Basic realm="Loyalty Engine"',
+                **_cors_headers_for_request(request),
+            },
         )
 
     return await call_next(request)
