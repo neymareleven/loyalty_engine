@@ -54,7 +54,26 @@ Optional (segmentation Unomi — see `.env.example`) :
 - Marque courante : toujours `X-Brand` / `?brand=` (rien à lister dans le `.env`)
 - Optionnel : `UNOMI_INTERNAL_BRANDS` (exclusions) ou `UNOMI_BRANDS` (opt-in restreint)
 
- ## Database & migrations
+ ## Production troubleshooting
+
+If **`/admin/segments`** or **`/admin/loyalty-settings`** return **500** while other routes work, the production database is usually **missing recent migrations** (Unomi segment columns, `brand_loyalty_settings.segmentation_mode`, etc.).
+
+On the server (with the same `DATABASE_URL` as the API):
+
+```bash
+cd /path/to/loyalty-engine
+alembic upgrade head
+```
+
+Then restart the API and verify:
+
+```bash
+curl -s -u user:pass -H "X-Brand: batira" https://loyalty.qilinsa.com/admin/health/schema
+```
+
+Expected: `{"ok":true,...}`. If `503` with `missingChecks`, apply migrations.
+
+## Database & migrations
  
  Alembic is configured (see `alembic.ini`, `alembic/env.py`). Apply migrations with:
  

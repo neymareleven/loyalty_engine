@@ -3,10 +3,10 @@ import hmac
 import os
 import re
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.requests import Request
+from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from app.db import engine, Base
 
 from app.models.transaction import Transaction
@@ -95,6 +95,53 @@ def _cors_headers_for_request(request: Request) -> dict[str, str]:
             "Vary": "Origin",
         }
     return {}
+
+
+def _db_error_response(request: Request, *, status_code: int, detail: str, error: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": detail, "error": error},
+        headers=_cors_headers_for_request(request),
+    )
+
+
+@app.exception_handler(ProgrammingError)
+async def db_programming_error_handler(request: Request, exc: ProgrammingError):
+    """Missing tables/columns on prod (migrations not applied) surfaces as 500 otherwise."""
+    orig = str(getattr(exc, "orig", exc))
+    return _db_error_response(
+        request,
+        status_code=503,
+        detail=(
+            "Database schema is out of date for this API version. "
+            "On the server run: alembic upgrade head"
+        ),
+        error=orig,
+    )
+
+
+@app.exception_handler(IntegrityError)
+async def db_integrity_error_handler(request: Request, exc: IntegrityError):
+    orig = str(getattr(exc, "orig", exc))
+    return _db_error_response(
+        request,
+        status_code=409,
+        detail="Database integrity constraint violated",
+        error=orig,
+    )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def db_sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
+    if isinstance(exc, (ProgrammingError, IntegrityError)):
+        raise exc
+    orig = str(getattr(exc, "orig", exc))
+    return _db_error_response(
+        request,
+        status_code=503,
+        detail="Database error",
+        error=orig,
+    )
 
 
 @app.middleware("http")

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, text
 from sqlalchemy.orm import Session
 from typing import Any
 
@@ -64,6 +64,36 @@ def delete_transaction_admin(
     delete_transaction_if_allowed(db, tx)
     db.commit()
     return {"deleted": True}
+
+
+@router.get("/health/schema")
+def admin_schema_health(db: Session = Depends(get_db)):
+    """Quick check that prod DB has migrations required by segments + loyalty-settings."""
+    checks = {
+        "segments.provider": "SELECT provider FROM segments LIMIT 1",
+        "segments.manual_profile_ids": "SELECT manual_profile_ids FROM segments LIMIT 1",
+        "brand_loyalty_settings.segmentation_mode": (
+            "SELECT segmentation_mode FROM brand_loyalty_settings LIMIT 1"
+        ),
+    }
+    missing: list[str] = []
+    errors: dict[str, str] = {}
+    for name, sql in checks.items():
+        try:
+            db.execute(text(sql))
+        except Exception as e:
+            missing.append(name)
+            errors[name] = str(e)[:300]
+    if missing:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Database schema incomplete. Run: alembic upgrade head",
+                "missingChecks": missing,
+                "errors": errors,
+            },
+        )
+    return {"ok": True, "checks": list(checks.keys())}
 
 
 @router.get("/loyalty-settings", response_model=LoyaltySettingsOut)

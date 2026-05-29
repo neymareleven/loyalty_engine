@@ -295,7 +295,7 @@ def list_segments(
     db: Session = Depends(get_db),
 ):
     if unomi_enabled_for_brand(brand=active_brand):
-        q = db.query(Segment).filter(Segment.brand == active_brand).filter(Segment.provider == "UNOMI")
+        q = db.query(Segment).filter(Segment.brand == active_brand)
         if sync_unomi:
             try:
                 sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
