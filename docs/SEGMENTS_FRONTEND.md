@@ -41,13 +41,21 @@ GET /admin/segments/ui-catalog
 
 ### Segments importés depuis le CDP (liste `GET /admin/segments`)
 
-En mode Unomi, la liste lit le **registre local** par défaut (rapide). La synchro CDP est **optionnelle** :
+En mode Unomi, la liste **synchronise le CDP par défaut** puis renvoie le registre local :
 
 ```http
-GET /admin/segments?sync_unomi=true
+GET /admin/segments
 ```
 
-Sans `sync_unomi=true`, le CDP n’est pas appelé (`X-Unomi-Sync: skipped`). Utile pour éviter les timeouts (la synchro complète peut prendre ~1 min sur beaucoup de segments).
+équivaut à `?sync_unomi=true` (`X-Unomi-Sync: ok` ou `failed`).
+
+Pour un chargement rapide sans appel Unomi :
+
+```http
+GET /admin/segments?sync_unomi=false
+```
+
+(`X-Unomi-Sync: skipped`) — utile si la synchro complète est trop lente (~1 min sur beaucoup de segments).
 
 Après sync réussie : en-tête `X-Unomi-Sync: ok`. Si le CDP est injoignable : **200** avec la liste locale + `X-Unomi-Sync: failed` et `X-Unomi-Sync-Detail` (plus de 502 bloquant).
 

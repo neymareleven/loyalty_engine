@@ -286,10 +286,10 @@ def list_segments(
     active_brand: str = Depends(get_active_brand),
     active: bool | None = None,
     sync_unomi: bool = Query(
-        False,
+        True,
         description=(
             "UNOMI mode only: pull segment definitions from the CDP before listing. "
-            "Can take tens of seconds for many segments; default is local registry only."
+            "Set to false for a fast read from the local registry only."
         ),
     ),
     db: Session = Depends(get_db),
