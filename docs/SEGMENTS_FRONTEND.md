@@ -44,18 +44,67 @@ GET /admin/segments/ui-catalog
 En mode Unomi, la liste **synchronise le CDP par défaut** puis renvoie le registre local :
 
 ```http
-GET /admin/segments
+GET /admin/segments?limit=20&offset=0
 ```
 
-équivaut à `?sync_unomi=true` (`X-Unomi-Sync: ok` ou `failed`).
+Réponse paginée : `{ "items": [SegmentOut, ...], "total", "limit", "offset", "filters", "sort" }`.
 
-Pour un chargement rapide sans appel Unomi :
+`total` compte **tout le catalogue filtré** (pas seulement la page courante). **Filtres et tri** doivent être **répétés sur chaque requête paginée** (y compris `offset=20`, `40`, …).
+
+| Paramètre | Description |
+|-----------|-------------|
+| `limit` | Taille de page (défaut `20`, max `500`) |
+| `offset` | Décalage pagination (défaut `0`) |
+| `sync_unomi` | Synchro CDP avant liste (défaut `true`, uniquement si `offset=0`) |
+| `active` | `true` \| `false` — segment actif |
+| `q` | Recherche texte (nom ou description, insensible à la casse) |
+| `is_dynamic` | `true` = dynamique, `false` = statique |
+| `segment_type` | Alias : `dynamic` \| `static` (ignoré si `is_dynamic` est fourni) |
+| `provider` | `INTERNAL` \| `UNOMI` |
+| `sort_by` | Tri global : `name`, `created_at`, `updated_at`, `last_computed_at`, `provider`, `is_dynamic`, `active`, `member_count` (défaut `created_at`) |
+| `sort_order` | `asc` \| `desc` (défaut : `asc` pour `name` / `provider` / `is_dynamic` / `active`, `desc` pour les dates et `member_count`) |
+
+Exemple — VIP dynamiques Unomi, tri par nom, page 1 :
+
+```http
+GET /admin/segments?limit=20&offset=0&q=vip&is_dynamic=true&provider=UNOMI&sort_by=name&sort_order=asc
+```
+
+Réponse (extrait) :
+
+```json
+{
+  "items": [ ... ],
+  "total": 3,
+  "limit": 20,
+  "offset": 0,
+  "filters": {
+    "q": "vip",
+    "is_dynamic": true,
+    "provider": "UNOMI",
+    "active": null
+  },
+  "sort": {
+    "sort_by": "name",
+    "sort_order": "asc"
+  }
+}
+```
+
+**Frontend** : ne plus filtrer ni trier côté client sur `items`. Envoyer filtres + `sort_by` / `sort_order` au backend sur **chaque** page. Utiliser `total` pour la pagination. Colonnes triables typiques : nom → `sort_by=name`, membres → `sort_by=member_count`, date → `sort_by=created_at` ou `updated_at`.
+
+Par défaut `limit=20`, `offset=0`, **`sync_unomi=true`** (synchro CDP avant la liste).
+
+- **Page 1** (`offset=0`) : synchro Unomi automatique → liste à jour (`X-Unomi-Sync: ok` ou `failed`).
+- **Pages suivantes** (`offset>0`) : pas de nouvelle synchro CDP (`X-Unomi-Sync: skipped-pagination`) — le registre a déjà été aligné sur la page 1.
+
+Pour forcer une resynchro (bouton refresh) : rappeler `GET /admin/segments?limit=20&offset=0&sync_unomi=true`.
+
+Pour désactiver la synchro CDP :
 
 ```http
 GET /admin/segments?sync_unomi=false
 ```
-
-(`X-Unomi-Sync: skipped`) — utile si la synchro complète est trop lente (~1 min sur beaucoup de segments).
 
 Après sync réussie : en-tête `X-Unomi-Sync: ok`. Si le CDP est injoignable : **200** avec la liste locale + `X-Unomi-Sync: failed` et `X-Unomi-Sync-Detail` (plus de 502 bloquant).
 

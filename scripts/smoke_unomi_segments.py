@@ -225,13 +225,14 @@ def main() -> int:
         print("[5/10] Backend list/get should return brand-scoped Unomi segments")
         status, listed = _request_json_retry(
             "GET",
-            f"{backend}/admin/segments",
+            f"{backend}/admin/segments?limit=500&offset=0",
             headers=api_headers,
             timeout_sec=args.http_timeout_sec,
             retries=args.http_retries,
         )
-        _assert(status == 200 and isinstance(listed, list), f"segments list failed: {status} {listed}")
-        by_id = {str(item.get("id")): item for item in listed if isinstance(item, dict)}
+        _assert(status == 200 and isinstance(listed, dict), f"segments list failed: {status} {listed}")
+        page_items = listed.get("items") if isinstance(listed.get("items"), list) else []
+        by_id = {str(item.get("id")): item for item in page_items if isinstance(item, dict)}
         _assert(static_seg_id in by_id, "static segment missing from backend list")
         _assert(dynamic_seg_id in by_id, "dynamic segment missing from backend list")
         _assert(by_id[static_seg_id].get("unomi_scope") == brand, f"static scope mismatch: {by_id[static_seg_id]}")

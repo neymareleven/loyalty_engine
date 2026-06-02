@@ -6,8 +6,8 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import case, func
+from sqlalchemy.orm import Query, Session
 
 from app.models.internal_job import InternalJob
 from app.models.rule import Rule
@@ -246,3 +246,113 @@ def recompute_brand_dynamic_segments(
     now_utc: datetime | None = None,
 ) -> dict:
     return recompute_dynamic_segments_for_brand(db, brand=brand, now_utc=now_utc, batch_size=batch_size)
+
+
+_SEGMENT_LIST_SORT_BY_ALIASES: dict[str, str] = {
+    "createdat": "created_at",
+    "updatedat": "updated_at",
+    "lastcomputedat": "last_computed_at",
+    "membercount": "member_count",
+    "isdynamic": "is_dynamic",
+}
+
+_SEGMENT_LIST_SORT_FIELDS = frozenset(
+    {
+        "name",
+        "created_at",
+        "updated_at",
+        "last_computed_at",
+        "provider",
+        "is_dynamic",
+        "active",
+        "member_count",
+    }
+)
+
+_DEFAULT_SORT_ORDER_BY_FIELD: dict[str, str] = {
+    "name": "asc",
+    "provider": "asc",
+    "is_dynamic": "asc",
+    "active": "asc",
+}
+
+
+def normalize_segment_list_sort_by(raw: str | None) -> str:
+    if raw is None or not str(raw).strip():
+        return "created_at"
+    key = str(raw).strip().replace("-", "_")
+    alias = _SEGMENT_LIST_SORT_BY_ALIASES.get(key.lower().replace("_", ""))
+    if alias:
+        key = alias
+    else:
+        key = key.lower()
+    if key not in _SEGMENT_LIST_SORT_FIELDS:
+        allowed = ", ".join(sorted(_SEGMENT_LIST_SORT_FIELDS))
+        raise HTTPException(
+            status_code=400,
+            detail=f"sort_by must be one of: {allowed}",
+        )
+    return key
+
+
+def normalize_segment_list_sort_order(
+    raw: str | None,
+    *,
+    sort_by: str,
+) -> str:
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_SORT_ORDER_BY_FIELD.get(sort_by, "desc")
+    normalized = str(raw).strip().lower()
+    if normalized in ("asc", "ascending"):
+        return "asc"
+    if normalized in ("desc", "descending"):
+        return "desc"
+    raise HTTPException(status_code=400, detail="sort_order must be asc or desc")
+
+
+def apply_segment_list_ordering(
+    query: Query,
+    *,
+    db: Session,
+    sort_by: str,
+    sort_order: str,
+) -> Query:
+    """Order segment list query on the full filtered catalog (stable tie-break: id asc)."""
+    ascending = sort_order == "asc"
+
+    def _order(expr):
+        if ascending:
+            return expr.asc().nulls_first()
+        return expr.desc().nulls_last()
+
+    if sort_by == "member_count":
+        member_agg = (
+            db.query(
+                SegmentMember.segment_id.label("segment_id"),
+                func.count(SegmentMember.customer_id).label("member_count"),
+            )
+            .group_by(SegmentMember.segment_id)
+            .subquery()
+        )
+        query = query.outerjoin(member_agg, Segment.id == member_agg.c.segment_id)
+        table_count = func.coalesce(member_agg.c.member_count, 0)
+        manual_len = func.coalesce(func.jsonb_array_length(Segment.manual_profile_ids), 0)
+        effective = case(
+            (
+                (Segment.provider == "UNOMI") & (Segment.is_dynamic.is_(False)),
+                manual_len,
+            ),
+            else_=table_count,
+        )
+        return query.order_by(_order(effective), Segment.id.asc())
+
+    columns = {
+        "name": Segment.name,
+        "created_at": Segment.created_at,
+        "updated_at": Segment.updated_at,
+        "last_computed_at": Segment.last_computed_at,
+        "provider": Segment.provider,
+        "is_dynamic": Segment.is_dynamic,
+        "active": Segment.active,
+    }
+    return query.order_by(_order(columns[sort_by]), Segment.id.asc())

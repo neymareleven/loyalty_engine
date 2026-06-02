@@ -74,6 +74,31 @@ class SegmentOut(BaseModel):
         from_attributes = True
 
 
+class SegmentListAppliedFilters(BaseModel):
+    """Echo of query filters applied server-side on the full brand catalog."""
+
+    q: Optional[str] = None
+    is_dynamic: Optional[bool] = None
+    provider: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class SegmentListAppliedSort(BaseModel):
+    """Echo of sort applied server-side on the full filtered catalog."""
+
+    sort_by: str = "created_at"
+    sort_order: str = "desc"
+
+
+class SegmentListResponse(BaseModel):
+    items: list[SegmentOut]
+    total: int
+    limit: int
+    offset: int
+    filters: SegmentListAppliedFilters
+    sort: SegmentListAppliedSort
+
+
 class SegmentMembersBulkAdd(BaseModel):
     customer_ids: list[UUID]
 
