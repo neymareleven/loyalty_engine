@@ -1,7 +1,6 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,9 +17,6 @@ from app.schemas.segment import (
     SegmentMemberCreate,
     SegmentMemberOut,
     SegmentMembersListResponse,
-    SegmentListAppliedFilters,
-    SegmentListAppliedSort,
-    SegmentListResponse,
     SegmentOut,
     SegmentRecomputeResult,
     SegmentUpdate,
@@ -28,11 +24,8 @@ from app.schemas.segment import (
 from app.services.segment_members_list_service import list_segment_members as list_segment_members_payload
 from app.services.segment_condition_unomi import loyalty_ast_to_unomi_condition
 from app.services.segment_admin_service import (
-    apply_segment_list_ordering,
     apply_segment_type_transition,
     assert_segment_deletable,
-    normalize_segment_list_sort_by,
-    normalize_segment_list_sort_order,
     recompute_brand_dynamic_segments,
     serialize_segment_out,
     trigger_recompute_if_needed,
@@ -158,22 +151,6 @@ def get_segments_ui_catalog():
                 "Dynamic membership is always recomputed in the engine (segment_members). "
                 "UNOMI mode still pushes segment definition to the CDP."
             ),
-        },
-        "list": {
-            "endpoint": "GET /admin/segments?limit=20&offset=0",
-            "response": "SegmentListResponse { items, total, limit, offset, filters, sort }",
-            "queryParams": {
-                "limit": "Page size (default 20, max 500)",
-                "offset": "Pagination offset (default 0)",
-                "sync_unomi": "UNOMI: sync CDP before list when offset=0 (default true)",
-                "active": "Optional filter active=true|false",
-                "q": "Search name or description (full catalog, case-insensitive)",
-                "is_dynamic": "Optional filter true=dynamic, false=static",
-                "segment_type": "Alias: dynamic | static (ignored if is_dynamic set)",
-                "provider": "Optional INTERNAL | UNOMI",
-                "sort_by": "name | created_at | updated_at | last_computed_at | provider | is_dynamic | active | member_count (default created_at)",
-                "sort_order": "asc | desc (default: asc for name/provider/is_dynamic/active, desc otherwise)",
-            },
         },
         "unomi": {
             "segmentationModeEndpoint": "GET /admin/segments/segmentation-mode",
@@ -303,73 +280,23 @@ def read_segmentation_mode(active_brand: str = Depends(get_active_brand)):
     return unomi_env_status(brand=active_brand)
 
 
-def _resolve_segment_type_filter(
-    *,
-    is_dynamic: bool | None,
-    segment_type: str | None,
-) -> bool | None:
-    if is_dynamic is not None:
-        return is_dynamic
-    if segment_type is None:
-        return None
-    normalized = segment_type.strip().lower()
-    if normalized in ("dynamic", "dyn"):
-        return True
-    if normalized in ("static", "stat"):
-        return False
-    raise HTTPException(
-        status_code=400,
-        detail="segment_type must be 'dynamic' or 'static'",
-    )
-
-
-@router.get("", response_model=SegmentListResponse)
+@router.get("", response_model=list[SegmentOut])
 def list_segments(
     response: Response,
     active_brand: str = Depends(get_active_brand),
     active: bool | None = None,
-    q: str | None = Query(
-        None,
-        description="Search segment name or description (case-insensitive, full catalog).",
-    ),
-    is_dynamic: bool | None = Query(
-        None,
-        description="Filter by segment type: true=dynamic, false=static.",
-    ),
-    segment_type: str | None = Query(
-        None,
-        description="Alias for is_dynamic: dynamic | static (ignored when is_dynamic is set).",
-    ),
-    provider: str | None = Query(
-        None,
-        description="Filter by provider: INTERNAL | UNOMI.",
-    ),
-    sort_by: str | None = Query(
-        None,
-        description=(
-            "Sort field on the full filtered catalog: name, created_at, updated_at, "
-            "last_computed_at, provider, is_dynamic, active, member_count. Default created_at."
-        ),
-    ),
-    sort_order: str | None = Query(
-        None,
-        description="Sort direction: asc or desc. Default depends on sort_by (asc for name, desc for dates).",
-    ),
-    limit: int = Query(20, ge=1, le=500),
-    offset: int = Query(0, ge=0),
     sync_unomi: bool = Query(
         True,
         description=(
-            "UNOMI mode: sync segment definitions from the CDP before listing (default true). "
-            "Sync runs on the first page only (offset=0); use sync_unomi=true with offset=0 to force "
-            "a fresh pull. Set false to skip CDP and read the local registry only."
+            "UNOMI mode only: pull segment definitions from the CDP before listing. "
+            "Set to false for a fast read from the local registry only."
         ),
     ),
     db: Session = Depends(get_db),
 ):
     if unomi_enabled_for_brand(brand=active_brand):
-        should_sync = sync_unomi and offset == 0
-        if should_sync:
+        q = db.query(Segment).filter(Segment.brand == active_brand)
+        if sync_unomi:
             try:
                 sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
                 db.commit()
@@ -385,72 +312,21 @@ def list_segments(
                 db.rollback()
                 response.headers["X-Unomi-Sync"] = "failed"
                 response.headers["X-Unomi-Sync-Detail"] = str(e)[:500]
-        elif sync_unomi and offset > 0:
-            response.headers["X-Unomi-Sync"] = "skipped-pagination"
         else:
             response.headers["X-Unomi-Sync"] = "skipped"
 
-    dynamic_filter = _resolve_segment_type_filter(
-        is_dynamic=is_dynamic,
-        segment_type=segment_type,
-    )
-    provider_filter: str | None = None
-    if provider is not None:
-        provider_filter = provider.strip().upper()
-        if provider_filter not in ("INTERNAL", "UNOMI"):
-            raise HTTPException(
-                status_code=400,
-                detail="provider must be INTERNAL or UNOMI",
-            )
+        if active is not None:
+            q = q.filter(Segment.active.is_(active))
+        items = q.order_by(Segment.created_at.desc()).all()
+    else:
+        q = db.query(Segment).filter(Segment.brand == active_brand)
+        if active is not None:
+            q = q.filter(Segment.active.is_(active))
+        items = q.order_by(Segment.created_at.desc()).all()
 
-    search = q.strip() if q and q.strip() else None
-
-    query = db.query(Segment).filter(Segment.brand == active_brand)
     if active is not None:
-        query = query.filter(Segment.active.is_(active))
-    if dynamic_filter is not None:
-        query = query.filter(Segment.is_dynamic.is_(dynamic_filter))
-    if provider_filter is not None:
-        query = query.filter(Segment.provider == provider_filter)
-    if search:
-        term = f"%{search}%"
-        query = query.filter(
-            or_(
-                Segment.name.ilike(term),
-                Segment.description.ilike(term),
-            )
-        )
-
-    resolved_sort_by = normalize_segment_list_sort_by(sort_by)
-    resolved_sort_order = normalize_segment_list_sort_order(
-        sort_order,
-        sort_by=resolved_sort_by,
-    )
-    query = apply_segment_list_ordering(
-        query,
-        db=db,
-        sort_by=resolved_sort_by,
-        sort_order=resolved_sort_order,
-    )
-
-    total = query.count()
-    rows = query.offset(offset).limit(limit).all()
-    return {
-        "items": [serialize_segment_out(db, seg=obj) for obj in rows],
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "filters": SegmentListAppliedFilters(
-            q=search,
-            is_dynamic=dynamic_filter,
-            provider=provider_filter,
-            active=active,
-        ),
-        "sort": SegmentListAppliedSort(
-            sort_by=resolved_sort_by,
-            sort_order=resolved_sort_order,
-        ),
-    }
+        items = [seg for seg in items if bool(seg.active) is bool(active)]
+    return [serialize_segment_out(db, seg=obj) for obj in items]
 
 
 @router.post("/recompute", response_model=SegmentRecomputeResult)
