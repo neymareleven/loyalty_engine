@@ -707,7 +707,7 @@ alembic upgrade head
 
  ### Segments CRUD
 
- - `GET /admin/segments` — liste enrichie (`member_count`, `needs_recompute`, `can_delete`, …)
+ - `GET /admin/segments?limit=&offset=` — liste paginée (`items`, `total`, `limit`, `offset`, `filters`, `sort`) ; filtres `q`, `provider`, `is_dynamic` ; tri `sort_by`, `sort_order`
  - `POST /admin/segments` — recalcul auto des segments dynamiques (`?recompute=true` par défaut)
  - `GET /admin/segments/{segment_id}`
  - `PATCH /admin/segments/{segment_id}` — transition `is_dynamic` avec nettoyage membres ; recalcul auto si conditions / activation changent

@@ -41,23 +41,62 @@ GET /admin/segments/ui-catalog
 
 ### Segments importés depuis le CDP (liste `GET /admin/segments`)
 
-En mode Unomi, la liste **synchronise le CDP par défaut** puis renvoie le registre local :
+Liste **paginée** ; en mode Unomi, **synchro CDP par défaut** sur la première page (`offset=0`) :
 
 ```http
-GET /admin/segments
+GET /admin/segments?limit=20&offset=0
+X-Brand: batira
 ```
 
-équivaut à `?sync_unomi=true` (`X-Unomi-Sync: ok` ou `failed`).
+Réponse :
 
-Pour un chargement rapide sans appel Unomi :
+```json
+{
+  "items": [ /* SegmentOut[], longueur <= limit */ ],
+  "total": 66,
+  "limit": 20,
+  "offset": 0,
+  "filters": { "q": null, "is_dynamic": null, "provider": null, "active": null },
+  "sort": { "sort_by": "created_at", "sort_order": "desc" }
+}
+```
+
+**Contrat pagination**
+
+- `total` = nombre de segments **après filtres**, sur tout le catalogue (sans `limit`).
+- `items` = **une seule page** : au plus `limit` lignes (`offset` … `offset + limit - 1` dans le tri global).
+- Filtres + tri en base **avant** `COUNT` et **avant** `LIMIT` / `OFFSET`.
+
+| Paramètre | Description |
+|-----------|-------------|
+| `limit` | Taille de page (défaut `20`, max `500`) |
+| `offset` | Décalage (défaut `0`) |
+| `sync_unomi` | Synchro CDP si `offset=0` (défaut `true`) ; pages suivantes : `X-Unomi-Sync: skipped-pagination` |
+| `active` | `true` \| `false` |
+| `q` | Recherche nom / description |
+| `is_dynamic` | `true` \| `false` |
+| `segment_type` | Alias `dynamic` \| `static` |
+| `provider` | `INTERNAL` \| `UNOMI` |
+| `sort_by` | `name`, `created_at`, `updated_at`, `last_computed_at`, `provider`, `is_dynamic`, `active`, `member_count` |
+| `sort_order` | `asc` \| `desc` |
+
+Répéter **filtres + tri** sur chaque page (`offset=20`, `40`, …).
+
+Exemples :
+
+```http
+GET /admin/segments?limit=10&offset=0
+GET /admin/segments?limit=10&offset=10
+GET /admin/segments?limit=10&offset=0&q=vip&sort_by=name&sort_order=asc
+```
+
+Chargement rapide sans CDP :
 
 ```http
 GET /admin/segments?sync_unomi=false
 ```
 
-(`X-Unomi-Sync: skipped`) — utile si la synchro complète est trop lente (~1 min sur beaucoup de segments).
-
-Après sync réussie : en-tête `X-Unomi-Sync: ok`. Si le CDP est injoignable : **200** avec la liste locale + `X-Unomi-Sync: failed` et `X-Unomi-Sync-Detail` (plus de 502 bloquant).
+Après sync : `X-Unomi-Sync: ok`. CDP injoignable : **200** + liste locale + `X-Unomi-Sync: failed` + `X-Unomi-Sync-Detail`.
 
 Chaque ligne `SegmentOut` expose :
 
