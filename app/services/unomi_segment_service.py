@@ -371,6 +371,7 @@ def create_unomi_segment_mirror(
     try:
         client.save_segment(definition)
     except UnomiClientError as e:
+        # 409/400: segment id may already exist in Unomi — POST acts as upsert on this CDP.
         if e.status_code not in (409, 400):
             raise
         client.save_segment(definition)

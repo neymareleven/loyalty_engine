@@ -2,9 +2,41 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date, datetime
 from typing import Any
 
 # Loyalty operator -> Unomi profilePropertyCondition comparisonOperator
+_INTEGER_CUSTOMER_FIELDS = frozenset(
+    {
+        "customer.status_points",
+        "customer.metrics.transactions_count_30d",
+        "customer.metrics.transactions_count_90d",
+    }
+)
+
+_DATE_CUSTOMER_FIELDS = frozenset(
+    {
+        "customer.birthdate",
+        "customer.birthday",
+    }
+)
+
+_ISO_DATETIME_CUSTOMER_FIELDS = frozenset(
+    {
+        "customer.created_at",
+        "customer.last_activity_at",
+        "customer.metrics.last_transaction_at",
+    }
+)
+
+_FIELD_ALIASES = {
+    "customer.birthday": "customer.birthdate",
+}
+
+_FULL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_PARTIAL_DATE_RE = re.compile(r"^\d{2}-\d{2}$")
+
 _OP_MAP = {
     "eq": "equals",
     "equals": "equals",
@@ -22,18 +54,30 @@ _OP_MAP = {
 }
 
 
+def _normalize_customer_field(field: str) -> str:
+    key = str(field or "").strip()
+    return _FIELD_ALIASES.get(key, key)
+
+
+def _full_date_to_epoch_ms(value: str) -> int:
+    d = date.fromisoformat(value)
+    dt = datetime(d.year, d.month, d.day)
+    return int(dt.timestamp() * 1000)
+
+
 def _customer_field_to_unomi_property(field: str) -> str:
+    field = _normalize_customer_field(field)
     if not field.startswith("customer."):
         raise ValueError(f"Segment Unomi translator supports customer.* only, got: {field}")
     path = field[len("customer.") :]
     if path.startswith("metrics."):
         return f"properties.metrics.{path[len('metrics.'):]}"
-    # Unomi common profile properties live under properties.*
+    # Align with loyalty → Unomi profile sync (build_unomi_profile_payload).
     camel = {
         "loyalty_status": "loyaltyStatus",
         "status_points": "statusPoints",
-        "last_activity_at": "lastActivityDate",
-        "created_at": "creationDate",
+        "last_activity_at": "lastActivityAt",
+        "created_at": "loyaltyCreatedAt",
         "birthdate": "birthDate",
     }
     leaf = camel.get(path, path)
@@ -61,6 +105,40 @@ def loyalty_ast_to_unomi_condition(node: dict[str, Any] | None) -> dict[str, Any
     return _translate_node(node)
 
 
+def _unomi_value_params(field: str, value: Any) -> dict[str, Any]:
+    """Map AST value to the Unomi propertyValue* key expected by the CDP."""
+    if value is None:
+        return {}
+    field_key = _normalize_customer_field(str(field))
+    raw = str(value).strip()
+
+    if field_key in _INTEGER_CUSTOMER_FIELDS:
+        try:
+            return {"propertyValueInteger": int(value)}
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Integer value required for {field_key}") from e
+
+    if field_key in _DATE_CUSTOMER_FIELDS:
+        if _FULL_DATE_RE.match(raw):
+            return {"propertyValueInteger": _full_date_to_epoch_ms(raw)}
+        if _PARTIAL_DATE_RE.match(raw):
+            return {"propertyValue": raw}
+        raise ValueError(
+            f"birthdate/birthday value must be YYYY-MM-DD or MM-DD for Unomi sync, got: {value!r}"
+        )
+
+    if field_key in _ISO_DATETIME_CUSTOMER_FIELDS:
+        return {"propertyValueDate": raw}
+
+    if isinstance(value, bool):
+        return {"propertyValueBoolean": value}
+    if isinstance(value, int) and not isinstance(value, bool):
+        return {"propertyValueInteger": value}
+    if isinstance(value, float):
+        return {"propertyValueDouble": value}
+    return {"propertyValue": value}
+
+
 def _translate_node(node: dict[str, Any]) -> dict[str, Any]:
     if "and" in node:
         subs = [_translate_node(x) for x in node["and"]]
@@ -81,21 +159,21 @@ def _translate_node(node: dict[str, Any]) -> dict[str, Any]:
             "subConditions": [_translate_node(node["not"])],
         }
 
-    field = node.get("field")
+    field = _normalize_customer_field(str(node.get("field") or ""))
     op = (node.get("operator") or node.get("op") or "").lower()
     value = node.get("value")
 
-    if field is None or not op:
+    if not field or not op:
         raise ValueError("Invalid loyalty AST leaf: field and operator required")
 
-    if str(field).startswith("system.") or str(field).startswith("payload."):
+    if field.startswith("system.") or field.startswith("payload."):
         raise ValueError(f"Field not supported for Unomi segment translation: {field}")
 
     unomi_op = _OP_MAP.get(op)
     if not unomi_op:
         raise ValueError(f"Operator not supported for Unomi segment translation: {op}")
 
-    prop = _customer_field_to_unomi_property(str(field))
+    prop = _customer_field_to_unomi_property(field)
 
     if unomi_op == "exists":
         return {
@@ -119,7 +197,7 @@ def _translate_node(node: dict[str, Any]) -> dict[str, Any]:
                         "parameterValues": {
                             "propertyName": prop,
                             "comparisonOperator": "equals",
-                            "propertyValue": v,
+                            **_unomi_value_params(field, v),
                         },
                     }
                     for v in value
@@ -132,7 +210,7 @@ def _translate_node(node: dict[str, Any]) -> dict[str, Any]:
         "comparisonOperator": unomi_op,
     }
     if unomi_op not in {"exists"}:
-        params["propertyValue"] = value
+        params.update(_unomi_value_params(field, value))
 
     return {"type": "profilePropertyCondition", "parameterValues": params}
 
@@ -184,7 +262,9 @@ def _unomi_property_to_customer_field(property_name: str) -> str | None:
     snake_from_camel = {
         "loyaltyStatus": "loyalty_status",
         "statusPoints": "status_points",
+        "lastActivityAt": "last_activity_at",
         "lastActivityDate": "last_activity_at",
+        "loyaltyCreatedAt": "created_at",
         "creationDate": "created_at",
         "birthDate": "birthdate",
     }
@@ -207,7 +287,17 @@ def _unomi_subconditions(node: dict[str, Any]) -> list[dict[str, Any]] | None:
     return None
 
 
-def _unomi_property_value(params: dict[str, Any]) -> Any:
+def _epoch_ms_to_iso_date(ms: int) -> str:
+    """Inverse of _full_date_to_epoch_ms (same naive-local semantics as profile sync)."""
+    try:
+        dt = datetime.fromtimestamp(int(ms) / 1000.0)
+        return dt.date().isoformat()
+    except Exception:
+        return str(ms)
+
+
+def _unomi_property_value(params: dict[str, Any], *, field: str | None = None) -> Any:
+    field_key = _normalize_customer_field(field or "")
     for key in (
         "propertyValue",
         "propertyValueInteger",
@@ -216,7 +306,14 @@ def _unomi_property_value(params: dict[str, Any]) -> Any:
         "propertyValueBoolean",
     ):
         if key in params and params[key] is not None:
-            return params[key]
+            val = params[key]
+            if (
+                field_key in _DATE_CUSTOMER_FIELDS
+                and key == "propertyValueInteger"
+                and isinstance(val, int)
+            ):
+                return _epoch_ms_to_iso_date(val)
+            return val
     return None
 
 
@@ -233,7 +330,7 @@ def _try_unomi_or_as_in(field: str, subs: list[dict[str, Any]]) -> dict[str, Any
             return None
         if str(params.get("comparisonOperator") or "") != "equals":
             return None
-        values.append(_unomi_property_value(params))
+        values.append(_unomi_property_value(params, field=field))
     if not values:
         return None
     return {"field": field, "operator": "in", "value": values}
@@ -294,6 +391,6 @@ def _unomi_to_loyalty_node(node: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"unsupported Unomi operator: {unomi_op}")
         if loyalty_op == "exists":
             return {"field": field, "operator": "exists", "value": True}
-        return {"field": field, "operator": loyalty_op, "value": _unomi_property_value(params)}
+        return {"field": field, "operator": loyalty_op, "value": _unomi_property_value(params, field=field)}
 
     raise ValueError(f"unsupported Unomi condition type: {cond_type}")

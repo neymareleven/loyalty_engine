@@ -728,7 +728,19 @@ PATCH /admin/internal-jobs/{id}
 | 400 | `conditions` sur segment statique |
 | 409 | DELETE segment référencé par règle/job |
 | 409 | Membre déjà présent (statique) |
-| 502 | Unomi CDP injoignable ou erreur sync |
+| 502 | Unomi CDP injoignable, condition refusée par le CDP, ou échec sync membres |
+
+### Dépannage 502 « Unable to sync » (création / membres)
+
+1. **Vérifier la connectivité** : `GET /admin/segments/segmentation-mode` avec `X-Brand` → `unomiConfigured: true`, `currentBrandUsesUnomi: true`.
+2. **Lire le `detail` API** (pas seulement le message UI) : souvent `Unomi HTTP 500` + `internalServerError` = condition mal formée pour le CDP.
+3. **Segment dynamique** : le moteur traduit automatiquement les types pour Unomi :
+   - numériques (`status_points`, `metrics.*`) → `propertyValueInteger`
+   - `birthdate` / `birthday` : `YYYY-MM-DD` → epoch ms (`propertyValueInteger`, aligné sync profils) ; `MM-DD` → `propertyValue`
+   - dates/heures (`created_at`, `last_activity_at`, `metrics.last_transaction_at`) → `propertyValueDate` sur `loyaltyCreatedAt`, `lastActivityAt`, etc.
+   Redémarrer l’API après mise à jour du moteur.
+4. **Segment statique sans membres** : création OK ; ajout de membres déclenche la sync → utiliser `POST …/sync-unomi` si besoin.
+5. **Segment manuel** : les clients doivent avoir un `profile_id` Unomi (sync profils activée).
 
 ---
 

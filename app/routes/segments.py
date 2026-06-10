@@ -55,6 +55,13 @@ from app.services.unomi_settings_service import (
 router = APIRouter(prefix="/admin/segments", tags=["admin-segments"])
 
 
+def _format_unomi_error(e: UnomiClientError, *, action: str) -> str:
+    body = (e.body or "").strip()
+    if body:
+        return f"Unomi segment {action} failed: {e} — {body}"
+    return f"Unomi segment {action} failed: {e}"
+
+
 def _pgcode(err: IntegrityError) -> str | None:
     orig = getattr(err, "orig", None)
     code = getattr(orig, "pgcode", None)
@@ -221,6 +228,7 @@ def list_segment_condition_fields(brand: str = Depends(get_active_brand)):
         "customer.loyalty_status",
         "customer.status_points",
         "customer.birthdate",
+        "customer.birthday",
         "customer.created_at",
         "customer.last_activity_at",
         "customer.rewards",
@@ -287,7 +295,16 @@ def list_segment_condition_fields(brand: str = Depends(get_active_brand)):
                 "valueKind": "enum",
                 "ui": {"widget": "select", "options": ["M", "F", "OTHER", "UNKNOWN"]},
             },
-            "customer.birthdate": {"valueKind": "date", "ui": {"widget": "date"}},
+            "customer.birthdate": {
+                "valueKind": "date",
+                "ui": {"widget": "date"},
+                "note": "Accepte YYYY-MM-DD ou MM-DD. Alias API : customer.birthday.",
+            },
+            "customer.birthday": {
+                "valueKind": "date",
+                "aliasOf": "customer.birthdate",
+                "ui": {"widget": "date"},
+            },
             "customer.created_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.last_activity_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.metrics.last_transaction_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
@@ -516,7 +533,7 @@ def create_segment(
         raise HTTPException(status_code=400, detail=str(e))
     except UnomiClientError as e:
         db.rollback()
-        raise HTTPException(status_code=502, detail=f"Unomi segment create failed: {e}")
+        raise HTTPException(status_code=502, detail=_format_unomi_error(e, action="create"))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=502, detail=f"Unomi segment create failed: {e}")
