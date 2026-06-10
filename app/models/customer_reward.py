@@ -20,7 +20,7 @@ class CustomerReward(Base):
     )
 
     status = Column(String(20), nullable=False, default="ISSUED")
-    # ISSUED | USED | EXPIRED | CANCELLED
+    # ISSUED | USED | EXPIRED | INVALIDATED | CANCELLED (legacy)
 
     issued_at = Column(TIMESTAMP, server_default=func.now())
     expires_at = Column(TIMESTAMP, nullable=True)

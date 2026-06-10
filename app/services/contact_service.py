@@ -123,4 +123,7 @@ def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: di
                 customer.birth_year = yy
                 customer.birthdate = full
 
+    from app.services.unomi_profile_service import sync_customer_profile_to_unomi
+
+    sync_customer_profile_to_unomi(db, customer=customer, reason="customer_upsert")
     return customer

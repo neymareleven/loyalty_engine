@@ -25,6 +25,7 @@ from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.reward_service import expire_rewards
 from app.services.coupon_service import expire_coupons
+from app.services.entitlement_history_service import build_global_entitlement_history
 from app.services.loyalty_settings_service import ensure_brand_transaction_catalog, get_or_create_loyalty_settings
 from app.services.loyalty_validity_service import initialize_validity_windows_for_existing_customers
 from app.services.transaction_protection import delete_transaction_if_allowed
@@ -747,10 +748,13 @@ def get_coupon_types_ui_catalog():
         },
         "delete": {
             "policy": (
-                "DELETE autorisé seulement si customer_coupon_count = 0 (voir can_delete sur CouponTypeOut). "
-                "Sinon recommended_action = deactivate."
+                "DELETE toujours possible après confirmation via GET …/delete-preview. "
+                "Les coupons actifs (ISSUED) et rewards actives liées sont invalidés ; "
+                "l'historique USED/EXPIRED reste en lecture seule. "
+                "PATCH active=false désactive seulement les nouvelles émissions (sans invalider le portefeuille)."
             ),
-            "fieldsOnList": ["canDelete", "customerCouponCount", "recommendedAction"],
+            "previewEndpoint": "GET /admin/coupon-types/{coupon_type_id}/delete-preview",
+            "fieldsOnList": ["canDelete", "customerCouponCount", "customerCouponsIssued", "recommendedAction"],
         },
         "linkRewards": {
             "preferredEndpoint": "PUT /admin/coupon-types/{coupon_type_id}/rewards",
@@ -804,9 +808,12 @@ def get_rewards_ui_catalog():
         },
         "delete": {
             "policy": (
-                "DELETE refusé (409) si des customer_rewards USED/EXPIRED existent — désactiver (active=false). "
-                "Sinon les ISSUED sont annulés puis la reward est supprimée."
+                "DELETE toujours possible après GET /rewards/{reward_id}/delete-preview. "
+                "Invalidation granulaire : seules les attributions ISSUED de cette reward sont invalidées ; "
+                "les autres rewards du même coupon client ne sont pas affectées. "
+                "Si plus aucune reward active ne reste sur un coupon, le coupon est auto-invalidé."
             ),
+            "previewEndpoint": "GET /rewards/{reward_id}/delete-preview",
         },
     }
 
@@ -816,30 +823,78 @@ def get_customer_entitlements_ui_catalog():
     return {
         "customerCoupons": {
             "summary": (
-                "Les coupons émis chez un client ne se suppriment pas. Utiliser uniquement le changement de statut."
+                "Les coupons émis chez un client ne se suppriment pas. "
+                "Utiliser PATCH status uniquement si admin_actions_enabled=true."
             ),
             "endpoint": "PATCH /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/status",
-            "allowedStatuses": ["ISSUED", "USED", "EXPIRED"],
-            "transitions": {
-                "ISSUED": ["USED", "EXPIRED"],
-                "USED": ["ISSUED", "EXPIRED"],
-                "EXPIRED": [],
+            "listEndpoint": "GET /customers/{brand}/{profile_id}/coupons-with-rewards",
+            "historyEndpoint": "GET /customers/{brand}/{profile_id}/entitlements/history",
+            "statuses": ["ISSUED", "USED", "EXPIRED", "INVALIDATED"],
+            "statusLabels": {
+                "ISSUED": "Actif",
+                "USED": "Utilisé",
+                "EXPIRED": "Expiré",
+                "INVALIDATED": "Invalidé",
             },
-            "labels": {
-                "ISSUED": "Rouvrir / marquer non utilisé",
-                "USED": "Marquer comme utilisé",
-                "EXPIRED": "Marquer comme expiré",
-            },
+            "displayFields": [
+                "display_label",
+                "status_label",
+                "catalog_removed",
+                "admin_actions_enabled",
+                "allowed_admin_transitions",
+            ],
+            "uiRules": [
+                "Griser toutes les actions si admin_actions_enabled=false",
+                "Afficher catalog_removed comme badge « Modèle retiré du catalogue »",
+                "Ne jamais afficher les UUID bruts à l'utilisateur",
+            ],
             "forbiddenActions": ["DELETE"],
         },
         "customerRewards": {
             "summary": (
-                "Pas de DELETE sur les droits client. Afficher rewardSnapshot / couponTypeSnapshot depuis payload "
-                "(renseignés à l'émission ; backfill migration fe67ab89cd01 pour l'historique)."
+                "Pas de DELETE sur les droits client. Libellés depuis snapshots payload "
+                "(rewardSnapshot, couponTypeSnapshot, productSnapshots)."
             ),
-            "displayFields": ["payload.rewardSnapshot", "payload.couponTypeSnapshot", "status"],
+            "displayFields": [
+                "display_label",
+                "status_label",
+                "catalog_removed",
+                "products",
+                "coupon_type_name",
+                "reward_name",
+            ],
+        },
+        "catalogDeletion": {
+            "summary": (
+                "DELETE catalogue invalide les droits actifs (ISSUED) et conserve l'historique. "
+                "Toujours afficher la modale via delete-preview avant DELETE."
+            ),
+            "previews": {
+                "couponType": "GET /admin/coupon-types/{id}/delete-preview",
+                "reward": "GET /rewards/{id}/delete-preview",
+                "product": "GET /admin/products/{id}/delete-preview",
+            },
         },
     }
+
+
+@router.get("/entitlements/history")
+def get_global_entitlements_history(
+    active_brand: str = Depends(get_active_brand),
+    profile_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    return build_global_entitlement_history(
+        db,
+        brand=active_brand,
+        limit=limit,
+        offset=offset,
+        profile_id=profile_id,
+    )
 
 
 @router.get("/rules/ui-options/condition-fields")

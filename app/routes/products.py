@@ -11,7 +11,12 @@ from app.models.product import Product
 from app.models.product_category import ProductCategory
 from app.models.reward import Reward
 from app.models.reward_product import RewardProduct
+from app.schemas.catalog_delete import CatalogDeletePreviewOut
 from app.schemas.product import ProductCreate, ProductOut, ProductUpdate
+from app.services.catalog_invalidation_service import (
+    apply_product_catalog_delete,
+    preview_product_delete,
+)
 
 
 router = APIRouter(prefix="/admin/products", tags=["admin-products"])
@@ -258,6 +263,19 @@ def update_product(
     return obj
 
 
+@router.get("/{product_id}/delete-preview", response_model=CatalogDeletePreviewOut)
+def preview_delete_product(
+    product_id: UUID,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    obj = db.query(Product).filter(Product.id == product_id).first()
+    if not obj or obj.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Product not found")
+    data = preview_product_delete(db, product=obj)
+    return CatalogDeletePreviewOut(**data)
+
+
 @router.delete("/{product_id}")
 def delete_product(
     product_id: UUID,
@@ -268,6 +286,7 @@ def delete_product(
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    invalidation = apply_product_catalog_delete(db, product=obj)
     db.delete(obj)
     try:
         db.commit()
@@ -287,4 +306,4 @@ def delete_product(
             detail="Impossible de supprimer ce produit (conflit de données).",
         )
 
-    return {"deleted": True}
+    return {"deleted": True, **invalidation}

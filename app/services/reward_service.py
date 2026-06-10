@@ -82,7 +82,11 @@ def issue_reward(
             db.flush()
             return existing
 
-    payload = build_customer_reward_snapshot_payload(reward=reward, coupon_type=coupon_type)
+    payload = build_customer_reward_snapshot_payload(
+        db,
+        reward=reward,
+        coupon_type=coupon_type,
+    )
 
     customer_reward = CustomerReward(
         customer_id=customer.id,

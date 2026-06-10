@@ -110,6 +110,22 @@ def unomi_enabled_for_brand(*, brand: str, db: Session | None = None) -> bool:
     return get_segmentation_mode(brand=brand, db=db) == SEGMENTATION_MODE_UNOMI
 
 
+def unomi_profile_sync_enabled_for_brand(*, brand: str) -> bool:
+    """Profile sync is independent of segmentation mode (INTERNAL vs UNOMI)."""
+    if not _unomi_credentials_configured(brand):
+        return False
+    if not _env_bool("UNOMI_PROFILE_SYNC", default=True):
+        return False
+    key = brand.strip().lower()
+    disabled = _parse_brand_list(os.getenv("UNOMI_PROFILE_SYNC_DISABLED"))
+    if key in disabled:
+        return False
+    opt_in = _parse_brand_list(os.getenv("UNOMI_PROFILE_SYNC_BRANDS"))
+    if opt_in:
+        return key in opt_in
+    return True
+
+
 def resolve_unomi_connection(*, brand: str, db: Session | None = None) -> UnomiConnectionConfig | None:
     _ = db
     if not _brand_uses_unomi(brand):
@@ -124,6 +140,25 @@ def resolve_unomi_connection(*, brand: str, db: Session | None = None) -> UnomiC
     if not password:
         return None
 
+    return UnomiConnectionConfig(
+        base_url=base_url,
+        username=username,
+        password=password,
+        scope=_scope_for_brand(brand),
+    )
+
+
+def resolve_unomi_profile_connection(*, brand: str) -> UnomiConnectionConfig | None:
+    """Unomi connection for profile sync (ignores segmentation mode / INTERNAL opt-out)."""
+    if not unomi_profile_sync_enabled_for_brand(brand=brand):
+        return None
+    base_url = _unomi_base_url_for_brand(brand)
+    if not base_url:
+        return None
+    password = _unomi_password_for_brand(brand)
+    if not password:
+        return None
+    username = (_env_for_brand(brand, "USERNAME") or "karaf").strip()
     return UnomiConnectionConfig(
         base_url=base_url,
         username=username,
@@ -164,6 +199,7 @@ def unomi_env_status(*, brand: str) -> dict:
         "unomiOptInBrands": opt_in,
         "unomiInternalOnlyBrands": opt_out,
         "currentBrandUsesUnomi": uses,
+        "profileSyncEnabled": unomi_profile_sync_enabled_for_brand(brand=brand),
         "envKeys": [
             "UNOMI_BASE_URL + UNOMI_PASSWORD (required)",
             "UNOMI_INTERNAL_BRANDS (optional opt-out)",

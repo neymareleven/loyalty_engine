@@ -163,6 +163,7 @@ def execute() {
         req.setEntity(new StringEntity(jsonPayload, ContentType.APPLICATION_JSON))
         req.addHeader("Content-Type", "application/json")
         req.addHeader("Accept",       "application/json")
+        req.addHeader("X-Profile-Sync-Source", "unomi")
 
         if (loyaltyUser != null && loyaltyPass != null) {
             def authHeader = "${loyaltyUser}:${loyaltyPass}".bytes.encodeBase64().toString()

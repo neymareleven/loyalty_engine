@@ -159,17 +159,23 @@ CouponType ◄──── coupon_type_rewards ────► Reward
 3. Liens optionnels / réordonnancement : `PUT /admin/coupon-types/{id}/rewards` (préféré) plutôt que `PATCH /rewards/{id}` avec `coupon_type_ids` (exception).
 4. Règles : action `issue_coupon` ; rewards disponibles via `GET /admin/ui-options/coupon-types/{id}/rewards`.
 
-**Suppression catalogue**
+**Suppression catalogue (invalidation client)**
 
-| Ressource | Condition DELETE | Sinon |
-|-----------|------------------|--------|
-| Coupon type | `can_delete` / `customer_coupon_count == 0` | `PATCH` `active: false` |
-| Reward | Aucune `CustomerReward` `USED`/`EXPIRED` | `PATCH` `active: false` |
+Voir **`docs/CATALOG_INVALIDATION.md`** (spec complète + checklist frontend).
+
+| Ressource | `PATCH active: false` | `DELETE` (après `delete-preview`) |
+|-----------|----------------------|-------------------------------------|
+| Coupon type | Stop nouvelles émissions ; portefeuille actif **reste valide** | ISSUED → `INVALIDATED` ; historique conservé |
+| Reward | Idem (granulaire) | Seules les attributions ISSUED **de cette reward** invalidées |
+| Product | Idem catalogue | Seul le produit marqué retiré dans `productSnapshots` |
+
+Preview : `GET /admin/coupon-types/{id}/delete-preview`, `GET /rewards/{id}/delete-preview`, `GET /admin/products/{id}/delete-preview`.
 
 **Client (émissions — pas de DELETE)**
 
-- Coupon client : `PATCH …/coupons/{id}/status` (`ISSUED` \| `USED` \| `EXPIRED`) — pas de suppression.
-- Rewards client : historique conservé ; libellés depuis `payload.rewardSnapshot` / `payload.couponTypeSnapshot`.
+- Coupon client : `PATCH …/coupons/{id}/status` si `admin_actions_enabled` ; statuts `ISSUED` \| `USED` \| `EXPIRED` \| `INVALIDATED`.
+- Rewards client : snapshots `rewardSnapshot`, `couponTypeSnapshot`, `productSnapshots`.
+- Historique unifié : `GET …/entitlements/history` (client) ; `GET /admin/entitlements/history` (global).
 
 ### 1) Créer un type de coupon
 
@@ -228,18 +234,20 @@ POST /rewards
 
 Coupon type API metadata (`CouponTypeOut`):
 
-- `customer_coupon_count` — number of issued customer coupons for this type
-- `can_delete` — `true` only when `customer_coupon_count == 0`
-- `recommended_action` — `"deactivate"` when delete is blocked; `null` when delete is allowed
+- `customer_coupon_count` — issued customer coupons for this type
+- `customer_coupons_issued` — active (`ISSUED`) count (invalidated on DELETE)
+- `can_delete` — always `true` (use `delete-preview` before DELETE)
+- `recommended_action` — `"deactivate"` when soft-stop preferred without invalidating wallet
 
 Customer reward snapshot (on `issue_coupon` / `issue_reward`):
 
-- `CustomerReward.payload` includes `rewardSnapshot` and, when issued with a coupon, `couponTypeSnapshot` (plus legacy `name` / `description` / `rewardId` keys).
+- `rewardSnapshot`, `couponTypeSnapshot`, `productSnapshots` (products at issue time)
+- Legacy keys: `name`, `description`, `rewardId`
 
-Reward deletion behavior:
+Catalog DELETE behavior:
 
-- `DELETE /rewards/{reward_id}` is **blocked (409)** if any `CustomerReward` is `USED` or `EXPIRED` for that reward (`recommendedAction: deactivate`).
-- Otherwise, any `ISSUED` entitlements are marked `CANCELLED` before delete; response includes `cancelled_count`.
+- Always allowed after preview; active entitlements → `INVALIDATED` (granular for reward/product).
+- Response includes invalidation stats (`coupons_invalidated`, `rewards_invalidated`, etc.).
 
 ### Backfill snapshots (historique)
 
@@ -557,6 +565,7 @@ alembic upgrade head
    - Segment targeting is supported via `segment_ids`.
  
  - **Rewards**: `GET/POST/PATCH/DELETE /rewards`
+   - `GET /rewards/{id}/delete-preview` puis `DELETE` (invalidation granulaire)
    - `GET /admin/rewards/ui-catalog` (workflow + politique delete)
  
  - **Loyalty tiers**: `GET/POST/PATCH/DELETE /admin/loyalty-tiers`
@@ -564,11 +573,14 @@ alembic upgrade head
  
 
  - **Coupon types**: `GET/POST/PATCH/DELETE /admin/coupon-types`
+   - `GET /admin/coupon-types/{id}/delete-preview` puis `DELETE`
    - `GET /admin/coupon-types/ui-catalog` (workflow + politique delete)
    - `GET /admin/coupon-types/{id}/rewards`
    - `PUT /admin/coupon-types/{id}/rewards`
 
- - **Customer entitlements (UI)**: `GET /admin/customer-entitlements/ui-catalog` (statuts coupon client, pas de DELETE)
+ - **Customer entitlements (UI)**: `GET /admin/customer-entitlements/ui-catalog`
+   - Historique global : `GET /admin/entitlements/history`
+   - Historique client : `GET /customers/{brand}/{profile_id}/entitlements/history`
 
  - **Internal jobs**: `GET/POST/PATCH/DELETE /admin/internal-jobs`
    - Includes:
@@ -618,6 +630,7 @@ alembic upgrade head
  - `POST /admin/products`
  - `GET /admin/products/{product_id}`
  - `PATCH /admin/products/{product_id}`
+ - `GET /admin/products/{product_id}/delete-preview`
  - `DELETE /admin/products/{product_id}`
 
  UI helper:
@@ -680,6 +693,15 @@ alembic upgrade head
  La marque active vient du **compte utilisateur** via `X-Brand` à chaque appel — pas d’une liste statique de 100 marques dans le `.env`. Le scope Unomi par défaut = clé de cette marque.
 
  Vérification : `GET /admin/segments/segmentation-mode` + `X-Brand: <marque>` → `unomiPolicy: "all_brands"`, `activeBrand`, `currentBrandUsesUnomi`.
+
+ ### Profils Loyalty ↔ Unomi (indépendant de la segmentation)
+
+ Voir [`docs/UNOMI_PROFILE_SYNC.md`](docs/UNOMI_PROFILE_SYNC.md) et le **guide de déploiement CDP** [`docs/UNOMI_PROFILE_SYNC_DEPLOY.md`](docs/UNOMI_PROFILE_SYNC_DEPLOY.md).
+
+ - Push automatique loyalty → Unomi (`POST /cxs/profiles`) à l’upsert client, changement de statut/points, recalcul métriques
+ - `DELETE /customers/{brand}/{profile_id}` → supprime aussi le profil Unomi
+ - `POST /integrations/unomi/profile-events` ← webhook suppression Unomi → loyalty
+ - Upsert depuis Unomi : envoyer `X-Profile-Sync-Source: unomi` sur `POST /customers/upsert` pour éviter les boucles
 
  **Segments manuels Unomi** : pas de table `segment_members` ; chaque ajout pousse le `profileId` Unomi du client dans `manual_profile_ids` et reconstruit la condition Unomi :
 

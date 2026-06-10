@@ -17,10 +17,14 @@ class CustomerCoupon(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     customer_id = Column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
-    coupon_type_id = Column(UUID(as_uuid=True), ForeignKey("coupon_types.id"), nullable=False)
+    coupon_type_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("coupon_types.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     status = Column(String(20), nullable=False, default="ISSUED")
-    # ISSUED | USED | EXPIRED
+    # ISSUED | USED | EXPIRED | INVALIDATED
 
     issued_at = Column(TIMESTAMP, server_default=func.now())
     expires_at = Column(TIMESTAMP, nullable=True)

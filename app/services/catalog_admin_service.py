@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from app.models.coupon_type import CouponType
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
+from app.models.product import Product
 from app.models.reward import Reward
+from app.models.reward_product import RewardProduct
 
 
 def coupon_type_customer_coupon_count(db: Session, *, coupon_type_id) -> int:
@@ -23,12 +25,43 @@ def coupon_type_customer_coupon_count(db: Session, *, coupon_type_id) -> int:
 
 def coupon_type_deletion_meta(db: Session, *, coupon_type_id) -> dict:
     count = coupon_type_customer_coupon_count(db, coupon_type_id=coupon_type_id)
-    can_delete = count == 0
+    issued = (
+        db.query(CustomerCoupon.id)
+        .filter(CustomerCoupon.coupon_type_id == coupon_type_id)
+        .filter(CustomerCoupon.status == "ISSUED")
+        .count()
+    )
     return {
         "customer_coupon_count": count,
-        "can_delete": can_delete,
-        "recommended_action": None if can_delete else "deactivate",
+        "customer_coupons_issued": issued,
+        "can_delete": True,
+        "recommended_action": "deactivate" if count and not issued else None,
     }
+
+
+def build_product_snapshots_for_reward(db: Session, *, reward_id) -> list[dict]:
+    links = db.query(RewardProduct).filter(RewardProduct.reward_id == reward_id).all()
+    if not links:
+        return []
+    product_ids = [l.product_id for l in links]
+    products = db.query(Product).filter(Product.id.in_(product_ids)).all()
+    prod_map = {p.id: p for p in products}
+    snapshots: list[dict] = []
+    for link in links:
+        product = prod_map.get(link.product_id)
+        if not product:
+            continue
+        snapshots.append(
+            {
+                "id": str(product.id),
+                "name": product.name,
+                "matchKey": product.match_key,
+                "quantity": int(link.quantity or 1),
+                "catalogRemoved": False,
+                "invalidatedAt": None,
+            }
+        )
+    return snapshots
 
 
 def reward_blocking_customer_reward_count(db: Session, *, reward_id) -> int:
@@ -41,6 +74,7 @@ def reward_blocking_customer_reward_count(db: Session, *, reward_id) -> int:
 
 
 def build_customer_reward_snapshot_payload(
+    db: Session | None = None,
     *,
     reward: Reward,
     coupon_type: CouponType | None = None,
@@ -62,6 +96,10 @@ def build_customer_reward_snapshot_payload(
             "name": coupon_type.name,
             "description": coupon_type.description,
         }
+    if db is not None:
+        snapshots = build_product_snapshots_for_reward(db, reward_id=reward.id)
+        if snapshots:
+            payload["productSnapshots"] = snapshots
     return payload
 
 
@@ -112,7 +150,7 @@ def merge_customer_reward_snapshot_payload(
     legacy = legacy_payload or base
 
     if reward is not None:
-        snap = build_customer_reward_snapshot_payload(reward=reward, coupon_type=coupon_type)
+        snap = build_customer_reward_snapshot_payload(db, reward=reward, coupon_type=coupon_type)
     else:
         reward_snap = _reward_snapshot_from_legacy(legacy)
         if not reward_snap:
@@ -139,7 +177,19 @@ def merge_customer_reward_snapshot_payload(
                 "description": ct.get("description"),
             }
 
-    preserved_keys = ("cancelledAt", "cancelReason", "cancelled_at", "cancel_reason")
+    preserved_keys = (
+        "cancelledAt",
+        "cancelReason",
+        "cancelled_at",
+        "cancel_reason",
+        "catalogRemoved",
+        "catalogRemovedAt",
+        "catalogRemovedReason",
+        "catalogRemovedEntityType",
+        "catalogRemovedEntityId",
+        "catalogRemovedEntityName",
+        "productSnapshots",
+    )
     merged = dict(base)
     for key in preserved_keys:
         if key in base:

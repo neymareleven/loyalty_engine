@@ -95,4 +95,10 @@ def recompute_customer_metrics_for_brand(
             m.computed_at = now_utc
         touched += 1
 
+        from app.services.unomi_profile_service import sync_customer_profile_to_unomi
+
+        cust = db.query(Customer).filter(Customer.id == customer_id).first()
+        if cust:
+            sync_customer_profile_to_unomi(db, customer=cust, reason="metrics_recompute")
+
     return touched

@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.coupon_type import CouponType
-from app.models.customer_coupon import CustomerCoupon
 from app.schemas.coupon_type import (
     CouponTypeCreate,
     CouponTypeOut,
@@ -15,7 +14,12 @@ from app.schemas.coupon_type import (
     CouponTypeRewardsReplace,
     CouponTypeUpdate,
 )
+from app.schemas.catalog_delete import CatalogDeletePreviewOut
 from app.services.catalog_admin_service import coupon_type_deletion_meta
+from app.services.catalog_invalidation_service import (
+    apply_coupon_type_catalog_delete,
+    preview_coupon_type_delete,
+)
 from app.services.coupon_rewards_service import (
     list_coupon_type_reward_ids,
     replace_coupon_type_rewards,
@@ -47,6 +51,7 @@ def _serialize_coupon_type_out(*, db: Session, obj: CouponType) -> dict:
         ],
         "active": obj.active,
         "customer_coupon_count": deletion["customer_coupon_count"],
+        "customer_coupons_issued": deletion.get("customer_coupons_issued", 0),
         "can_delete": deletion["can_delete"],
         "recommended_action": deletion["recommended_action"],
         "created_at": obj.created_at,
@@ -214,6 +219,19 @@ def update_coupon_type(
     return _serialize_coupon_type_out(db=db, obj=obj)
 
 
+@router.get("/{coupon_type_id}/delete-preview", response_model=CatalogDeletePreviewOut)
+def preview_delete_coupon_type(
+    coupon_type_id: UUID,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    obj = db.query(CouponType).filter(CouponType.id == coupon_type_id).first()
+    if not obj or obj.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Coupon type not found")
+    data = preview_coupon_type_delete(db, coupon_type=obj)
+    return CatalogDeletePreviewOut(**data)
+
+
 @router.delete("/{coupon_type_id}")
 def delete_coupon_type(
     coupon_type_id: UUID,
@@ -224,20 +242,7 @@ def delete_coupon_type(
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Coupon type not found")
 
-    linked_customer_coupon = (
-        db.query(CustomerCoupon.id)
-        .filter(CustomerCoupon.coupon_type_id == obj.id)
-        .first()
-    )
-    if linked_customer_coupon:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Impossible de supprimer ce type de coupon car des coupons clients existent déjà. "
-                "Action recommandée: désactivez le type de coupon au lieu de le supprimer."
-            ),
-        )
-
+    invalidation = apply_coupon_type_catalog_delete(db, coupon_type=obj)
     db.delete(obj)
     try:
         db.commit()
@@ -256,4 +261,4 @@ def delete_coupon_type(
             status_code=409,
             detail="Impossible de supprimer ce type de coupon (conflit de données).",
         )
-    return {"deleted": True}
+    return {"deleted": True, **invalidation}

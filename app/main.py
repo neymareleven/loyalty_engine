@@ -38,6 +38,7 @@ from app.routes.admin import router as admin_router
 from app.routes.internal_jobs import router as internal_jobs_router
 from app.routes.event_types import router as transaction_types_router
 from app.routes.loyalty_tiers import router as loyalty_tiers_router
+from app.routes.unomi_integrations import router as unomi_integrations_router
 
 app = FastAPI(title="Loyalty Engine")
 
@@ -216,6 +217,7 @@ app.include_router(admin_router)
 app.include_router(internal_jobs_router)
 app.include_router(transaction_types_router)
 app.include_router(loyalty_tiers_router)
+app.include_router(unomi_integrations_router)
 
 
 @app.get("/")

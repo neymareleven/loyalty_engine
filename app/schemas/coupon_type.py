@@ -41,6 +41,7 @@ class CouponTypeOut(BaseModel):
     rewards: list[CouponTypeRewardSummary] = Field(default_factory=list)
     active: bool
     customer_coupon_count: int = 0
+    customer_coupons_issued: int = 0
     can_delete: bool = True
     recommended_action: Optional[CouponTypeRecommendedAction] = None
     created_at: Optional[datetime] = None

@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -7,12 +5,15 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps.brand import get_active_brand
 from app.models.coupon_type import CouponType
-from app.models.customer_reward import CustomerReward
 from app.models.product import Product
 from app.models.reward import Reward
 from app.models.reward_product import RewardProduct
 from app.schemas.reward import CouponTypeLinkSummary, RewardCreate, RewardUpdate, RewardOut
-from app.services.catalog_admin_service import reward_blocking_customer_reward_count
+from app.schemas.catalog_delete import CatalogDeletePreviewOut
+from app.services.catalog_invalidation_service import (
+    apply_reward_catalog_delete,
+    preview_reward_delete,
+)
 from app.services.coupon_rewards_service import link_reward_to_coupon_types, list_reward_coupon_type_ids
 
 
@@ -264,6 +265,19 @@ def update_reward(
     return _serialize_reward_out(db=db, reward=reward)
 
 
+@router.get("/{reward_id}/delete-preview", response_model=CatalogDeletePreviewOut)
+def preview_delete_reward(
+    reward_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    reward = db.query(Reward).filter(Reward.id == reward_id).first()
+    if not reward or reward.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    data = preview_reward_delete(db, reward=reward)
+    return CatalogDeletePreviewOut(**data)
+
+
 @router.delete("/{reward_id}")
 def delete_reward(
     reward_id: str,
@@ -274,37 +288,7 @@ def delete_reward(
     if not reward or reward.brand != active_brand:
         raise HTTPException(status_code=404, detail="Reward not found")
 
-    blocking_count = reward_blocking_customer_reward_count(db, reward_id=reward.id)
-    if blocking_count > 0:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": (
-                    "Impossible de supprimer cette récompense car elle a déjà été utilisée ou a expiré "
-                    "chez au moins un client. Désactivez-la (active=false) pour arrêter les nouvelles émissions."
-                ),
-                "blockingCustomerRewardCount": blocking_count,
-                "recommendedAction": "deactivate",
-            },
-        )
-
-    now = datetime.utcnow()
-    issued = (
-        db.query(CustomerReward)
-        .filter(CustomerReward.reward_id == reward.id)
-        .filter(CustomerReward.status == "ISSUED")
-        .all()
-    )
-    cancelled_count = 0
-    for cr in issued:
-        cr.status = "CANCELLED"
-        cr.expires_at = cr.expires_at or now
-        payload = cr.payload if isinstance(cr.payload, dict) else {}
-        payload["cancelledAt"] = now.isoformat() + "Z"
-        payload["cancelReason"] = "REWARD_DELETED"
-        cr.payload = payload
-        cancelled_count += 1
-
+    invalidation = apply_reward_catalog_delete(db, reward=reward)
     db.delete(reward)
     try:
         db.commit()
@@ -327,4 +311,8 @@ def delete_reward(
                 "Action recommandée: désactivez la récompense (active=false) au lieu de la supprimer."
             ),
         )
-    return {"deleted": True, "cancelled_count": cancelled_count}
+    return {
+        "deleted": True,
+        "invalidated_count": invalidation.get("rewards_invalidated", 0),
+        **invalidation,
+    }

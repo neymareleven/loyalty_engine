@@ -9,14 +9,18 @@ from app.models.customer import Customer
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
 from app.models.transaction import Transaction
+from app.services.catalog_invalidation_service import coupon_admin_allowed_transitions
 
-ALLOWED_COUPON_STATUSES = frozenset({"ISSUED", "USED", "EXPIRED"})
+ALLOWED_COUPON_STATUSES = frozenset({"ISSUED", "USED", "EXPIRED", "INVALIDATED"})
 
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "ISSUED": frozenset({"USED", "EXPIRED"}),
     "USED": frozenset({"ISSUED", "EXPIRED"}),
     "EXPIRED": frozenset(),
+    "INVALIDATED": frozenset(),
 }
+
+SKIP_REWARD_SYNC_STATUSES = frozenset({"INVALIDATED", "CANCELLED"})
 
 
 def _utcnow() -> datetime:
@@ -24,7 +28,7 @@ def _utcnow() -> datetime:
 
 
 def _assert_transition(*, from_status: str, to_status: str) -> None:
-    if to_status not in ALLOWED_COUPON_STATUSES:
+    if to_status not in {"ISSUED", "USED", "EXPIRED"}:
         raise HTTPException(status_code=400, detail=f"Invalid status: {to_status}")
     allowed = ALLOWED_TRANSITIONS.get(from_status, frozenset())
     if to_status not in allowed:
@@ -61,6 +65,14 @@ def _get_customer_coupon_for_update(
     return customer, coupon
 
 
+def _admin_audit_transaction_id(*, customer_coupon_id: str, transaction_type: str, now: datetime) -> str:
+    """event_id is varchar(100) — keep audit ids short."""
+    coupon_key = str(customer_coupon_id).replace("-", "")[:12]
+    type_key = "".join(ch for ch in transaction_type if ch.isalnum())[:8].lower()
+    ts = now.strftime("%Y%m%d%H%M%S%f")[:20]
+    return f"admcp_{type_key}_{coupon_key}_{ts}"[:100]
+
+
 def _create_admin_audit_transaction(
     db: Session,
     *,
@@ -73,9 +85,10 @@ def _create_admin_audit_transaction(
 ) -> Transaction:
     now = _utcnow()
     tx = Transaction(
-        transaction_id=(
-            f"admin_coupon_{transaction_type.lower()}_{brand}_{profile_id}_"
-            f"{customer_coupon_id}_{now.strftime('%Y%m%d%H%M%S%f')}"
+        transaction_id=_admin_audit_transaction_id(
+            customer_coupon_id=customer_coupon_id,
+            transaction_type=transaction_type,
+            now=now,
         ),
         brand=brand,
         profile_id=profile_id,
@@ -112,6 +125,8 @@ def sync_rewards_on_coupon_status(
 
     if to_status == "USED":
         for cr in rewards:
+            if cr.status in SKIP_REWARD_SYNC_STATUSES:
+                continue
             if cr.status != "ISSUED":
                 continue
             if cr.expires_at is not None and cr.expires_at < now:
@@ -124,6 +139,8 @@ def sync_rewards_on_coupon_status(
 
     if to_status == "ISSUED":
         for cr in rewards:
+            if cr.status in SKIP_REWARD_SYNC_STATUSES:
+                continue
             if cr.status != "USED":
                 continue
             if cr.expires_at is not None and cr.expires_at < now:
@@ -136,6 +153,8 @@ def sync_rewards_on_coupon_status(
 
     if to_status == "EXPIRED":
         for cr in rewards:
+            if cr.status in SKIP_REWARD_SYNC_STATUSES:
+                continue
             if cr.status == "ISSUED":
                 cr.status = "EXPIRED"
                 cr.source_transaction_id = tx.id
@@ -157,6 +176,21 @@ def set_customer_coupon_status(
         profile_id=profile_id,
         customer_coupon_id=customer_coupon_id,
     )
+
+    allowed = coupon_admin_allowed_transitions(coupon)
+    if not allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Ce coupon ne peut plus être modifié "
+                "(invalidé, expiré ou modèle retiré du catalogue)."
+            ),
+        )
+    if target not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Transition non autorisée depuis le statut {coupon.status}",
+        )
 
     now = _utcnow()
     from_status = coupon.status

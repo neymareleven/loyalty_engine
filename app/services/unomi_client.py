@@ -105,6 +105,30 @@ class UnomiClient:
             raise
         return False
 
+    def get_profile(self, profile_id: str) -> dict | None:
+        pid = quote(profile_id, safe="")
+        try:
+            result = self.request("GET", f"/profiles/{pid}")
+            return result if isinstance(result, dict) else None
+        except UnomiClientError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    def save_profile(self, profile_body: dict) -> dict | None:
+        return self.request("POST", "/profiles", json_body=profile_body)
+
+    def delete_profile(self, profile_id: str, *, with_data: bool = True) -> None:
+        """Remove profile via Unomi privacy API (administrative delete)."""
+        pid = quote(profile_id, safe="")
+        flag = "true" if with_data else "false"
+        try:
+            self.request("DELETE", f"/privacy/profiles/{pid}", query=f"withData={flag}")
+        except UnomiClientError as e:
+            if e.status_code == 404:
+                return
+            raise
+
     def get_impacted_profile_ids(self, segment_id: str, *, limit: int = 5000) -> list[str]:
         """Best-effort list of profile itemIds currently in the segment."""
         sid = quote(segment_id, safe="")

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.db import get_db
@@ -20,7 +20,14 @@ from app.schemas.customer_coupon import CustomerCouponOut, CustomerCouponStatusU
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.contact_service import get_or_create_customer
+from app.services.customer_delete_service import delete_loyalty_customer
+from app.services.unomi_profile_service import reset_profile_sync_source, set_profile_sync_source
 from app.services.customer_coupon_service import set_customer_coupon_status
+from app.services.customer_entitlement_serialization import (
+    serialize_customer_coupon_out,
+    serialize_customer_reward_out,
+)
+from app.services.entitlement_history_service import build_customer_entitlement_history
 from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
@@ -98,6 +105,7 @@ def get_customer(
 def upsert_customer(
     payload: CustomerUpsert,
     db: Session = Depends(get_db),
+    x_profile_sync_source: str | None = Header(None, alias="X-Profile-Sync-Source"),
 ):
     props = payload.properties or {}
     brand = (payload.brand or props.get("brand") or "").strip() or None
@@ -124,6 +132,9 @@ def upsert_customer(
         if isinstance(bd, (int, float)):
             birthdate = datetime.utcfromtimestamp(float(bd) / 1000.0).date()
 
+    token = None
+    if (x_profile_sync_source or "").strip().lower() == "unomi":
+        token = set_profile_sync_source("unomi")
     try:
         existed = bool(
             db.query(Customer.id)
@@ -131,51 +142,79 @@ def upsert_customer(
             .filter(Customer.profile_id == profile_id)
             .first()
         )
-        customer = get_or_create_customer(
-            db,
-            brand,
-            profile_id,
-            {"gender": gender, "birthdate": birthdate},
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        try:
+            customer = get_or_create_customer(
+                db,
+                brand,
+                profile_id,
+                {"gender": gender, "birthdate": birthdate},
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
-    if not existed:
-        from app.services.transaction_service import create_internal_transaction
+        if not existed:
+            from app.services.transaction_service import create_internal_transaction
 
-        ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-        tx_id = f"customer_{brand}_{profile_id}_CUSTOMER_REGISTRATION_{ts}"
-        tx_payload = {
-            "reason": "CUSTOMER_CREATED",
-            "brand": brand,
-            "profileId": profile_id,
-            "_ruleDepth": 0,
-        }
-        create_internal_transaction(
-            db,
-            brand=brand,
-            profile_id=profile_id,
-            transaction_type="CUSTOMER_REGISTRATION",
-            transaction_id=tx_id,
-            payload=tx_payload,
-            depth=0,
-            commit=False,
-        )
+            ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+            tx_id = f"customer_{brand}_{profile_id}_CUSTOMER_REGISTRATION_{ts}"
+            tx_payload = {
+                "reason": "CUSTOMER_CREATED",
+                "brand": brand,
+                "profileId": profile_id,
+                "_ruleDepth": 0,
+            }
+            create_internal_transaction(
+                db,
+                brand=brand,
+                profile_id=profile_id,
+                transaction_type="CUSTOMER_REGISTRATION",
+                transaction_id=tx_id,
+                payload=tx_payload,
+                depth=0,
+                commit=False,
+            )
 
-    if customer.loyalty_status in (None, "UNCONFIGURED"):
-        update_customer_status(
-            db,
-            customer,
-            reason="AUTO_TIER_REFRESH",
-            source_transaction_id=None,
-            depth=0,
-            refresh_window=True,
-            emit_events=False,
-        )
-    db.commit()
-    db.refresh(customer)
+        if customer.loyalty_status in (None, "UNCONFIGURED"):
+            update_customer_status(
+                db,
+                customer,
+                reason="AUTO_TIER_REFRESH",
+                source_transaction_id=None,
+                depth=0,
+                refresh_window=True,
+                emit_events=False,
+            )
+        db.commit()
+        db.refresh(customer)
 
-    return serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
+        return serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
+    finally:
+        if token is not None:
+            reset_profile_sync_source(token)
+
+
+@router.delete("/{brand}/{profile_id}")
+def delete_customer(
+    brand: str,
+    profile_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    """Delete loyalty customer and the matching Unomi profile (when profile sync is enabled)."""
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    try:
+        result = delete_loyalty_customer(db, brand=brand, profile_id=profile_id, skip_unomi=False)
+        if not result.get("deleted"):
+            raise HTTPException(status_code=404, detail="Customer not found")
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Customer delete failed: {e}")
+    return result
 
 
 @router.get("/{brand}/{profile_id}/point-movements", response_model=list[PointMovementOut])
@@ -239,12 +278,13 @@ def list_customer_rewards(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    return (
+    rows = (
         q.order_by(CustomerReward.issued_at.desc())
         .offset(offset)
         .limit(limit)
         .all()
     )
+    return [serialize_customer_reward_out(db, reward=r) for r in rows]
 
 
 @router.get("/{brand}/{profile_id}/coupons", response_model=list[CustomerCouponOut])
@@ -274,11 +314,41 @@ def list_customer_coupons(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    return (
+    rows = (
         q.order_by(CustomerCoupon.issued_at.desc(), CustomerCoupon.created_at.desc())
         .offset(offset)
         .limit(limit)
         .all()
+    )
+    return [serialize_customer_coupon_out(db, coupon=c) for c in rows]
+
+
+@router.get("/{brand}/{profile_id}/entitlements/history")
+def get_customer_entitlements_history(
+    brand: str,
+    profile_id: str,
+    active_brand: str = Depends(get_active_brand),
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    if brand != active_brand:
+        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    customer = (
+        db.query(Customer.id)
+        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
+        .first()
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    return build_customer_entitlement_history(
+        db,
+        brand=brand,
+        profile_id=profile_id,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -327,14 +397,14 @@ def list_customer_coupons_with_rewards(
             key = str(r.customer_coupon_id) if r.customer_coupon_id is not None else None
             if not key:
                 continue
-            rewards_by_coupon_id.setdefault(key, []).append(CustomerRewardOut.model_validate(r))
+            rewards_by_coupon_id.setdefault(key, []).append(serialize_customer_reward_out(db, reward=r))
 
     return {
         "brand": brand,
         "profileId": profile_id,
         "items": [
             {
-                "coupon": CustomerCouponOut.model_validate(c),
+                "coupon": serialize_customer_coupon_out(db, coupon=c),
                 "rewards": rewards_by_coupon_id.get(str(c.id), []),
             }
             for c in coupons
@@ -356,16 +426,26 @@ def patch_customer_coupon_status(
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
 
-    coupon = set_customer_coupon_status(
-        db,
-        brand=brand,
-        profile_id=profile_id,
-        customer_coupon_id=customer_coupon_id,
-        status=payload.status,
-    )
-    db.commit()
-    db.refresh(coupon)
-    return coupon
+    try:
+        coupon = set_customer_coupon_status(
+            db,
+            brand=brand,
+            profile_id=profile_id,
+            customer_coupon_id=customer_coupon_id,
+            status=payload.status,
+        )
+        db.commit()
+        db.refresh(coupon)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Impossible de mettre à jour le statut du coupon : {e}",
+        ) from e
+    return serialize_customer_coupon_out(db, coupon=coupon)
 
 
 @router.patch("/{brand}/{profile_id}/loyalty/status", response_model=CustomerLoyaltyStatusOut)

@@ -143,6 +143,11 @@ def issue_coupon(
                 "id": str(ct.id),
                 "name": ct.name,
             },
+            "couponTypeSnapshot": {
+                "id": str(ct.id),
+                "name": ct.name,
+                "description": ct.description,
+            },
         },
     )
 
@@ -250,7 +255,7 @@ def use_coupon(
             db.query(CustomerCoupon)
             .filter(CustomerCoupon.customer_id == customer.id)
             .filter(CustomerCoupon.coupon_type_id == ct.id)
-            .filter(CustomerCoupon.status == "ISSUED")
+            .filter(CustomerCoupon.status.in_(("ISSUED",)))
             .order_by(CustomerCoupon.issued_at.asc(), CustomerCoupon.created_at.asc())
             .first()
         )
@@ -303,7 +308,7 @@ def expire_coupons(db: Session, *, brand: str):
         db.query(CustomerCoupon)
         .join(CouponType, CouponType.id == CustomerCoupon.coupon_type_id)
         .filter(CouponType.brand == brand)
-        .filter(CustomerCoupon.status == "ISSUED")
+        .filter(CustomerCoupon.status.in_(("ISSUED",)))
         .filter(CustomerCoupon.expires_at.isnot(None))
         .filter(CustomerCoupon.expires_at < now)
         .all()
@@ -315,7 +320,7 @@ def expire_coupons(db: Session, *, brand: str):
         rewards = (
             db.query(CustomerReward)
             .filter(CustomerReward.customer_coupon_id == cc.id)
-            .filter(CustomerReward.status == "ISSUED")
+            .filter(CustomerReward.status.in_(("ISSUED",)))
             .all()
         )
         for cr in rewards:
