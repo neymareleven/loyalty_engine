@@ -200,6 +200,9 @@ def update_coupon_type(
     for k, v in data.items():
         setattr(obj, k, v)
 
+    if reward_ids is not None:
+        replace_coupon_type_rewards(db, coupon_type=obj, reward_ids=reward_ids, brand=active_brand)
+
     try:
         db.commit()
     except IntegrityError:
@@ -212,10 +215,6 @@ def update_coupon_type(
             ),
         )
     db.refresh(obj)
-    if reward_ids is not None:
-        replace_coupon_type_rewards(db, coupon_type=obj, reward_ids=reward_ids, brand=active_brand)
-        db.commit()
-        db.refresh(obj)
     return _serialize_coupon_type_out(db=db, obj=obj)
 
 

@@ -212,3 +212,20 @@ def link_reward_to_coupon_types(
 
     db.flush()
     return list_reward_coupon_type_ids(db, reward_id=reward.id)
+
+
+def replace_reward_coupon_types(
+    db: Session,
+    *,
+    reward: Reward,
+    coupon_type_ids: list | None,
+    brand: str,
+) -> list[UUID]:
+    """Replace all coupon-type links for a reward (mirror of replace_coupon_type_rewards)."""
+    return link_reward_to_coupon_types(
+        db,
+        reward=reward,
+        coupon_type_ids=coupon_type_ids,
+        brand=brand,
+        replace=True,
+    )

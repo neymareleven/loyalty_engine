@@ -8,13 +8,23 @@ from app.models.coupon_type import CouponType
 from app.models.product import Product
 from app.models.reward import Reward
 from app.models.reward_product import RewardProduct
-from app.schemas.reward import CouponTypeLinkSummary, RewardCreate, RewardUpdate, RewardOut
+from app.schemas.reward import (
+    CouponTypeLinkSummary,
+    RewardCouponTypesReplace,
+    RewardCreate,
+    RewardOut,
+    RewardUpdate,
+)
 from app.schemas.catalog_delete import CatalogDeletePreviewOut
 from app.services.catalog_invalidation_service import (
     apply_reward_catalog_delete,
     preview_reward_delete,
 )
-from app.services.coupon_rewards_service import link_reward_to_coupon_types, list_reward_coupon_type_ids
+from app.services.coupon_rewards_service import (
+    link_reward_to_coupon_types,
+    list_reward_coupon_type_ids,
+    replace_reward_coupon_types,
+)
 
 
 router = APIRouter(prefix="/rewards", tags=["rewards"])
@@ -228,6 +238,16 @@ def update_reward(
             continue
         setattr(reward, k, v)
 
+    if coupon_type_ids is not None:
+        replace_reward_coupon_types(
+            db,
+            reward=reward,
+            coupon_type_ids=coupon_type_ids,
+            brand=active_brand,
+        )
+
+    _replace_reward_products(db=db, reward=reward, active_brand=active_brand, items=products_items)
+
     try:
         db.commit()
     except IntegrityError as e:
@@ -249,17 +269,52 @@ def update_reward(
             ),
         )
     db.refresh(reward)
+    return _serialize_reward_out(db=db, reward=reward)
 
-    if coupon_type_ids is not None:
-        link_reward_to_coupon_types(
-            db,
-            reward=reward,
-            coupon_type_ids=coupon_type_ids,
-            brand=active_brand,
-            replace=True,
-        )
 
-    _replace_reward_products(db=db, reward=reward, active_brand=active_brand, items=products_items)
+@router.get("/{reward_id}/coupon-types", response_model=list[CouponTypeLinkSummary])
+def list_reward_coupon_types(
+    reward_id: str,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    reward = db.query(Reward).filter(Reward.id == reward_id).first()
+    if not reward or reward.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Reward not found")
+
+    coupon_type_ids = list_reward_coupon_type_ids(db, reward_id=reward.id)
+    if not coupon_type_ids:
+        return []
+
+    coupon_types = (
+        db.query(CouponType)
+        .filter(CouponType.id.in_(coupon_type_ids))
+        .order_by(CouponType.name.asc())
+        .all()
+    )
+    return [
+        CouponTypeLinkSummary(id=ct.id, name=ct.name, active=bool(ct.active))
+        for ct in coupon_types
+    ]
+
+
+@router.put("/{reward_id}/coupon-types", response_model=RewardOut)
+def replace_reward_coupon_types_endpoint(
+    reward_id: str,
+    payload: RewardCouponTypesReplace,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    reward = db.query(Reward).filter(Reward.id == reward_id).first()
+    if not reward or reward.brand != active_brand:
+        raise HTTPException(status_code=404, detail="Reward not found")
+
+    replace_reward_coupon_types(
+        db,
+        reward=reward,
+        coupon_type_ids=payload.coupon_type_ids,
+        brand=active_brand,
+    )
     db.commit()
     db.refresh(reward)
     return _serialize_reward_out(db=db, reward=reward)

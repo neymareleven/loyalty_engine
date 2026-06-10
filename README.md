@@ -156,7 +156,9 @@ CouponType ◄──── coupon_type_rewards ────► Reward
 
 1. `POST /admin/coupon-types` — sans rewards.
 2. `POST /rewards` avec `coupon_type_ids` (obligatoire).
-3. Liens optionnels / réordonnancement : `PUT /admin/coupon-types/{id}/rewards` (préféré) plutôt que `PATCH /rewards/{id}` avec `coupon_type_ids` (exception).
+3. Liens coupon ↔ reward (bidirectionnels, toujours synchronisés) :
+   - depuis le coupon type : `PUT /admin/coupon-types/{id}/rewards`
+   - depuis la reward : `PUT /rewards/{id}/coupon-types` ou `PATCH /rewards/{id}` avec `coupon_type_ids`
 4. Règles : action `issue_coupon` ; rewards disponibles via `GET /admin/ui-options/coupon-types/{id}/rewards`.
 
 **Suppression catalogue (invalidation client)**

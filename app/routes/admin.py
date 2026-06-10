@@ -122,11 +122,10 @@ def list_ui_options_coupon_types(
         q = q.filter(CouponType.active.is_(active))
     items = q.order_by(CouponType.name.asc()).all()
     from app.services.catalog_admin_service import coupon_type_deletion_meta
-    from app.services.coupon_rewards_service import list_coupon_type_reward_ids, resolve_rewards_catalog
+    from app.services.coupon_rewards_service import list_coupon_type_reward_ids
 
     out_items = []
     for ct in items:
-        catalog = resolve_rewards_catalog(db, coupon_type=ct, active_only=True)
         linked_ids = [str(rid) for rid in list_coupon_type_reward_ids(db, coupon_type_id=ct.id)]
         deletion = coupon_type_deletion_meta(db, coupon_type_id=ct.id)
         out_items.append(
@@ -134,8 +133,8 @@ def list_ui_options_coupon_types(
                 "id": str(ct.id),
                 "name": ct.name,
                 "active": ct.active,
-                "rewardIds": linked_ids or [str(r.id) for r in catalog],
-                "rewardCount": len(catalog),
+                "rewardIds": linked_ids,
+                "rewardCount": len(linked_ids),
                 "customerCouponCount": deletion["customer_coupon_count"],
                 "canDelete": deletion["can_delete"],
                 "recommendedAction": deletion["recommended_action"],
@@ -757,8 +756,14 @@ def get_coupon_types_ui_catalog():
             "fieldsOnList": ["canDelete", "customerCouponCount", "customerCouponsIssued", "recommendedAction"],
         },
         "linkRewards": {
-            "preferredEndpoint": "PUT /admin/coupon-types/{coupon_type_id}/rewards",
-            "alternateEndpoint": "PATCH /rewards/{id} avec coupon_type_ids (usage exceptionnel)",
+            "summary": (
+                "Liens coupon ↔ reward bidirectionnels via coupon_type_rewards. "
+                "Modifier depuis le coupon type OU depuis la reward : les deux vues restent synchronisées."
+            ),
+            "fromCouponType": "PUT /admin/coupon-types/{coupon_type_id}/rewards",
+            "fromReward": "PUT /rewards/{reward_id}/coupon-types",
+            "alternateFromReward": "PATCH /rewards/{reward_id} avec coupon_type_ids",
+            "readFromReward": "GET /rewards/{reward_id}/coupon-types",
         },
         "uiOptions": {
             "listCouponTypes": "/admin/ui-options/coupon-types",
@@ -777,7 +782,8 @@ def get_rewards_ui_catalog():
             ],
             "summary": (
                 "Après création du coupon type, POST /rewards avec coupon_type_ids (obligatoire, min. 1). "
-                "Pour modifier les liens d'une reward existante, privilégier PUT /admin/coupon-types/{id}/rewards."
+                "Les liens peuvent être modifiés depuis le coupon type (PUT …/rewards) "
+                "ou depuis la reward (PUT …/coupon-types) — même table, toujours synchronisé."
             ),
         },
         "create": {
@@ -801,9 +807,27 @@ def get_rewards_ui_catalog():
         "update": {
             "fieldHelp": {
                 "coupon_type_ids": (
-                    "Remplace tous les liens coupon ↔ reward. Usage exceptionnel ; préférer la gestion depuis le coupon type."
+                    "Multi-select éditable à la création ET à la modification. "
+                    "Remplace tous les liens coupon ↔ reward pour cette récompense. "
+                    "Préférer PUT /rewards/{reward_id}/coupon-types pour ne mettre à jour que les liens."
                 ),
                 "active": "Désactiver pour stopper les nouvelles émissions ; ne supprime pas l'historique client.",
+            },
+            "couponTypeIdsField": {
+                "editableOnCreate": True,
+                "editableOnUpdate": True,
+                "requiredOnCreate": True,
+                "requiredOnUpdate": False,
+                "widget": "remote_multi_select",
+                "datasource": {
+                    "endpoint": "/admin/ui-options/coupon-types",
+                    "method": "GET",
+                    "brandVia": "X-Brand",
+                    "valueField": "id",
+                    "labelField": "name",
+                },
+                "saveLinksEndpoint": "PUT /rewards/{reward_id}/coupon-types",
+                "readLinksEndpoint": "GET /rewards/{reward_id}/coupon-types",
             },
         },
         "delete": {

@@ -38,12 +38,24 @@ class RewardCreate(BaseModel):
     )
 
 
+class RewardCouponTypesReplace(BaseModel):
+    """Replace all coupon-type links for a reward (bidirectional with PUT coupon-type rewards)."""
+
+    coupon_type_ids: list[UUID] = Field(
+        default_factory=list,
+        description="Liste complète des types de coupon liés (vide = aucun lien).",
+    )
+
+
 class RewardUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     active: Optional[bool] = None
     products: Optional[list[RewardProductItem]] = None
-    coupon_type_ids: Optional[list[UUID]] = None
+    coupon_type_ids: Optional[list[UUID]] = Field(
+        default=None,
+        description="Si fourni, remplace tous les liens coupon ↔ reward pour cette récompense.",
+    )
 
 
 class RewardOut(BaseModel):
