@@ -35,7 +35,7 @@ def test_apply_segment_list_ordering_returns_query():
         sort_order="asc",
     )
     base.order_by.assert_called_once()
-    assert ordered is base
+    assert ordered is base.order_by.return_value
 
 
 def test_pagination_slice_contract():
