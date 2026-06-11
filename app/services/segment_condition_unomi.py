@@ -1,4 +1,4 @@
-"""Translate loyalty-engine segment AST (customer.*) to Apache Unomi segment conditions."""
+﻿"""Translate loyalty-engine segment AST (customer.*) to Apache Unomi segment conditions."""
 
 from __future__ import annotations
 
