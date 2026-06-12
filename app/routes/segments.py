@@ -25,7 +25,7 @@ from app.schemas.segment import (
     SegmentRecomputeResult,
     SegmentUpdate,
 )
-from app.services.client_error_catalog import CLIENT_ERROR_EXTRACTION, SEGMENT_CLIENT_ERRORS
+from app.services.birthdate_targeting import BIRTHDATE_FIELD_META, BIRTHDATE_VALUE_PRESETS
 from app.services.segment_members_list_service import list_segment_members as list_segment_members_payload
 from app.services.segment_condition_unomi import loyalty_ast_to_unomi_condition
 from app.services.segment_admin_service import (
@@ -250,11 +250,10 @@ def get_segments_ui_catalog():
                 "brandVia": "X-Brand",
             },
         },
-        "clientErrors": {
-            **CLIENT_ERROR_EXTRACTION,
-            "messages": SEGMENT_CLIENT_ERRORS,
-        },
     }
+
+
+@router.get("/ui-options/condition-fields")
 def list_segment_condition_fields(brand: str = Depends(get_active_brand)):
     customer_fields = [
         "customer.gender",

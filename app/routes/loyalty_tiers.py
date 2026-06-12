@@ -40,11 +40,14 @@ def get_loyalty_tiers_ui_catalog():
         "examples": [
             {
                 "name": "Silver",
-                "min_status_points": 0,
-                "rank": 0,
+                "min_status_points": 100,
                 "active": True,
             }
         ],
+        "notes": {
+            "baseTier": "Un tier Base (min_status_points=0) est créé automatiquement. Les autres tiers doivent avoir min_status_points > 0.",
+            "rank": "Calculé automatiquement côté serveur — ne pas envoyer rank=0 sauf pour le tier de base.",
+        },
     }
 
 
@@ -133,6 +136,20 @@ def _recompute_tier_ranks(db: Session, brand: str) -> None:
     for i, t in enumerate(tiers):
         t.rank = i
     db.flush()
+
+
+def _initial_rank_for_new_tier(*, db: Session, brand: str, min_status_points: int) -> int:
+    """Pick a rank valid for DB flush before _recompute_tier_ranks.
+
+    Constraint ck_loyalty_tiers_rank0_min0: rank=0 requires min_status_points=0.
+    """
+    min_i = int(min_status_points)
+    if min_i == 0:
+        return 0
+    existing_count = (
+        db.query(func.count(LoyaltyTier.id)).filter(LoyaltyTier.brand == brand).scalar() or 0
+    )
+    return max(int(existing_count), 1)
 
 
 def _validate_tier_payload(
@@ -257,7 +274,11 @@ def create_loyalty_tier(
         key=key,
         name=payload.name,
         min_status_points=payload.min_status_points,
-        rank=0,
+        rank=_initial_rank_for_new_tier(
+            db=db,
+            brand=active_brand,
+            min_status_points=payload.min_status_points,
+        ),
         active=payload.active,
     )
     db.add(obj)

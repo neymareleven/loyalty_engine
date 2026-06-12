@@ -19,7 +19,6 @@ from app.schemas.event import EventCreate
 from app.schemas.internal_job import InternalJobCreate, InternalJobOut, InternalJobUpdate
 from app.schemas.internal_job_selector_catalog import get_internal_job_selector_catalog
 from app.schemas.internal_job_type_catalog import get_internal_job_type_catalog
-from app.services.client_error_catalog import CLIENT_ERROR_EXTRACTION, INTERNAL_JOB_CLIENT_ERRORS
 from app.services.birthdate_targeting import birthdate_sql_criterion
 from app.services.internal_job_runner import compute_next_run_at_from_schedule, run_internal_job_once
 from app.services.system_value_presets import resolve_system_preset_value
@@ -414,10 +413,6 @@ def get_internal_jobs_ui_catalog():
             "uiHints": {
                 "payload_template": {"widget": "json_object"},
             },
-        },
-        "clientErrors": {
-            **CLIENT_ERROR_EXTRACTION,
-            "messages": INTERNAL_JOB_CLIENT_ERRORS,
         },
     }
 
