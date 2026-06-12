@@ -721,14 +721,22 @@ PATCH /admin/internal-jobs/{id}
 
 ## Erreurs courantes (UI)
 
-| Code | Cas |
-|------|-----|
-| 400 | Membre manuel sur segment dynamique |
-| 400 | `recompute` sur marque / segment Unomi |
-| 400 | `conditions` sur segment statique |
-| 409 | DELETE segment référencé par règle/job |
-| 409 | Membre déjà présent (statique) |
-| 502 | Unomi CDP injoignable, condition refusée par le CDP, ou échec sync membres |
+**Important :** l'API renvoie toujours un champ `detail` (string) dans le body JSON pour les 400/404/409/502.  
+Le frontend **doit afficher `detail`** — jamais seulement « requête invalide (400) ».
+
+Catalogue machine-readable : `GET /admin/segments/ui-catalog` → `clientErrors.messages`  
+(jobs : `GET /admin/internal-jobs/ui-catalog` → `clientErrors.messages`)
+
+| Code | `detail` API (extrait) | Message FR suggéré |
+|------|------------------------|-------------------|
+| 400 | `A segment with this name already exists for this brand` | Un segment avec ce nom existe déjà — choisir un autre nom |
+| 400 | `Static segments cannot have conditions` | Segment statique : pas de conditions |
+| 400 | `Dynamic segments require conditions` | Segment dynamique : ajouter au moins une condition |
+| 400 | `birthdate must be YYYY-MM-DD, MM-DD, MM/--MM, or YYYY` | Format birthdate invalide (voir fieldMeta) |
+| 400 | Membre manuel sur segment dynamique | Idem `detail` API |
+| 409 | DELETE segment référencé par règle/job | Voir `detail` + `can_delete=false` |
+| 409 | Membre déjà présent (statique) | Idem `detail` API |
+| 502 | Unomi CDP / sync | Afficher `detail` complet (souvent cause CDP) |
 
 ### Dépannage 502 « Unable to sync » (création / membres)
 

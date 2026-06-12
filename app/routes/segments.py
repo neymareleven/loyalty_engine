@@ -25,7 +25,7 @@ from app.schemas.segment import (
     SegmentRecomputeResult,
     SegmentUpdate,
 )
-from app.services.birthdate_targeting import BIRTHDATE_FIELD_META, BIRTHDATE_VALUE_PRESETS
+from app.services.client_error_catalog import CLIENT_ERROR_EXTRACTION, SEGMENT_CLIENT_ERRORS
 from app.services.segment_members_list_service import list_segment_members as list_segment_members_payload
 from app.services.segment_condition_unomi import loyalty_ast_to_unomi_condition
 from app.services.segment_admin_service import (
@@ -69,6 +69,38 @@ def _pgcode(err: IntegrityError) -> str | None:
     if code:
         return str(code)
     return None
+
+
+def _is_empty_segment_conditions(conditions) -> bool:
+    if conditions is None:
+        return True
+    if not isinstance(conditions, dict):
+        return False
+    if not conditions:
+        return True
+    if set(conditions.keys()) == {"and"} and conditions.get("and") == []:
+        return True
+    if set(conditions.keys()) == {"or"} and conditions.get("or") == []:
+        return True
+    return False
+
+
+def _normalize_segment_conditions(*, is_dynamic: bool, conditions) -> dict | None:
+    if _is_empty_segment_conditions(conditions):
+        conditions = None
+    if not is_dynamic:
+        if conditions is not None:
+            raise HTTPException(status_code=400, detail="Static segments cannot have conditions")
+        return None
+    if conditions is None:
+        raise HTTPException(status_code=400, detail="Dynamic segments require conditions")
+    return conditions
+
+
+def _segment_integrity_error_detail(err: IntegrityError) -> str:
+    if _pgcode(err) == "23505":
+        return "A segment with this name already exists for this brand"
+    return "Segment could not be saved"
 
 
 def _model_json_schema(model_cls):
@@ -218,10 +250,11 @@ def get_segments_ui_catalog():
                 "brandVia": "X-Brand",
             },
         },
+        "clientErrors": {
+            **CLIENT_ERROR_EXTRACTION,
+            "messages": SEGMENT_CLIENT_ERRORS,
+        },
     }
-
-
-@router.get("/ui-options/condition-fields")
 def list_segment_condition_fields(brand: str = Depends(get_active_brand)):
     customer_fields = [
         "customer.gender",
@@ -488,12 +521,10 @@ def create_segment(
     if payload.brand is not None and payload.brand != active_brand:
         raise HTTPException(status_code=400, detail="payload.brand does not match active brand context")
 
-    if payload.is_dynamic:
-        if payload.conditions is None:
-            raise HTTPException(status_code=400, detail="Dynamic segments require conditions")
-    else:
-        if payload.conditions is not None:
-            raise HTTPException(status_code=400, detail="Static segments cannot have conditions")
+    conditions = _normalize_segment_conditions(
+        is_dynamic=payload.is_dynamic,
+        conditions=payload.conditions,
+    )
 
     try:
         if unomi_enabled_for_brand(brand=active_brand):
@@ -503,7 +534,7 @@ def create_segment(
                 name=payload.name,
                 description=payload.description,
                 is_dynamic=payload.is_dynamic,
-                conditions=payload.conditions,
+                conditions=conditions,
                 manual_profile_ids=[],
                 active=payload.active,
                 unomi_condition_override=payload.unomi_condition,
@@ -515,7 +546,7 @@ def create_segment(
                 name=payload.name,
                 description=payload.description,
                 is_dynamic=payload.is_dynamic,
-                conditions=payload.conditions,
+                conditions=conditions,
                 active=payload.active,
                 provider="INTERNAL",
             )
@@ -523,9 +554,9 @@ def create_segment(
             db.flush()
             trigger_recompute_if_needed(db, seg=obj, recompute=recompute, batch_size=batch_size)
         db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Segment could not be saved")
+        raise HTTPException(status_code=400, detail=_segment_integrity_error_detail(e))
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
@@ -591,14 +622,11 @@ def update_segment(
         data.pop("is_dynamic", None)
 
     next_is_dynamic = obj.is_dynamic
-    next_conditions = data.get("conditions", obj.conditions)
-
-    if next_is_dynamic:
-        if next_conditions is None:
-            raise HTTPException(status_code=400, detail="Dynamic segments require conditions")
-    else:
-        if "conditions" in data and data["conditions"] is not None:
-            raise HTTPException(status_code=400, detail="Static segments cannot have conditions")
+    if "conditions" in data:
+        data["conditions"] = _normalize_segment_conditions(
+            is_dynamic=next_is_dynamic,
+            conditions=data.get("conditions"),
+        )
 
     unomi_condition_in_payload = data.pop("unomi_condition", None)
     for k, v in data.items():
@@ -656,9 +684,9 @@ def update_segment(
         if should_recompute:
             trigger_recompute_if_needed(db, seg=obj, recompute=True, batch_size=batch_size)
         db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Segment could not be saved")
+        raise HTTPException(status_code=400, detail=_segment_integrity_error_detail(e))
     except HTTPException:
         db.rollback()
         raise
