@@ -1,12 +1,12 @@
 import csv
 import io
-from datetime import date
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
+from app.services.birthdate_targeting import parse_birthdate_wire
 from app.services.contact_service import get_or_create_customer
 
 
@@ -19,16 +19,10 @@ def _parse_date(value: str | None):
     s = str(value).strip()
     if not s:
         return None
-
-    # YYYY-MM-DD
-    if len(s) == 10 and s[4] == "-" and s[7] == "-":
-        return date.fromisoformat(s)
-
-    # MM-DD (partial birthdate)
-    if len(s) == 5 and s[2] == "-":
-        return s
-
-    raise ValueError("birthdate must be in format YYYY-MM-DD or MM-DD")
+    target = parse_birthdate_wire(s)
+    if target.full_date is not None:
+        return target.full_date
+    return target.wire
 
 
 @router.post("/customers")
@@ -74,7 +68,11 @@ async def import_customers_csv(
 
     if errors:
         brand_missing = sum(1 for e in errors if e.get("error") == "brand is required")
-        brand_mismatch = sum(1 for e in errors if isinstance(e.get("error"), str) and e.get("error", "").startswith("brand mismatch:"))
+        brand_mismatch = sum(
+            1
+            for e in errors
+            if isinstance(e.get("error"), str) and e.get("error", "").startswith("brand mismatch:")
+        )
         profile_missing = sum(1 for e in errors if e.get("error") == "profileId is required")
         raise HTTPException(
             status_code=400,

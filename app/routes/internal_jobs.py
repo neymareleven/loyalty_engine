@@ -19,7 +19,8 @@ from app.schemas.event import EventCreate
 from app.schemas.internal_job import InternalJobCreate, InternalJobOut, InternalJobUpdate
 from app.schemas.internal_job_selector_catalog import get_internal_job_selector_catalog
 from app.schemas.internal_job_type_catalog import get_internal_job_type_catalog
-from app.services.internal_job_runner import compute_next_run_at_from_schedule, run_internal_job_once
+from app.services.birthdate_targeting import birthdate_sql_criterion
+from app.services.system_value_presets import resolve_system_preset_value
 from app.services.transaction_service import create_transaction
 
 
@@ -48,86 +49,21 @@ def _selector_literal(value):
     return literal(value)
 
 
-def _as_mmdd(value):
-    if value is None:
-        return None
-    if isinstance(value, str):
-        s = value.strip()
-        if len(s) == 5 and s[2] == "-":
-            try:
-                mm = int(s[0:2])
-                dd = int(s[3:5])
-            except Exception:
-                return None
-            if mm < 1 or mm > 12 or dd < 1 or dd > 31:
-                return None
-            return mm * 100 + dd
-    if hasattr(value, "month") and hasattr(value, "day"):
-        try:
-            return int(value.month) * 100 + int(value.day)
-        except Exception:
-            return None
-    return None
-
-
-def _as_yyyy_mm_dd(value):
-    if value is None:
-        return None
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value
-    if isinstance(value, datetime):
-        try:
-            return value.date()
-        except Exception:
-            return None
-    if isinstance(value, str):
-        s = value.strip()
-        if len(s) == 10 and s[4] == "-" and s[7] == "-":
-            try:
-                return date.fromisoformat(s)
-            except Exception:
-                return None
-    return None
-
-
-def _parse_birthdate_value(value):
-    full = _as_yyyy_mm_dd(value)
-    if full is not None:
-        return ("full", full)
-    mmdd = _as_mmdd(value)
-    if mmdd is not None:
-        return ("mmdd", mmdd)
-    return (None, None)
-
-
-def _resolve_selector_value(*, value, today: date, now_utc: datetime):
+def _resolve_selector_value(*, value, today: date, now_utc: datetime, field: str | None = None):
     if isinstance(value, dict) and "$system" in value:
-        key = value.get("$system")
-        if key == "now":
-            base = now_utc
-        elif key == "today":
-            base = today
+        field_key = (field or "").strip()
+        if field_key in {"customer.birthdate", "customer.birthday"}:
+            context = "birthdate"
+        elif field_key.endswith("_at"):
+            context = "datetime"
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown system value preset: {key}")
-
-        add_days = value.get("add_days")
-        if add_days is not None:
-            try:
-                add_days_int = int(add_days)
-            except Exception:
-                raise HTTPException(status_code=400, detail="System preset 'add_days' must be an integer")
-            base = base + timedelta(days=add_days_int)
-
-        fmt = value.get("format")
-        if fmt is not None:
-            fmt_norm = (str(fmt) or "").strip().lower()
-            if fmt_norm == "mmdd":
-                if not hasattr(base, "month") or not hasattr(base, "day"):
-                    raise HTTPException(status_code=400, detail="System preset format 'mmdd' requires a date-like value")
-                return f"{int(base.month):02d}-{int(base.day):02d}"
-            raise HTTPException(status_code=400, detail=f"Unknown system preset format: {fmt}")
-
-        return base
+            context = "generic"
+        try:
+            return resolve_system_preset_value(value, context=context)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    if isinstance(value, list):
+        return [_resolve_selector_value(value=v, today=today, now_utc=now_utc, field=field) for v in value]
     return value
 
 
@@ -188,7 +124,10 @@ def _resolve_selector_field(*, field: str, today: date, now_utc: datetime):
         if key == "last_activity_at":
             return Customer.last_activity_at
         if key == "birthdate":
-            return (Customer.birth_month * 100) + Customer.birth_day
+            raise HTTPException(
+                status_code=400,
+                detail="Use selector leaf customer.birthdate with operator/value instead of resolving birthdate as SQL expr",
+            )
 
         raise HTTPException(status_code=400, detail=f"Unknown selector customer field: {field}")
 
@@ -304,52 +243,18 @@ def _selector_ast_to_criterion(selector: dict, *, today: date, now_utc: datetime
             op = selector.get("op")
         if not op:
             raise HTTPException(status_code=400, detail="Selector leaf requires 'operator' (or alias 'op')")
-        value = _resolve_selector_value(value=selector.get("value"), today=today, now_utc=now_utc)
+        value = _resolve_selector_value(
+            value=selector.get("value"),
+            today=today,
+            now_utc=now_utc,
+            field=field if isinstance(field, str) else None,
+        )
 
-        if field == "customer.birthdate":
-            op_norm = (op or "").lower()
-
-            # exists uses the real date column.
-            if op_norm == "exists":
-                expr = Customer.birthdate
-                return _selector_compare(op=op, expr=expr, value=value)
-
-            # Parse values: either full date (YYYY-MM-DD) OR month-day (MM-DD). No mixing.
-            if isinstance(value, list):
-                parsed = [_parse_birthdate_value(v) for v in value]
-                kinds = {k for (k, v) in parsed if k is not None}
-                if not kinds:
-                    raise HTTPException(status_code=400, detail="customer.birthdate values must be in format YYYY-MM-DD or MM-DD")
-                if len(kinds) != 1:
-                    raise HTTPException(status_code=400, detail="customer.birthdate values cannot mix YYYY-MM-DD and MM-DD")
-                kind = next(iter(kinds))
-                parsed_values = [v for (k, v) in parsed]
-            else:
-                kind, parsed_value = _parse_birthdate_value(value)
-                if kind is None:
-                    raise HTTPException(status_code=400, detail="customer.birthdate must be in format YYYY-MM-DD or MM-DD")
-                parsed_values = parsed_value
-                kind = kind
-
-            if kind == "full":
-                expr = Customer.birthdate
-                return _selector_compare(op=op, expr=expr, value=parsed_values)
-
-            # kind == "mmdd" => anniversary match (ignores year)
-            expr = (Customer.birth_month * 100) + Customer.birth_day
-            if op_norm == "between":
-                if not isinstance(parsed_values, list) or len(parsed_values) != 2:
-                    raise HTTPException(status_code=400, detail="customer.birthdate between requires two values")
-                lo, hi = parsed_values[0], parsed_values[1]
-                if lo is None or hi is None:
-                    raise HTTPException(status_code=400, detail="customer.birthdate between requires valid MM-DD values")
-                if lo <= hi:
-                    return expr.between(lo, hi)
-                from sqlalchemy import or_
-
-                return or_(expr.between(lo, 1231), expr.between(101, hi))
-
-            return _selector_compare(op=op, expr=expr, value=parsed_values)
+        if field in {"customer.birthdate", "customer.birthday"}:
+            try:
+                return birthdate_sql_criterion(customer_model=Customer, op=op, value=value)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
 
         expr = _resolve_selector_field(field=field, today=today, now_utc=now_utc)
         return _selector_compare(op=op, expr=expr, value=value)

@@ -23,6 +23,7 @@ from app.models.product import Product
 from app.models.segment import Segment
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
+from app.services.birthdate_targeting import BIRTHDATE_FIELD_META, BIRTHDATE_VALUE_PRESETS
 from app.services.reward_service import expire_rewards
 from app.services.coupon_service import expire_coupons
 from app.services.entitlement_history_service import build_global_entitlement_history
@@ -966,6 +967,7 @@ def list_rule_condition_fields(
             "system": system_fields,
         },
         "valuePresets": {
+            "birthdate": BIRTHDATE_VALUE_PRESETS,
             "datetime": [
                 {"id": "system.now", "label": "Now", "value": {"$system": "now"}},
             ],
@@ -1013,6 +1015,7 @@ def list_rule_condition_fields(
                     "options": ["M", "F", "OTHER", "UNKNOWN"],
                 },
             },
+            "customer.birthdate": dict(BIRTHDATE_FIELD_META),
         },
         "items": items,
     }
@@ -1047,7 +1050,7 @@ def list_internal_job_selector_fields():
                     "options": ["M", "F", "OTHER", "UNKNOWN"],
                 },
             },
-            "customer.birthdate": {"valueKind": "date", "ui": {"widget": "date"}},
+            "customer.birthdate": dict(BIRTHDATE_FIELD_META),
             "customer.created_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.last_activity_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.status_points": {"valueKind": "number", "ui": {"widget": "number"}},
@@ -1056,25 +1059,24 @@ def list_internal_job_selector_fields():
             "customer.metrics.transactions_count_90d": {"valueKind": "number", "ui": {"widget": "number"}},
         },
         "valuePresets": {
-            "datetime": [
-                {"id": "system.now", "label": "Now", "value": {"$system": "now"}},
-                {"id": "system.today", "label": "Today", "value": {"$system": "today"}},
-                {
-                    "id": "system.today_mmdd",
-                    "label": "Today (MM-DD)",
-                    "value": {"$system": "today", "format": "mmdd"},
-                },
+            "birthdate": BIRTHDATE_VALUE_PRESETS
+            + [
                 {
                     "id": "system.today_plus_7_mmdd",
-                    "label": "Today + 7 days (MM-DD)",
+                    "label": "Anniversaire dans 7 jours (MM-DD)",
                     "value": {"$system": "today", "add_days": 7, "format": "mmdd"},
+                    "granularity": "day_month",
                 },
                 {
                     "id": "system.today_plus_30_mmdd",
-                    "label": "Today + 30 days (MM-DD)",
+                    "label": "Anniversaire dans 30 jours (MM-DD)",
                     "value": {"$system": "today", "add_days": 30, "format": "mmdd"},
+                    "granularity": "day_month",
                 },
-            ]
+            ],
+            "datetime": [
+                {"id": "system.now", "label": "Now", "value": {"$system": "now"}},
+            ],
         },
         "items": items,
     }

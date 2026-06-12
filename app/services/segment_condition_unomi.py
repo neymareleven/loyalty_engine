@@ -34,8 +34,7 @@ _FIELD_ALIASES = {
     "customer.birthday": "customer.birthdate",
 }
 
-_FULL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_PARTIAL_DATE_RE = re.compile(r"^\d{2}-\d{2}$")
+from app.services.birthdate_targeting import birthdate_target_to_unomi, parse_birthdate_wire
 
 _OP_MAP = {
     "eq": "equals",
@@ -105,6 +104,38 @@ def loyalty_ast_to_unomi_condition(node: dict[str, Any] | None) -> dict[str, Any
     return _translate_node(node)
 
 
+def _resolve_birthdate_system_value(value: Any) -> Any:
+    from app.services.system_value_presets import resolve_system_preset_value
+
+    return resolve_system_preset_value(value, context="birthdate")
+
+
+def _unomi_leaf_property_and_params(field: str, value: Any) -> tuple[str, dict[str, Any]]:
+    """Return (propertyName, propertyValue* params) for a profilePropertyCondition leaf."""
+    if value is None:
+        raise ValueError("condition value is required")
+    field_key = _normalize_customer_field(str(field))
+
+    if isinstance(value, dict) and "$system" in value:
+        if field_key in _DATE_CUSTOMER_FIELDS:
+            value = _resolve_birthdate_system_value(value)
+        elif field_key in _ISO_DATETIME_CUSTOMER_FIELDS:
+            from app.services.system_value_presets import resolve_system_preset_value
+
+            value = resolve_system_preset_value(value, context="datetime")
+        else:
+            from app.services.system_value_presets import resolve_system_preset_value
+
+            value = resolve_system_preset_value(value, context="generic")
+
+    if field_key in _DATE_CUSTOMER_FIELDS:
+        target = parse_birthdate_wire(value)
+        return birthdate_target_to_unomi("properties", target)
+
+    prop = _customer_field_to_unomi_property(field)
+    return prop, _unomi_value_params(field, value)
+
+
 def _unomi_value_params(field: str, value: Any) -> dict[str, Any]:
     """Map AST value to the Unomi propertyValue* key expected by the CDP."""
     if value is None:
@@ -118,16 +149,9 @@ def _unomi_value_params(field: str, value: Any) -> dict[str, Any]:
         except (TypeError, ValueError) as e:
             raise ValueError(f"Integer value required for {field_key}") from e
 
-    if field_key in _DATE_CUSTOMER_FIELDS:
-        if _FULL_DATE_RE.match(raw):
-            return {"propertyValueInteger": _full_date_to_epoch_ms(raw)}
-        if _PARTIAL_DATE_RE.match(raw):
-            return {"propertyValue": raw}
-        raise ValueError(
-            f"birthdate/birthday value must be YYYY-MM-DD or MM-DD for Unomi sync, got: {value!r}"
-        )
-
     if field_key in _ISO_DATETIME_CUSTOMER_FIELDS:
+        if hasattr(value, "isoformat"):
+            raw = value.isoformat()
         return {"propertyValueDate": raw}
 
     if isinstance(value, bool):
@@ -187,30 +211,33 @@ def _translate_node(node: dict[str, Any]) -> dict[str, Any]:
     if unomi_op == "in":
         if not isinstance(value, list):
             raise ValueError("'in' operator requires a list value")
+        sub_conditions = []
+        for v in value:
+            prop_name, val_params = _unomi_leaf_property_and_params(field, v)
+            sub_conditions.append(
+                {
+                    "type": "profilePropertyCondition",
+                    "parameterValues": {
+                        "propertyName": prop_name,
+                        "comparisonOperator": "equals",
+                        **val_params,
+                    },
+                }
+            )
+        first_prop = sub_conditions[0]["parameterValues"]["propertyName"]
+        if any(s["parameterValues"]["propertyName"] != first_prop for s in sub_conditions):
+            raise ValueError("'in' on birthdate requires values of the same granularity")
         return {
             "type": "booleanCondition",
-            "parameterValues": {
-                "operator": "or",
-                "subConditions": [
-                    {
-                        "type": "profilePropertyCondition",
-                        "parameterValues": {
-                            "propertyName": prop,
-                            "comparisonOperator": "equals",
-                            **_unomi_value_params(field, v),
-                        },
-                    }
-                    for v in value
-                ],
-            },
+            "parameterValues": {"operator": "or", "subConditions": sub_conditions},
         }
 
+    prop, val_params = _unomi_leaf_property_and_params(field, value)
     params: dict[str, Any] = {
         "propertyName": prop,
         "comparisonOperator": unomi_op,
+        **val_params,
     }
-    if unomi_op not in {"exists"}:
-        params.update(_unomi_value_params(field, value))
 
     return {"type": "profilePropertyCondition", "parameterValues": params}
 
@@ -267,6 +294,8 @@ def _unomi_property_to_customer_field(property_name: str) -> str | None:
         "loyaltyCreatedAt": "created_at",
         "creationDate": "created_at",
         "birthDate": "birthdate",
+        "birthMonth": "birthdate",
+        "birthYear": "birthdate",
     }
     if rest in snake_from_camel:
         return f"customer.{snake_from_camel[rest]}"
@@ -296,8 +325,14 @@ def _epoch_ms_to_iso_date(ms: int) -> str:
         return str(ms)
 
 
-def _unomi_property_value(params: dict[str, Any], *, field: str | None = None) -> Any:
+def _unomi_property_value(
+    params: dict[str, Any],
+    *,
+    field: str | None = None,
+    property_name: str | None = None,
+) -> Any:
     field_key = _normalize_customer_field(field or "")
+    prop = (property_name or params.get("propertyName") or "").strip()
     for key in (
         "propertyValue",
         "propertyValueInteger",
@@ -307,8 +342,13 @@ def _unomi_property_value(params: dict[str, Any], *, field: str | None = None) -
     ):
         if key in params and params[key] is not None:
             val = params[key]
+            if prop.endswith("birthMonth") and key == "propertyValueInteger":
+                return f"{int(val):02d}"
+            if prop.endswith("birthYear") and key == "propertyValueInteger":
+                return f"{int(val):04d}"
             if (
                 field_key in _DATE_CUSTOMER_FIELDS
+                and prop.endswith("birthDate")
                 and key == "propertyValueInteger"
                 and isinstance(val, int)
             ):
@@ -330,7 +370,13 @@ def _try_unomi_or_as_in(field: str, subs: list[dict[str, Any]]) -> dict[str, Any
             return None
         if str(params.get("comparisonOperator") or "") != "equals":
             return None
-        values.append(_unomi_property_value(params, field=field))
+        values.append(
+            _unomi_property_value(
+                params,
+                field=field,
+                property_name=str(params.get("propertyName") or ""),
+            )
+        )
     if not values:
         return None
     return {"field": field, "operator": "in", "value": values}
@@ -391,6 +437,14 @@ def _unomi_to_loyalty_node(node: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"unsupported Unomi operator: {unomi_op}")
         if loyalty_op == "exists":
             return {"field": field, "operator": "exists", "value": True}
-        return {"field": field, "operator": loyalty_op, "value": _unomi_property_value(params, field=field)}
+        return {
+            "field": field,
+            "operator": loyalty_op,
+            "value": _unomi_property_value(
+                params,
+                field=field,
+                property_name=str(params.get("propertyName") or ""),
+            ),
+        }
 
     raise ValueError(f"unsupported Unomi condition type: {cond_type}")

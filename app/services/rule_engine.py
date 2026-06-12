@@ -14,7 +14,7 @@ from app.models.point_movement import PointMovement
 from app.models.customer_reward import CustomerReward
 from app.models.customer_metrics import CustomerMetrics
 from app.models.product import Product
-from app.services.segment_membership_service import is_customer_in_any_segment
+from app.services.birthdate_targeting import compare_birthdate, format_customer_birthdate_wire
 from app.services.contact_service import get_customer
 from app.services.loyalty_service import earn_points, burn_points
 from app.services.reward_service import issue_reward
@@ -49,11 +49,18 @@ def _normalize_match_key(value) -> str | None:
     return s or None
 
 
-def _resolve_system_value(*, key: str, customer):
+def _resolve_system_value(*, key: str, customer, preset: dict | None = None):
     now = datetime.utcnow()
+
+    if preset is not None:
+        from app.services.system_value_presets import resolve_system_preset_value
+
+        return resolve_system_preset_value(preset, context="generic")
 
     if key == "now":
         return now
+    if key == "today":
+        return now.date()
     if key == "weekday":
         return now.weekday()
 
@@ -74,16 +81,22 @@ def _resolve_system_value(*, key: str, customer):
     raise ValueError(f"Unknown system value preset: {key}")
 
 
-def _resolve_expected_value(*, customer, value):
+def _resolve_expected_value(*, customer, value, field: str | None = None):
     if isinstance(value, dict):
         if "$system" in value:
-            key = value.get("$system")
-            if not isinstance(key, str) or not key:
-                raise ValueError("Invalid system preset: expected non-empty '$system' string")
-            return _resolve_system_value(key=key, customer=customer)
+            from app.services.system_value_presets import resolve_system_preset_value
+
+            field_key = (field or "").strip()
+            if field_key in {"customer.birthdate", "customer.birthday"}:
+                context = "birthdate"
+            elif field_key.startswith("customer.") and field_key.endswith("_at"):
+                context = "datetime"
+            else:
+                context = "generic"
+            return resolve_system_preset_value(value, context=context)
 
     if isinstance(value, list):
-        return [_resolve_expected_value(customer=customer, value=v) for v in value]
+        return [_resolve_expected_value(customer=customer, value=v, field=field) for v in value]
 
     return value
 
@@ -126,6 +139,10 @@ def _eval_expr(*, db: Session, customer, transaction, expr):
         key = expr.get("$system")
         if not isinstance(key, str) or not key:
             raise ValueError("Invalid system preset: expected non-empty '$system' string")
+        if len(expr) > 1:
+            from app.services.system_value_presets import resolve_system_preset_value
+
+            return resolve_system_preset_value(expr, context="generic")
         return _resolve_system_value(key=key, customer=customer)
 
     if "$path" in expr:
@@ -409,19 +426,8 @@ def _resolve_field_value(*, db: Session, field: str, customer, transaction):
                 return []
             rows = db.query(CustomerReward.reward_id).filter(CustomerReward.customer_id == customer.id).all()
             return [str(r[0]) for r in rows if r and r[0] is not None]
-        if field == "customer.birthdate":
-            yy = getattr(customer, "birth_year", None)
-            mm = getattr(customer, "birth_month", None)
-            dd = getattr(customer, "birth_day", None)
-            if yy and mm and dd:
-                return f"{int(yy):04d}-{int(mm):02d}-{int(dd):02d}"
-            if mm and dd:
-                return f"{int(mm):02d}-{int(dd):02d}"
-            # Fallback to legacy column if present
-            legacy = getattr(customer, "birthdate", None)
-            if legacy is not None and hasattr(legacy, "month") and hasattr(legacy, "day") and hasattr(legacy, "year"):
-                return f"{int(legacy.year):04d}-{int(legacy.month):02d}-{int(legacy.day):02d}"
-            return None
+        if field in {"customer.birthdate", "customer.birthday"}:
+            return format_customer_birthdate_wire(customer)
         return _get_by_path(customer, field[len("customer.") :])
 
     if field.startswith("system."):
@@ -592,9 +598,14 @@ def _evaluate_ast_condition(*, db: Session, customer, transaction, node) -> bool
             raise ValueError("Condition leaf requires 'operator' (or alias 'op')")
         raw_value = node.get("value")
         if isinstance(raw_value, dict) and ("$path" in raw_value or "$fn" in raw_value or "$system" in raw_value):
-            value = _eval_expr(db=db, customer=customer, transaction=transaction, expr=raw_value)
+            if "$system" in raw_value and not ("$path" in raw_value or "$fn" in raw_value):
+                value = _resolve_expected_value(customer=customer, value=raw_value, field=field)
+            else:
+                value = _eval_expr(db=db, customer=customer, transaction=transaction, expr=raw_value)
         else:
-            value = _resolve_expected_value(customer=customer, value=raw_value)
+            value = _resolve_expected_value(customer=customer, value=raw_value, field=field)
+        if field in {"customer.birthdate", "customer.birthday"}:
+            return compare_birthdate(op=op, customer=customer, expected=value)
         actual = _resolve_field_value(db=db, field=field, customer=customer, transaction=transaction)
         return _compare(op=op, actual=actual, expected=value)
 

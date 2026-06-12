@@ -5,15 +5,12 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer
 from app.models.loyalty_tier import LoyaltyTier
 from app.schemas.customer import CustomerOut
+from app.services.birthdate_targeting import format_customer_birthdate_wire
 from app.services.wallet_service import get_status_points_balance
 
 
 def _format_birthdate(customer: Customer) -> str | None:
-    if getattr(customer, "birth_year", None) and getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        return f"{int(customer.birth_year):04d}-{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    if getattr(customer, "birth_month", None) and getattr(customer, "birth_day", None):
-        return f"{int(customer.birth_month):02d}-{int(customer.birth_day):02d}"
-    return None
+    return format_customer_birthdate_wire(customer)
 
 
 def _tier_name_for_customer(db: Session, *, brand: str, customer: Customer) -> str | None:

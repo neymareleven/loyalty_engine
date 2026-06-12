@@ -94,6 +94,10 @@ def build_unomi_profile_payload(
     birth = _birthdate_to_unomi_value(customer)
     if birth is not None:
         properties["birthDate"] = birth
+    if customer.birth_month is not None:
+        properties["birthMonth"] = int(customer.birth_month)
+    if customer.birth_year is not None:
+        properties["birthYear"] = int(customer.birth_year)
 
     if points_balance is not None:
         properties["loyaltyPointsBalance"] = points_balance

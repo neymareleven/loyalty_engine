@@ -34,50 +34,7 @@ def _normalize_gender(value: str) -> str:
     return "UNKNOWN"
 
 
-def _parse_partial_birthdate(value: str | None) -> tuple[date | None, int | None, int | None, int | None]:
-    """Accept YYYY-MM-DD or MM-DD. Month/day required if provided, year optional.
-
-    Returns (full_date_or_none, month, day, year).
-    - If year is missing, full_date_or_none is None and year is None.
-    """
-
-    if value is None:
-        return None, None, None, None
-
-    s = str(value).strip()
-    if not s:
-        return None, None, None, None
-
-    # YYYY-MM-DD
-    if len(s) == 10 and s[4] == "-" and s[7] == "-":
-        try:
-            d = date.fromisoformat(s)
-        except Exception:
-            raise ValueError("birthdate must be in format YYYY-MM-DD or MM-DD")
-        return d, d.month, d.day, d.year
-
-    # MM-DD
-    if len(s) == 5 and s[2] == "-":
-        try:
-            mm = int(s[0:2])
-            dd = int(s[3:5])
-        except Exception:
-            raise ValueError("birthdate must be in format YYYY-MM-DD or MM-DD")
-
-        if mm < 1 or mm > 12:
-            raise ValueError("birthdate month must be between 01 and 12")
-        if dd < 1 or dd > 31:
-            raise ValueError("birthdate day must be between 01 and 31")
-
-        # Basic sanity check to reject impossible dates (e.g. 02-31)
-        try:
-            date(2000, mm, dd)
-        except Exception:
-            raise ValueError("birthdate MM-DD is not a valid calendar date")
-
-        return None, mm, dd, None
-
-    raise ValueError("birthdate must be in format YYYY-MM-DD or MM-DD")
+from app.services.birthdate_targeting import parse_customer_birthdate_storage
 
 
 def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: dict | None = None):
@@ -117,7 +74,7 @@ def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: di
                 customer.birth_day = d.day
                 customer.birth_year = d.year
             else:
-                full, mm, dd, yy = _parse_partial_birthdate(str(raw_bd))
+                full, mm, dd, yy = parse_customer_birthdate_storage(str(raw_bd))
                 customer.birth_month = mm
                 customer.birth_day = dd
                 customer.birth_year = yy

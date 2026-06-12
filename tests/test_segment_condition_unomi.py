@@ -84,6 +84,33 @@ def test_last_activity_at_maps_to_last_activity_at_property():
     assert params["propertyValueDate"] == "2024-06-01T12:00:00"
 
 
+def test_birthdate_system_today_resolves_to_mmdd():
+    cond = loyalty_ast_to_unomi_condition(
+        {"field": "customer.birthdate", "operator": "eq", "value": {"$system": "today"}}
+    )
+    params = cond["parameterValues"]
+    assert params["propertyName"] == "properties.birthDate"
+    val = params.get("propertyValue")
+    assert isinstance(val, str)
+    assert len(val) == 5 and val[2] == "-"
+
+
+def test_birthdate_partial_flex_padding():
+    cond = loyalty_ast_to_unomi_condition(
+        {"field": "customer.birthdate", "operator": "eq", "value": "6-10"}
+    )
+    assert cond["parameterValues"]["propertyValue"] == "06-10"
+
+
+def test_birthdate_slash_format_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="DD/MM/YYYY"):
+        loyalty_ast_to_unomi_condition(
+            {"field": "customer.birthdate", "operator": "eq", "value": "06/10/2026"}
+        )
+
+
 def test_unomi_birthdate_integer_roundtrip_to_iso_date():
     cond = loyalty_ast_to_unomi_condition(
         {"field": "customer.birthdate", "operator": "eq", "value": "1990-05-15"}

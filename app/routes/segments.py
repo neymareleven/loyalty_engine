@@ -25,6 +25,7 @@ from app.schemas.segment import (
     SegmentRecomputeResult,
     SegmentUpdate,
 )
+from app.services.birthdate_targeting import BIRTHDATE_FIELD_META, BIRTHDATE_VALUE_PRESETS
 from app.services.segment_members_list_service import list_segment_members as list_segment_members_payload
 from app.services.segment_condition_unomi import loyalty_ast_to_unomi_condition
 from app.services.segment_admin_service import (
@@ -228,7 +229,6 @@ def list_segment_condition_fields(brand: str = Depends(get_active_brand)):
         "customer.loyalty_status",
         "customer.status_points",
         "customer.birthdate",
-        "customer.birthday",
         "customer.created_at",
         "customer.last_activity_at",
         "customer.rewards",
@@ -246,6 +246,7 @@ def list_segment_condition_fields(brand: str = Depends(get_active_brand)):
         },
         "note": "Segment conditions are evaluated without a transaction payload; payload.* fields are not supported.",
         "valuePresets": {
+            "birthdate": BIRTHDATE_VALUE_PRESETS,
             "datetime": [
                 {"id": "system.now", "label": "Now", "value": {"$system": "now"}},
                 {"id": "system.today", "label": "Today", "value": {"$system": "today"}},
@@ -295,14 +296,11 @@ def list_segment_condition_fields(brand: str = Depends(get_active_brand)):
                 "valueKind": "enum",
                 "ui": {"widget": "select", "options": ["M", "F", "OTHER", "UNKNOWN"]},
             },
-            "customer.birthdate": {
-                "valueKind": "date",
-                "ui": {"widget": "date"},
-                "note": "Accepte YYYY-MM-DD ou MM-DD. Alias API : customer.birthday.",
-            },
+            "customer.birthdate": dict(BIRTHDATE_FIELD_META),
             "customer.birthday": {
                 "valueKind": "date",
                 "aliasOf": "customer.birthdate",
+                "deprecated": True,
                 "ui": {"widget": "date"},
             },
             "customer.created_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
@@ -635,6 +633,12 @@ def update_segment(
                     client.save_segment(definition)
             else:
                 sync_manual_list_segment_to_unomi(db, seg=obj)
+        except ValueError as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(e))
+        except UnomiClientError as e:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=_format_unomi_error(e, action="update"))
         except Exception as e:
             db.rollback()
             raise HTTPException(status_code=502, detail=f"Unomi segment update failed: {e}")

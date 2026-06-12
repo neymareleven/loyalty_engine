@@ -736,7 +736,12 @@ PATCH /admin/internal-jobs/{id}
 2. **Lire le `detail` API** (pas seulement le message UI) : souvent `Unomi HTTP 500` + `internalServerError` = condition mal formée pour le CDP.
 3. **Segment dynamique** : le moteur traduit automatiquement les types pour Unomi :
    - numériques (`status_points`, `metrics.*`) → `propertyValueInteger`
-   - `birthdate` / `birthday` : `YYYY-MM-DD` → epoch ms (`propertyValueInteger`, aligné sync profils) ; `MM-DD` → `propertyValue`
+   - `customer.birthdate` — granularités API :
+     - **full** : `YYYY-MM-DD` → Unomi `properties.birthDate` (epoch ms)
+     - **day_month** : `MM-DD` → Unomi `properties.birthDate` (string) ; `{"$system":"today"}` → MM-DD du jour (anniversaire roulant)
+     - **month** : `MM` ou `--MM` → Unomi `properties.birthMonth` (integer)
+     - **year** : `YYYY` → Unomi `properties.birthYear` (integer)
+     - Format `DD/MM/YYYY` refusé. Catalogues : `fieldMeta.granularities` + `valuePresets.birthdate`.
    - dates/heures (`created_at`, `last_activity_at`, `metrics.last_transaction_at`) → `propertyValueDate` sur `loyaltyCreatedAt`, `lastActivityAt`, etc.
    Redémarrer l’API après mise à jour du moteur.
 4. **Segment statique sans membres** : création OK ; ajout de membres déclenche la sync → utiliser `POST …/sync-unomi` si besoin.

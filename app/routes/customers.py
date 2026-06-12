@@ -122,8 +122,13 @@ def upsert_customer(
 
     if isinstance(birthdate, str):
         s = birthdate.strip()
-        if s and not ((len(s) == 10 and s[4] == "-" and s[7] == "-") or (len(s) == 5 and s[2] == "-")):
-            raise HTTPException(status_code=400, detail="birthdate must be in format YYYY-MM-DD or MM-DD")
+        if s:
+            from app.services.birthdate_targeting import parse_birthdate_wire
+
+            try:
+                parse_birthdate_wire(s)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
 
     if not birthdate:
         bd = props.get("birthDate")
