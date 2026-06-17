@@ -9,75 +9,18 @@ from app.models.customer import Customer
 from app.models.event_type import TransactionType
 from app.models.transaction import Transaction
 from app.services.loyalty_status_service import update_customer_status
+from app.services.payload_schema_service import enrich_payload_schema_on_ingest, infer_json_schema_from_payload
 from app.services.rule_engine import process_transaction_rules
 
 
 def _infer_json_schema_from_payload(value: Any, *, _depth: int = 0, _max_depth: int = 6) -> dict | None:
-    if _depth >= _max_depth:
-        return {}
-
-    if value is None:
-        return {"type": "null"}
-    if isinstance(value, bool):
-        return {"type": "boolean"}
-    if isinstance(value, int) and not isinstance(value, bool):
-        return {"type": "integer"}
-    if isinstance(value, float):
-        return {"type": "number"}
-    if isinstance(value, str):
-        return {"type": "string"}
-
-    if isinstance(value, dict):
-        props: dict[str, Any] = {}
-        for k, v in value.items():
-            if not isinstance(k, str):
-                continue
-            props[k] = _infer_json_schema_from_payload(v, _depth=_depth + 1, _max_depth=_max_depth) or {}
-        return {"type": "object", "properties": props}
-
-    if isinstance(value, list):
-        items_schema: dict[str, Any] | None = None
-        for item in value[:50]:
-            s = _infer_json_schema_from_payload(item, _depth=_depth + 1, _max_depth=_max_depth) or {}
-            items_schema = _merge_json_schemas(items_schema, s)
-        return {"type": "array", "items": items_schema or {}}
-
-    return {}
+    return infer_json_schema_from_payload(value, _depth=_depth, _max_depth=_max_depth)
 
 
 def _merge_json_schemas(a: dict | None, b: dict | None) -> dict | None:
-    if not a:
-        return b
-    if not b:
-        return a
+    from app.services.payload_schema_service import merge_json_schemas
 
-    if not isinstance(a, dict) or not isinstance(b, dict):
-        return a
-
-    a_type = a.get("type")
-    b_type = b.get("type")
-    if a_type and b_type and a_type != b_type:
-        return {"anyOf": [a, b]}
-
-    out = dict(a)
-
-    if out.get("type") == "object":
-        out_props = dict(out.get("properties") or {})
-        b_props = b.get("properties") or {}
-        if isinstance(b_props, dict):
-            for k, v in b_props.items():
-                if k in out_props:
-                    out_props[k] = _merge_json_schemas(out_props.get(k), v) or out_props[k]
-                else:
-                    out_props[k] = v
-        out["properties"] = out_props
-        return out
-
-    if out.get("type") == "array":
-        out["items"] = _merge_json_schemas(out.get("items"), b.get("items")) or out.get("items") or {}
-        return out
-
-    return out
+    return merge_json_schemas(a, b)
 
 
 def _find_transaction_type(db: Session, *, brand: str, key: str):
@@ -213,6 +156,13 @@ def create_transaction(db: Session, event_data):
     db.commit()
     db.refresh(transaction)
 
+    auto_update_schema = (os.getenv("AUTO_UPDATE_TRANSACTIONTYPE_PAYLOAD_SCHEMA", "true") or "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
     tt = _find_transaction_type(db, brand=transaction.brand, key=transaction.transaction_type)
     if not tt:
         inferred_schema = _infer_json_schema_from_payload(transaction.payload) if transaction.payload is not None else None
@@ -228,19 +178,11 @@ def create_transaction(db: Session, event_data):
         db.add(tt)
         db.commit()
 
-    auto_update_schema = (os.getenv("AUTO_UPDATE_TRANSACTIONTYPE_PAYLOAD_SCHEMA", "true") or "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
     if auto_update_schema and tt:
-        inferred_schema = _infer_json_schema_from_payload(transaction.payload) if transaction.payload is not None else None
-        if inferred_schema:
-            merged = _merge_json_schemas(tt.payload_schema, inferred_schema)
-            if merged != tt.payload_schema:
-                tt.payload_schema = merged
-                db.commit()
+        merged = enrich_payload_schema_on_ingest(tt.payload_schema, transaction.payload)
+        if merged and merged != tt.payload_schema:
+            tt.payload_schema = merged
+            db.commit()
 
     if transaction.status == "PENDING":
         customer = (

@@ -214,7 +214,7 @@ def _eval_expr(*, db: Session, customer, transaction, expr):
                 raise ValueError("sum_product_points_unomi expects exactly 2 arguments: productNames, productQuantities")
 
             brand = getattr(transaction, "brand", None)
-            if not brand:
+            if not brand or db is None:
                 return 0
 
             names = evaled[0] if isinstance(evaled[0], list) else []
@@ -325,8 +325,10 @@ def _as_number_from_text(value: str) -> int | None:
         return None
 
 
-def _resolve_action_number(*, action_value, transaction) -> int | None:
-    if isinstance(action_value, dict):
+def _resolve_action_number(*, db: Session, customer, action_value, transaction) -> int | None:
+    if isinstance(action_value, dict) and ("$path" in action_value or "$fn" in action_value or "$system" in action_value):
+        raw = _eval_expr(db=db, customer=customer, transaction=transaction, expr=action_value)
+    elif isinstance(action_value, dict):
         path = action_value.get("$path")
         if isinstance(path, str) and path.strip():
             p = path.strip()
@@ -642,16 +644,20 @@ def _execute_actions(db: Session, customer, transaction, actions):
         if action_type == "earn_points":
             points = action.get("points")
             multiplier = action.get("multiplier")
-            points_int = _resolve_action_number(action_value=points, transaction=transaction)
+            points_int = _resolve_action_number(
+                db=db,
+                customer=customer,
+                action_value=points,
+                transaction=transaction,
+            )
 
-            if isinstance(points, dict) and "$path" in points and points_int is None:
-                path = points.get("$path")
-                if path is not None:
-                    path = str(path)
+            if isinstance(points, dict) and points_int is None and (
+                "$path" in points or "$fn" in points or "$system" in points
+            ):
                 payload = transaction.payload if isinstance(transaction.payload, dict) else {}
                 keys = sorted([str(k) for k in payload.keys()])
                 raise ValueError(
-                    f"earn_points: points value could not be resolved from $path={path!r}. "
+                    f"earn_points: points value could not be resolved from expression {points!r}. "
                     f"Check transaction.payload shape. Available payload keys: {keys}"
                 )
 

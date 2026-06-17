@@ -24,7 +24,11 @@ from app.models.segment import Segment
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.birthdate_targeting import BIRTHDATE_FIELD_META, BIRTHDATE_VALUE_PRESETS
-from app.services.reward_service import expire_rewards
+from app.services.payload_schema_service import (
+    get_transaction_type_rule_hints,
+    payload_schema_field_catalog,
+    payload_schema_field_paths,
+)
 from app.services.coupon_service import expire_coupons
 from app.services.entitlement_history_service import build_global_entitlement_history
 from app.services.loyalty_settings_service import ensure_brand_transaction_catalog, get_or_create_loyalty_settings
@@ -622,58 +626,7 @@ def get_brand_kpis(
 
 
 def _json_schema_paths(schema: Any, *, prefix: str) -> list[str]:
-    out: list[str] = []
-
-    def normalize(node: Any) -> Any:
-        if not isinstance(node, dict):
-            return node
-
-        # Manual format supported by TransactionTypeCreate.payload_schema:
-        # { fieldName: {type, description?}, ... }
-        # Normalize to JSON-Schema-like: {type: object, properties: ...}
-        looks_like_manual_map = (
-            "type" not in node
-            and "properties" not in node
-            and any(
-                isinstance(k, str)
-                and k
-                and isinstance(v, dict)
-                and ("type" in v or "description" in v)
-                for k, v in node.items()
-            )
-        )
-        if looks_like_manual_map:
-            return {"type": "object", "properties": node}
-
-        return node
-
-    def walk(node: Any, path: str, depth: int = 0):
-        if depth > 12:
-            return
-        if not isinstance(node, dict):
-            return
-
-        node_type = node.get("type")
-        if node_type == "object" or "properties" in node:
-            props = node.get("properties")
-            if isinstance(props, dict):
-                for k, v in props.items():
-                    if not isinstance(k, str) or not k:
-                        continue
-                    next_path = f"{path}.{k}" if path else k
-                    out.append(next_path)
-                    walk(v, next_path, depth + 1)
-            return
-
-        if node_type == "array":
-            items = node.get("items")
-            if items is not None:
-                walk(items, path, depth + 1)
-            return
-
-    walk(normalize(schema), prefix)
-    uniq = sorted({p for p in out if isinstance(p, str) and p.startswith(prefix)})
-    return uniq
+    return payload_schema_field_paths(schema, prefix=prefix)
 
 
 def _reward_type_catalog_item(
@@ -941,8 +894,15 @@ def list_rule_condition_fields(
         raise HTTPException(status_code=404, detail="TransactionType not found")
 
     payload_fields: list[str] = []
+    payload_field_meta: dict[str, Any] = {}
     if tt.payload_schema is not None:
         payload_fields = _json_schema_paths(tt.payload_schema, prefix="payload")
+        for item in payload_schema_field_catalog(tt.payload_schema, transaction_type_key=transaction_type):
+            payload_field_meta[item["conditionField"]] = {
+                "valueKind": item.get("type", "string"),
+                "earnPointsPath": item.get("earnPointsPath"),
+                "dynamicValue": item.get("dynamicValue"),
+            }
 
     customer_fields = [
         "customer.gender",
@@ -1016,7 +976,12 @@ def list_rule_condition_fields(
                 },
             },
             "customer.birthdate": dict(BIRTHDATE_FIELD_META),
+            **payload_field_meta,
         },
+        "payloadFields": payload_schema_field_catalog(tt.payload_schema, transaction_type_key=transaction_type)
+        if tt.payload_schema
+        else [],
+        "ruleHints": get_transaction_type_rule_hints(transaction_type),
         "items": items,
     }
 
@@ -1220,9 +1185,16 @@ def list_rule_actions_catalog():
                 "examples": [
                     {"type": "earn_points", "points": 50},
                     {"type": "earn_points", "points": 50, "multiplier": 3},
+                    {"type": "earn_points", "points": {"$path": "payload.total"}},
+                    {"type": "earn_points", "points": {"$path": "total"}, "multiplier": 2},
                 ],
                 "uiHints": {
-                    "points": {"widget": "number", "min": 0},
+                    "points": {
+                        "widget": "number_or_payload_path",
+                        "min": 0,
+                        "dynamicExample": {"$path": "payload.total"},
+                        "help": "Nombre fixe OU {$path: 'payload.<champ>'} / {<champ>} depuis le payload de la transaction.",
+                    },
                     "multiplier": {"widget": "number", "min": 1, "placeholder": "Optional"},
                 },
                 "semantics": {

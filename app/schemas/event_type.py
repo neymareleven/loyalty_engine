@@ -99,3 +99,24 @@ class TransactionTypeOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TransactionTypeDetailOut(TransactionTypeOut):
+    """Single-item view with normalized payload fields for admin UI + rules."""
+
+    payload_schema_format: Optional[str] = Field(
+        default=None,
+        description="json_schema | manual_map | null",
+    )
+    payload_fields: list[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Flat catalog for editor/rules: conditionField, earnPointsPath, dynamicValue.",
+    )
+    payload_fields_manual: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Manual editor map {fieldName: {type, description?}} derived from payload_schema.",
+    )
+    rule_hints: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Rule authoring hints for this transaction type key (e.g. sale → orderTotal, product points).",
+    )
