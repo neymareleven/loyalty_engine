@@ -17,6 +17,22 @@ Indépendant du mode de segmentation (`INTERNAL` / `UNOMI`). Dès que `UNOMI_BAS
 
 Vérification : `GET /admin/segments/segmentation-mode` → `profileSyncEnabled`.
 
+## Upsert loyalty (champs de base)
+
+`POST /customers/upsert` — identité fidélité persistée en base **et** poussée vers Unomi :
+
+| Champ | Obligatoire | Stockage loyalty | Unomi `properties` |
+|-------|-------------|----------------|-------------------|
+| `profileId` | oui | `customers.profile_id` | `itemId` |
+| `brand` | oui | `customers.brand` | `brand` + `systemProperties.scope` |
+| `email` | souvent | `customers.email` | `email` + `scopeEmail` = `{brand}-{email}` |
+| `gender` | souvent | `customers.gender` | `gender` |
+| `birthdate` | souvent | `customers.birthdate` (+ month/day/year) | `birthDate` (epoch ms si date complète) |
+
+`properties.*` reste optionnel pour des champs CDP additionnels (`firstName`, `phone`, …) sans remplacer l'identité loyalty.
+
+Réponse upsert : `unomi_sync.synced` indique si le push Unomi a réussi.
+
 ## Loyalty → Unomi (push automatique)
 
 Déclenché après :
@@ -25,7 +41,16 @@ Déclenché après :
 - Changement de `loyalty_status` / points (`update_customer_status`, transactions, admin tier)
 - Recalcul métriques client (`MAINT_RECOMPUTE_CUSTOMER_METRICS`)
 
-API Unomi : `POST /cxs/profiles` avec `itemId` = `profile_id`, `systemProperties.scope` = scope marque.
+API Unomi (mode `eventcollector`, défaut) :
+
+1. **`POST /cxs/profiles`** — garantit le profil avec `itemId` = `profile_id` loyalty (sinon Unomi assigne un UUID aléatoire)
+2. **`POST /cxs/eventcollector`** — événement **`contactInfoSubmitted`** pour déclencher vos règles CDP
+
+Variables :
+|----------|--------|------|
+| `UNOMI_PROFILE_SYNC_TRANSPORT` | `eventcollector` | `eventcollector` ou `profiles` |
+| `UNOMI_PROFILE_SYNC_EVENT_TYPE` | `contactInfoSubmitted` | Type d'événement custom (si pas peer key) |
+| `UNOMI_PROFILE_SYNC_PEER_KEY` | — | Clé tierce (`X-Unomi-Peer`) pour `updateProperties` — IP loyalty doit être whitelistée côté Unomi |
 
 Propriétés poussées (extrait) :
 

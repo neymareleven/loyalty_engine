@@ -37,7 +37,15 @@ def _normalize_gender(value: str) -> str:
 from app.services.birthdate_targeting import parse_customer_birthdate_storage
 
 
-def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: dict | None = None):
+def get_or_create_customer(
+    db: Session,
+    brand: str,
+    profile_id: str,
+    payload: dict | None = None,
+    *,
+    contact_properties: dict | None = None,
+    push_to_unomi: bool = True,
+):
     customer = (
         db.query(Customer)
         .filter(
@@ -61,6 +69,9 @@ def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: di
 
     # --- Mise à jour des attributs métier depuis le payload ---
     if payload:
+        if "email" in payload and payload["email"]:
+            customer.email = str(payload["email"]).strip()
+
         if "gender" in payload and payload["gender"]:
             customer.gender = _normalize_gender(payload["gender"])
 
@@ -82,5 +93,11 @@ def get_or_create_customer(db: Session, brand: str, profile_id: str, payload: di
 
     from app.services.unomi_profile_service import sync_customer_profile_to_unomi
 
-    sync_customer_profile_to_unomi(db, customer=customer, reason="customer_upsert")
+    if push_to_unomi:
+        sync_customer_profile_to_unomi(
+            db,
+            customer=customer,
+            reason="customer_upsert",
+            extra_properties=contact_properties,
+        )
     return customer

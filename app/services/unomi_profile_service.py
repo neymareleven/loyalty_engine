@@ -14,12 +14,75 @@ from app.models.customer import Customer
 from app.models.customer_metrics import CustomerMetrics
 from app.services.customer_serialization import _format_birthdate, _tier_name_for_customer
 from app.services.unomi_client import UnomiClient, UnomiClientError
-from app.services.unomi_settings_service import resolve_unomi_profile_connection
+from app.services.unomi_settings_service import (
+    resolve_unomi_profile_connection,
+    resolve_unomi_profile_sync_peer_key,
+    unomi_profile_sync_event_type,
+    unomi_profile_sync_transport,
+)
 from app.services.wallet_service import get_status_points_balance
 
 logger = logging.getLogger(__name__)
 
 _profile_sync_source: ContextVar[str | None] = ContextVar("profile_sync_source", default=None)
+
+# Loyalty-owned keys (always refreshed from Customer on sync).
+_UNOMI_LOYALTY_MANAGED_KEYS = frozenset(
+    {
+        "loyaltyStatus",
+        "statusPoints",
+        "loyaltyPointsBalance",
+        "loyaltyCustomerStatus",
+        "loyaltyTierName",
+        "loyaltyEngineCustomerId",
+        "loyaltyEngineSyncedAt",
+        "lastActivityAt",
+        "loyaltyStatusAssignedAt",
+        "loyaltyStatusExpiresAt",
+        "pointsExpiresAt",
+        "statusPointsResetAt",
+        "loyaltyCreatedAt",
+        "loyaltyUpdatedAt",
+        "birthMonth",
+        "birthYear",
+    }
+)
+
+# CDP / visit / marketing keys — keep existing Unomi values unless provided in upsert.
+_UNOMI_CDP_PRESERVE_IF_ABSENT = frozenset(
+    {
+        "lastVisit",
+        "firstVisit",
+        "nbOfVisits",
+        "pageViewCount",
+        "lastEmailSent",
+        "lastEmailOpened",
+        "lastOpened",
+        "openCount",
+        "emailId",
+        "emailName",
+        "recipientEmail",
+        "recipientFirstName",
+        "recipientLastName",
+        "subject",
+        "contentHash",
+        "fromName",
+        "fromAddress",
+        "timestamp",
+        "dateSent",
+        "dateRead",
+        "trackingHash",
+        "idHash",
+    }
+)
+
+_UNOMI_UPSERT_SKIP_KEYS = frozenset(
+    {
+        "profileId",
+        "profile_id",
+        "birthdate",
+    }
+)
 
 
 def set_profile_sync_source(source: str | None):
@@ -61,13 +124,65 @@ def _iso_or_none(value: datetime | None) -> str | None:
         return str(value)
 
 
-def build_unomi_profile_payload(
+def _derive_scope_email(*, brand: str, email: Any, scope_email: Any = None) -> str | None:
+    if scope_email is not None and str(scope_email).strip():
+        return str(scope_email).strip()
+    if not brand or email is None:
+        return None
+    em = str(email).strip()
+    if not em:
+        return None
+    return f"{brand.strip()}-{em}"
+
+
+def _normalize_contact_properties(extra: dict[str, Any] | None) -> dict[str, Any]:
+    if not extra:
+        return {}
+    out: dict[str, Any] = {}
+    for key, val in extra.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        if key in _UNOMI_UPSERT_SKIP_KEYS:
+            continue
+        if val is None or val == "":
+            continue
+        out[key.strip()] = val
+    phone = out.get("phone")
+    phone_number = out.get("phoneNumber")
+    if phone and not phone_number:
+        out["phoneNumber"] = phone
+    elif phone_number and not phone:
+        out["phone"] = phone_number
+    return out
+
+
+def build_customer_identity_unomi_properties(customer: Customer) -> dict[str, Any]:
+    """Loyalty profile identity: profileId fields stored on Customer (email, gender, birthdate, brand)."""
+    props: dict[str, Any] = {"brand": customer.brand}
+    if customer.email:
+        props["email"] = str(customer.email).strip()
+    if customer.gender:
+        props["gender"] = customer.gender
+    birth = _birthdate_to_unomi_value(customer)
+    if birth is not None:
+        props["birthDate"] = birth
+    if customer.birth_month is not None:
+        props["birthMonth"] = int(customer.birth_month)
+    if customer.birth_year is not None:
+        props["birthYear"] = int(customer.birth_year)
+    scope_email = _derive_scope_email(brand=customer.brand, email=customer.email)
+    if scope_email:
+        props["scopeEmail"] = scope_email
+    return props
+
+
+def build_loyalty_program_unomi_properties(
     db: Session,
     *,
     customer: Customer,
-    scope: str,
     include_points_balance: bool = True,
 ) -> dict[str, Any]:
+    """Fidélité enrichie (statut, points, métriques) — sans réinventer l'identité contact."""
     metrics = (
         db.query(CustomerMetrics)
         .filter(CustomerMetrics.brand == customer.brand)
@@ -80,7 +195,6 @@ def build_unomi_profile_payload(
     )
 
     properties: dict[str, Any] = {
-        "brand": customer.brand,
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": int(customer.status_points or 0),
         "loyaltyCustomerStatus": customer.status,
@@ -89,20 +203,9 @@ def build_unomi_profile_payload(
         "loyaltyEngineSyncedAt": datetime.utcnow().isoformat(),
     }
 
-    if customer.gender:
-        properties["gender"] = customer.gender
-    birth = _birthdate_to_unomi_value(customer)
-    if birth is not None:
-        properties["birthDate"] = birth
-    if customer.birth_month is not None:
-        properties["birthMonth"] = int(customer.birth_month)
-    if customer.birth_year is not None:
-        properties["birthYear"] = int(customer.birth_year)
-
     if points_balance is not None:
         properties["loyaltyPointsBalance"] = points_balance
 
-    metrics_props: dict[str, Any] = {}
     if metrics:
         metrics_props = {
             "transactions_count_30d": int(metrics.transactions_count_30d or 0),
@@ -110,7 +213,7 @@ def build_unomi_profile_payload(
             "last_transaction_at": _iso_or_none(metrics.last_transaction_at),
             "computed_at": _iso_or_none(metrics.computed_at),
         }
-    properties["metrics"] = metrics_props
+        properties["metrics"] = metrics_props
 
     loyalty_dates = {
         "lastActivityAt": _iso_or_none(customer.last_activity_at),
@@ -125,15 +228,228 @@ def build_unomi_profile_payload(
         if val is not None:
             properties[key] = val
 
+    return properties
+
+
+def _compact_unomi_properties(properties: dict[str, Any]) -> dict[str, Any]:
+    """Drop null/empty values before Unomi save/event (no invented placeholders)."""
+    out: dict[str, Any] = {}
+    for key, val in properties.items():
+        if val is None or val == "":
+            continue
+        if key == "metrics" and isinstance(val, dict) and not val:
+            continue
+        out[key] = val
+    return out
+
+
+# Backward-compatible alias
+build_loyalty_unomi_properties = build_loyalty_program_unomi_properties
+
+
+def merge_unomi_profile_properties(
+    *,
+    existing_profile: dict[str, Any] | None,
+    customer: Customer,
+    loyalty_program_properties: dict[str, Any],
+    extra_properties: dict[str, Any] | None,
+    profile_id: str,
+) -> dict[str, Any]:
+    """Unomi profile = existing CDP data + loyalty identity + optional extras + fidélité."""
+    existing_props = (
+        existing_profile.get("properties")
+        if isinstance(existing_profile, dict) and isinstance(existing_profile.get("properties"), dict)
+        else {}
+    )
+    merged: dict[str, Any] = dict(existing_props)
+
+    extras = _normalize_contact_properties(extra_properties)
+    for key, val in extras.items():
+        if key in _UNOMI_LOYALTY_MANAGED_KEYS:
+            continue
+        if key in {"email", "gender", "birthDate", "birthdate", "brand", "scopeEmail"}:
+            continue
+        merged[key] = val
+
+    merged.update(build_customer_identity_unomi_properties(customer))
+
+    for key, val in loyalty_program_properties.items():
+        if val is None:
+            continue
+        if key == "metrics" and isinstance(val, dict):
+            if not val:
+                continue
+            prev = merged.get("metrics") if isinstance(merged.get("metrics"), dict) else {}
+            merged["metrics"] = {**prev, **val}
+            continue
+        merged[key] = val
+
+    merged["unomiProfileId"] = profile_id
+    merged["unomi_profile_id"] = profile_id
+    return _compact_unomi_properties(merged)
+
+
+def merge_unomi_system_properties(
+    *,
+    existing_profile: dict[str, Any] | None,
+    scope: str,
+    scope_email: str | None,
+) -> dict[str, Any]:
+    existing_sys = (
+        existing_profile.get("systemProperties")
+        if isinstance(existing_profile, dict) and isinstance(existing_profile.get("systemProperties"), dict)
+        else {}
+    )
+    system: dict[str, Any] = dict(existing_sys)
+    system["scope"] = scope
+    if scope_email:
+        system["mergeIdentifier"] = scope_email
+    return system
+
+
+def build_unomi_profile_payload(
+    db: Session,
+    *,
+    customer: Customer,
+    scope: str,
+    include_points_balance: bool = True,
+    extra_properties: dict[str, Any] | None = None,
+    existing_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    loyalty_program = build_loyalty_program_unomi_properties(
+        db,
+        customer=customer,
+        include_points_balance=include_points_balance,
+    )
+    properties = merge_unomi_profile_properties(
+        existing_profile=existing_profile,
+        customer=customer,
+        loyalty_program_properties=loyalty_program,
+        extra_properties=extra_properties,
+        profile_id=customer.profile_id,
+    )
+    scope_email = properties.get("scopeEmail")
+    if isinstance(scope_email, str):
+        scope_email = scope_email.strip() or None
+    else:
+        scope_email = None
+
+    segments = []
+    scores: dict[str, Any] = {}
+    consents: dict[str, Any] = {}
+    if isinstance(existing_profile, dict):
+        if isinstance(existing_profile.get("segments"), list):
+            segments = list(existing_profile["segments"])
+        if isinstance(existing_profile.get("scores"), dict):
+            scores = dict(existing_profile["scores"])
+        if isinstance(existing_profile.get("consents"), dict):
+            consents = dict(existing_profile["consents"])
+
     return {
         "itemId": customer.profile_id,
         "itemType": "profile",
         "properties": properties,
-        "systemProperties": {"scope": scope},
-        "segments": [],
-        "scores": {},
-        "consents": {},
+        "systemProperties": merge_unomi_system_properties(
+            existing_profile=existing_profile,
+            scope=scope,
+            scope_email=scope_email,
+        ),
+        "segments": segments,
+        "scores": scores,
+        "consents": consents,
     }
+
+
+def build_unomi_eventcollector_payload(
+    *,
+    profile_id: str,
+    scope: str,
+    properties: dict[str, Any],
+    event_type: str | None = None,
+) -> dict[str, Any]:
+    """Build POST /cxs/eventcollector body (Unomi 2.x recommended for profile upsert)."""
+    evt_type = (event_type or unomi_profile_sync_event_type() or "contactInfoSubmitted").strip()
+    session_id = f"loyalty-{profile_id}"
+
+    event: dict[str, Any] = {
+        "eventType": evt_type,
+        "scope": scope,
+        "profileId": profile_id,
+        "source": {
+            "itemId": "loyalty-engine",
+            "itemType": "system",
+            "scope": scope,
+        },
+    }
+
+    if evt_type.lower() == "updateproperties":
+        add_map: dict[str, Any] = {}
+        for key, val in properties.items():
+            if val is None:
+                continue
+            prop_key = key if key.startswith("properties.") else f"properties.{key}"
+            add_map[prop_key] = val
+        event["properties"] = {
+            "targetId": profile_id,
+            "targetType": "profile",
+            "add": add_map,
+        }
+        event["target"] = None
+    else:
+        event["target"] = {
+            "itemId": "loyalty-profile-sync",
+            "itemType": "form",
+            "scope": scope,
+        }
+        event["properties"] = _compact_unomi_properties(dict(properties))
+
+    return {
+        "sessionId": session_id,
+        "profileId": profile_id,
+        "events": [event],
+    }
+
+
+def _push_profile_via_eventcollector(
+    client: UnomiClient,
+    *,
+    profile_id: str,
+    scope: str,
+    properties: dict[str, Any],
+    brand: str,
+) -> None:
+    """Send a single event via /cxs/eventcollector (default: contactInfoSubmitted)."""
+    event_type = (unomi_profile_sync_event_type() or "contactInfoSubmitted").strip()
+    norm = event_type.lower()
+    peer_key = resolve_unomi_profile_sync_peer_key(brand=brand)
+
+    if norm == "updateproperties":
+        if not peer_key:
+            logger.warning(
+                "updateProperties requested but UNOMI_PROFILE_SYNC_PEER_KEY is missing/placeholder; "
+                "falling back to contactInfoSubmitted (brand=%s profile_id=%s)",
+                brand,
+                profile_id,
+            )
+            norm = "contactinfosubmitted"
+        else:
+            secured = build_unomi_eventcollector_payload(
+                profile_id=profile_id,
+                scope=scope,
+                properties=properties,
+                event_type="updateProperties",
+            )
+            client.collect_events(secured, peer_key=peer_key)
+            return
+
+    resolved_type = "contactInfoSubmitted" if norm in {"", "contactinfosubmitted"} else event_type
+    payload = build_unomi_eventcollector_payload(
+        profile_id=profile_id,
+        scope=scope,
+        properties=properties,
+        event_type=resolved_type,
+    )
+    client.collect_events(payload)
 
 
 def get_unomi_profile_client(*, brand: str) -> UnomiClient | None:
@@ -148,6 +464,7 @@ def sync_customer_profile_to_unomi(
     *,
     customer: Customer,
     reason: str = "update",
+    extra_properties: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Push loyalty customer state to Unomi (best-effort unless UNOMI_PROFILE_SYNC_STRICT=true)."""
     if should_skip_unomi_profile_push():
@@ -155,26 +472,75 @@ def sync_customer_profile_to_unomi(
 
     cfg = resolve_unomi_profile_connection(brand=customer.brand)
     if not cfg:
-        return None
-
-    client = UnomiClient(cfg)
-    body = build_unomi_profile_payload(db, customer=customer, scope=cfg.scope)
-    try:
-        client.save_profile(body)
-        logger.info(
-            "unomi profile sync ok brand=%s profile_id=%s reason=%s",
+        logger.warning(
+            "unomi profile sync skipped (not configured) brand=%s profile_id=%s reason=%s",
             customer.brand,
             customer.profile_id,
             reason,
         )
-        return {"synced": True, "profileId": customer.profile_id, "reason": reason}
+        return {
+            "synced": False,
+            "skipped": True,
+            "reason": "profile_sync_not_configured",
+            "profileId": customer.profile_id,
+        }
+
+    client = UnomiClient(cfg)
+    existing_profile = None
+    try:
+        existing_profile = client.get_profile(customer.profile_id)
     except UnomiClientError as e:
-        logger.warning(
-            "unomi profile sync failed brand=%s profile_id=%s reason=%s error=%s",
+        logger.debug(
+            "unomi get_profile before sync brand=%s profile_id=%s: %s",
+            customer.brand,
+            customer.profile_id,
+            e,
+        )
+
+    body = build_unomi_profile_payload(
+        db,
+        customer=customer,
+        scope=cfg.scope,
+        extra_properties=extra_properties,
+        existing_profile=existing_profile,
+    )
+    transport = unomi_profile_sync_transport()
+    try:
+        if transport == "eventcollector":
+            # Unomi eventcollector alone may assign a random profile UUID.
+            # Ensure stable itemId (= loyalty profile_id) then fire contactInfoSubmitted for CDP rules.
+            client.save_profile(body)
+            _push_profile_via_eventcollector(
+                client,
+                profile_id=customer.profile_id,
+                scope=cfg.scope,
+                properties=body.get("properties") or {},
+                brand=customer.brand,
+            )
+        else:
+            client.save_profile(body)
+        logger.info(
+            "unomi profile sync ok brand=%s profile_id=%s reason=%s transport=%s",
             customer.brand,
             customer.profile_id,
             reason,
+            transport,
+        )
+        return {
+            "synced": True,
+            "profileId": customer.profile_id,
+            "reason": reason,
+            "transport": transport,
+        }
+    except UnomiClientError as e:
+        logger.warning(
+            "unomi profile sync failed brand=%s profile_id=%s reason=%s transport=%s error=%s body=%s",
+            customer.brand,
+            customer.profile_id,
+            reason,
+            transport,
             e,
+            (e.body or "")[:500],
         )
         if _strict_sync_errors():
             raise

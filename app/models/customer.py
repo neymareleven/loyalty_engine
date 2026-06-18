@@ -13,6 +13,7 @@ class Customer(Base):
     brand = Column(String(50), nullable=False)
     profile_id = Column(String(100), nullable=False)
 
+    email = Column(String(255))
     gender = Column(String(10))      # M / F / OTHER / UNKNOWN
     birthdate = Column(Date)
     birth_month = Column(Integer)

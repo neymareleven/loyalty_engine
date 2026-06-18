@@ -16,6 +16,7 @@ class CustomerUpsert(BaseModel):
 
     properties: Optional[Dict[str, Any]] = None
 
+    email: Optional[str] = None
     gender: Optional[str] = None
     birthdate: Optional[str] = None
 
@@ -25,6 +26,7 @@ class CustomerOut(BaseModel):
     brand: str
     profile_id: str
 
+    email: Optional[str] = None
     gender: Optional[str] = None
     birthdate: Optional[date | str] = None
 
@@ -45,6 +47,12 @@ class CustomerOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CustomerUpsertOut(CustomerOut):
+    """Upsert response includes Unomi sync status (create + update)."""
+
+    unomi_sync: Optional[Dict[str, Any]] = None
 
 
 class CustomerLoyaltyStatusUpdate(BaseModel):

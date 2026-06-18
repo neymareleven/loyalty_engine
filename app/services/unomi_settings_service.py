@@ -126,6 +126,46 @@ def unomi_profile_sync_enabled_for_brand(*, brand: str) -> bool:
     return True
 
 
+def unomi_profile_sync_transport() -> str:
+    """eventcollector (Unomi 2.x recommended) or profiles (admin REST fallback)."""
+    raw = (os.getenv("UNOMI_PROFILE_SYNC_TRANSPORT") or "eventcollector").strip().lower()
+    if raw in {"eventcollector", "event_collector", "events"}:
+        return "eventcollector"
+    if raw in {"profiles", "profile", "rest"}:
+        return "profiles"
+    return "eventcollector"
+
+
+def unomi_profile_sync_event_type() -> str:
+    return (os.getenv("UNOMI_PROFILE_SYNC_EVENT_TYPE") or "contactInfoSubmitted").strip()
+
+
+def resolve_unomi_profile_sync_peer_key(*, brand: str) -> str | None:
+    """Secret for protected events (updateProperties) — header X-Unomi-Peer."""
+    for name in (
+        f"UNOMI_PROFILE_SYNC_PEER_KEY_{_brand_env_suffix(brand)}",
+        "UNOMI_PROFILE_SYNC_PEER_KEY",
+        f"UNOMI_THIRDPARTY_KEY_{_brand_env_suffix(brand)}",
+        "UNOMI_THIRDPARTY_PROVIDER1_KEY",
+    ):
+        val = os.getenv(name)
+        if val and _is_usable_peer_key(str(val)):
+            return str(val).strip()
+    return None
+
+
+def _is_usable_peer_key(value: str | None) -> bool:
+    if not value:
+        return False
+    s = value.strip()
+    if not s or s.startswith("<") or s.endswith(">"):
+        return False
+    lowered = s.lower()
+    if "clé tierce" in lowered or "change_me" in lowered or lowered in {"changeme", "placeholder", "xxx"}:
+        return False
+    return True
+
+
 def resolve_unomi_connection(*, brand: str, db: Session | None = None) -> UnomiConnectionConfig | None:
     _ = db
     if not _brand_uses_unomi(brand):
@@ -200,6 +240,9 @@ def unomi_env_status(*, brand: str) -> dict:
         "unomiInternalOnlyBrands": opt_out,
         "currentBrandUsesUnomi": uses,
         "profileSyncEnabled": unomi_profile_sync_enabled_for_brand(brand=brand),
+        "profileSyncTransport": unomi_profile_sync_transport(),
+        "profileSyncEventType": unomi_profile_sync_event_type(),
+        "profileSyncPeerKeyConfigured": bool(resolve_unomi_profile_sync_peer_key(brand=brand)),
         "envKeys": [
             "UNOMI_BASE_URL + UNOMI_PASSWORD (required)",
             "UNOMI_INTERNAL_BRANDS (optional opt-out)",

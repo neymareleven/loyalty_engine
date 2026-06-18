@@ -15,13 +15,15 @@ from app.schemas.customer import (
     CustomerLoyaltyStatusUpdate,
     CustomerOut,
     CustomerUpsert,
+    CustomerUpsertOut,
 )
 from app.schemas.customer_coupon import CustomerCouponOut, CustomerCouponStatusUpdate
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
+from app.services.customer_upsert_service import customer_identity_payload, parse_customer_upsert_payload
 from app.services.contact_service import get_or_create_customer
 from app.services.customer_delete_service import delete_loyalty_customer
-from app.services.unomi_profile_service import reset_profile_sync_source, set_profile_sync_source
+from app.services.unomi_profile_service import reset_profile_sync_source, set_profile_sync_source, sync_customer_profile_to_unomi
 from app.services.customer_coupon_service import set_customer_coupon_status
 from app.services.customer_entitlement_serialization import (
     serialize_customer_coupon_out,
@@ -101,24 +103,27 @@ def get_customer(
     return serialize_customer_out(db, customer=customer, brand=brand)
 
 
-@router.post("/upsert", response_model=CustomerOut)
+@router.post("/upsert", response_model=CustomerUpsertOut)
 def upsert_customer(
     payload: CustomerUpsert,
     db: Session = Depends(get_db),
     x_profile_sync_source: str | None = Header(None, alias="X-Profile-Sync-Source"),
 ):
-    props = payload.properties or {}
-    brand = (payload.brand or props.get("brand") or "").strip() or None
+    parsed = parse_customer_upsert_payload(payload)
+    props = parsed["extra_properties"]
+    brand = parsed["brand"]
     if not brand:
         raise HTTPException(status_code=400, detail="brand is required")
     profile_id = (payload.profileId or "").strip() or None
     if not profile_id:
         raise HTTPException(status_code=400, detail="profileId is required")
 
-    if "gender" in props and props.get("gender") not in (None, "") and not isinstance(props.get("gender"), str):
-        raise HTTPException(status_code=400, detail="properties.gender must be a string")
-    gender = payload.gender or (props.get("gender") if isinstance(props.get("gender"), str) else None)
-    birthdate = payload.birthdate
+    gender = parsed["gender"]
+    birthdate = parsed["birthdate"]
+    email = parsed["email"]
+
+    if gender is not None and not isinstance(gender, str):
+        raise HTTPException(status_code=400, detail="gender must be a string")
 
     if isinstance(birthdate, str):
         s = birthdate.strip()
@@ -129,13 +134,6 @@ def upsert_customer(
                 parse_birthdate_wire(s)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
-
-    if not birthdate:
-        bd = props.get("birthDate")
-        if "birthDate" in props and bd not in (None, "") and not isinstance(bd, (int, float)):
-            raise HTTPException(status_code=400, detail="properties.birthDate must be an epoch millisecond number")
-        if isinstance(bd, (int, float)):
-            birthdate = datetime.utcfromtimestamp(float(bd) / 1000.0).date()
 
     token = None
     if (x_profile_sync_source or "").strip().lower() == "unomi":
@@ -152,7 +150,9 @@ def upsert_customer(
                 db,
                 brand,
                 profile_id,
-                {"gender": gender, "birthdate": birthdate},
+                customer_identity_payload(parsed),
+                contact_properties=props,
+                push_to_unomi=False,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -192,7 +192,15 @@ def upsert_customer(
         db.commit()
         db.refresh(customer)
 
-        return serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
+        unomi_sync = sync_customer_profile_to_unomi(
+            db,
+            customer=customer,
+            reason="customer_upsert",
+            extra_properties=props,
+        )
+
+        out = serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
+        return CustomerUpsertOut(**out, unomi_sync=unomi_sync)
     finally:
         if token is not None:
             reset_profile_sync_source(token)

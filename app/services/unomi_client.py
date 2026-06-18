@@ -36,6 +36,7 @@ class UnomiClient:
         *,
         json_body: dict | list | None = None,
         query: str = "",
+        extra_headers: dict[str, str] | None = None,
     ) -> Any:
         path = path if path.startswith("/") else f"/{path}"
         url = f"{self._api_root}{path}"
@@ -47,6 +48,8 @@ class UnomiClient:
             "Authorization": self._auth_header(),
             "Accept": "application/json",
         }
+        if extra_headers:
+            headers.update(extra_headers)
         if json_body is not None:
             data = json.dumps(json_body).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -117,6 +120,13 @@ class UnomiClient:
 
     def save_profile(self, profile_body: dict) -> dict | None:
         return self.request("POST", "/profiles", json_body=profile_body)
+
+    def collect_events(self, payload: dict, *, peer_key: str | None = None) -> dict | None:
+        """POST /cxs/eventcollector — recommended Unomi 2.x path for profile create/update."""
+        extra: dict[str, str] = {}
+        if peer_key:
+            extra["X-Unomi-Peer"] = peer_key
+        return self.request("POST", "/eventcollector", json_body=payload, extra_headers=extra or None)
 
     def delete_profile(self, profile_id: str, *, with_data: bool = True) -> None:
         """Remove profile via Unomi privacy API (administrative delete)."""
