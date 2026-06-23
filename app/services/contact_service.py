@@ -1,4 +1,6 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+
 from app.models.customer import Customer
 from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
 
@@ -13,6 +15,62 @@ def get_customer(db: Session, brand: str, profile_id: str):
             Customer.profile_id == profile_id,
         )
         .first()
+    )
+
+
+def _extract_email_from_payload(payload: dict | None, *, brand: str) -> str | None:
+    """WooCommerce / Unomi sale payloads — billing_email, email, scopeEmail."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("billing_email", "email", "recipientEmail", "billingEmail"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip() and "@" in val:
+            return val.strip().lower()
+    scope = payload.get("scopeEmail")
+    if isinstance(scope, str) and scope.strip():
+        prefix = f"{brand}-".lower()
+        raw = scope.strip()
+        if raw.lower().startswith(prefix) and "@" in raw:
+            return raw[len(prefix) :].strip().lower()
+    return None
+
+
+def resolve_customer_for_transaction(
+    db: Session,
+    *,
+    brand: str,
+    profile_id: str,
+    payload: dict | None,
+) -> Customer | None:
+    """
+    Match customer by Unomi profileId, else by email from sale payload.
+    Handles profile merges (same email, new profileId) and guest checkout auto-create.
+    """
+    customer = get_customer(db, brand, profile_id)
+    if customer:
+        return customer
+
+    email = _extract_email_from_payload(payload, brand=brand)
+    if not email:
+        return None
+
+    customer = (
+        db.query(Customer)
+        .filter(Customer.brand == brand)
+        .filter(func.lower(Customer.email) == email)
+        .first()
+    )
+    if customer:
+        if customer.profile_id != profile_id:
+            customer.profile_id = profile_id
+        return customer
+
+    return get_or_create_customer(
+        db,
+        brand,
+        profile_id,
+        payload={"email": email},
+        push_to_unomi=False,
     )
 
 

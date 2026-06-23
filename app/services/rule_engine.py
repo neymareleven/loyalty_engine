@@ -15,7 +15,7 @@ from app.models.customer_reward import CustomerReward
 from app.models.customer_metrics import CustomerMetrics
 from app.models.product import Product
 from app.services.birthdate_targeting import compare_birthdate, format_customer_birthdate_wire
-from app.services.contact_service import get_customer
+from app.services.contact_service import resolve_customer_for_transaction
 from app.services.loyalty_service import earn_points, burn_points
 from app.services.reward_service import issue_reward
 from app.services.coupon_service import issue_coupon, use_coupon
@@ -770,8 +770,13 @@ def process_transaction_rules(db: Session, transaction):
     Exécute les règles applicables à une transaction PENDING
     """
 
-    # 🔹 Option 1 (strict): customer must already exist.
-    customer = get_customer(db, transaction.brand, transaction.profile_id)
+    # Match by profileId; for Unomi sales also fall back to billing email / auto-create.
+    customer = resolve_customer_for_transaction(
+        db,
+        brand=transaction.brand,
+        profile_id=transaction.profile_id,
+        payload=transaction.payload if isinstance(transaction.payload, dict) else None,
+    )
     if not customer:
         raise ValueError("Customer not found. Use /customers/upsert before sending business events.")
 

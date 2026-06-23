@@ -10,6 +10,7 @@ import org.apache.http.entity.ContentType
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 
 final Logger logger = LoggerFactory.getLogger("sale_to_loyalty_engine")
 
@@ -102,10 +103,19 @@ def execute() {
         int code = resp.getStatusLine().getStatusCode()
         String body = resp.getEntity() ? EntityUtils.toString(resp.getEntity()) : ""
 
+        def bodySnippet = body ? body.substring(0, Math.min(800, body.length())) : ""
         if (code >= 200 && code < 300) {
-            logger.info("Sale pushed to Loyalty Engine. brand=${brand} profileId=${profileId} code=${code}")
+            def txStatus = null
+            try {
+                txStatus = body ? new JsonSlurper().parseText(body)?.status?.toString() : null
+            } catch (Exception ignore) {}
+            if (txStatus && txStatus != "PROCESSED") {
+                logger.warn("Sale accepted by Loyalty Engine but not fully processed. brand=${brand} profileId=${profileId} code=${code} status=${txStatus} body=${bodySnippet}")
+            } else {
+                logger.info("Sale pushed to Loyalty Engine. brand=${brand} profileId=${profileId} code=${code} status=${txStatus ?: 'unknown'}")
+            }
         } else {
-            logger.error("Sale push failed. brand=${brand} profileId=${profileId} code=${code} body=${body?.substring(0, Math.min(800, body.length()))}")
+            logger.error("Sale push failed. brand=${brand} profileId=${profileId} code=${code} body=${bodySnippet}")
         }
     } catch (Exception e) {
         logger.error("Error pushing sale to Loyalty Engine. brand=${brand} profileId=${profileId}", e)

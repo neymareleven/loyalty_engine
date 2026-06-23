@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models.customer import Customer
+from app.services.contact_service import resolve_customer_for_transaction
 from app.models.event_type import TransactionType
 from app.models.transaction import Transaction
 from app.services.loyalty_status_service import update_customer_status
@@ -93,6 +93,46 @@ def create_internal_transaction(
     return transaction
 
 
+def _retry_blocked_customer_not_found(db: Session, transaction: Transaction) -> Transaction:
+    """Re-process sale if customer was created after a BLOCKED ingest (idempotency + race)."""
+    if transaction.status != "BLOCKED" or transaction.error_code != "CUSTOMER_NOT_FOUND":
+        return transaction
+
+    customer = resolve_customer_for_transaction(
+        db,
+        brand=transaction.brand,
+        profile_id=transaction.profile_id,
+        payload=transaction.payload if isinstance(transaction.payload, dict) else None,
+    )
+    if not customer:
+        return transaction
+
+    transaction.status = "PENDING"
+    transaction.error_code = None
+    transaction.error_message = None
+    transaction.processed_at = None
+    db.commit()
+
+    try:
+        process_transaction_rules(db, transaction)
+        transaction.processed_at = datetime.utcnow()
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        msg = str(e)
+        if "Customer not found" in msg:
+            transaction.status = "BLOCKED"
+            transaction.error_code = "CUSTOMER_NOT_FOUND"
+            transaction.error_message = msg
+        else:
+            transaction.status = "FAILED"
+            transaction.error_message = msg
+        transaction.processed_at = datetime.utcnow()
+        db.commit()
+
+    return transaction
+
+
 def create_transaction(db: Session, event_data):
     """
     Crée une transaction de manière idempotente.
@@ -109,7 +149,7 @@ def create_transaction(db: Session, event_data):
     )
 
     if existing:
-        return existing
+        return _retry_blocked_customer_not_found(db, existing)
 
     blocked_customer_profile_event = (event_data.eventType or "").upper() in {
         "CUSTOMER_PROFILE",
@@ -185,10 +225,11 @@ def create_transaction(db: Session, event_data):
             db.commit()
 
     if transaction.status == "PENDING":
-        customer = (
-            db.query(Customer)
-            .filter(Customer.brand == transaction.brand, Customer.profile_id == transaction.profile_id)
-            .first()
+        customer = resolve_customer_for_transaction(
+            db,
+            brand=transaction.brand,
+            profile_id=transaction.profile_id,
+            payload=transaction.payload if isinstance(transaction.payload, dict) else None,
         )
         if customer:
             customer.last_activity_at = datetime.utcnow()

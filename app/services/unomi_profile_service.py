@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from contextvars import ContextVar
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -122,6 +122,80 @@ def _iso_or_none(value: datetime | None) -> str | None:
         return value.isoformat()
     except Exception:
         return str(value)
+
+
+def _unomi_visit_iso8601_z(value: datetime | None) -> str | None:
+    """Unomi CDP visit timestamps: 2026-06-18T11:10:47Z (UTC, no fractional seconds)."""
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_unomi_visit_datetime(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if isinstance(value, (int, float)):
+        # Epoch ms (Unomi internal) or seconds
+        ts = float(value)
+        if ts > 1_000_000_000_000:
+            ts /= 1000.0
+        return datetime.utcfromtimestamp(ts)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except ValueError:
+            return None
+    return None
+
+
+def _apply_visit_properties(
+    merged: dict[str, Any],
+    *,
+    existing_props: dict[str, Any],
+    customer: Customer,
+    explicit_visits: dict[str, Any] | None = None,
+) -> None:
+    """
+    firstVisit / lastVisit (ISO 8601 Z):
+    - preserve CDP values when already set on Unomi
+    - otherwise derive from loyalty timestamps (created_at, last_activity_at, updated_at)
+    - explicit values in upsert properties.* override
+    """
+    explicit = explicit_visits or {}
+
+    if explicit.get("firstVisit") not in (None, ""):
+        parsed = _parse_unomi_visit_datetime(explicit["firstVisit"])
+        if parsed:
+            merged["firstVisit"] = _unomi_visit_iso8601_z(parsed)
+    elif existing_props.get("firstVisit") not in (None, ""):
+        merged["firstVisit"] = existing_props["firstVisit"]
+    elif customer.created_at:
+        merged["firstVisit"] = _unomi_visit_iso8601_z(customer.created_at)
+
+    if explicit.get("lastVisit") not in (None, ""):
+        parsed = _parse_unomi_visit_datetime(explicit["lastVisit"])
+        if parsed:
+            merged["lastVisit"] = _unomi_visit_iso8601_z(parsed)
+    else:
+        candidates: list[datetime] = []
+        for raw in (customer.last_activity_at, customer.updated_at, customer.created_at):
+            if isinstance(raw, datetime):
+                candidates.append(raw.replace(tzinfo=None) if raw.tzinfo else raw)
+        existing_last = _parse_unomi_visit_datetime(existing_props.get("lastVisit"))
+        if existing_last:
+            candidates.append(existing_last)
+        if candidates:
+            merged["lastVisit"] = _unomi_visit_iso8601_z(max(candidates))
 
 
 def _derive_scope_email(*, brand: str, email: Any, scope_email: Any = None) -> str | None:
@@ -286,6 +360,12 @@ def merge_unomi_profile_properties(
 
     merged["unomiProfileId"] = profile_id
     merged["unomi_profile_id"] = profile_id
+    _apply_visit_properties(
+        merged,
+        existing_props=existing_props,
+        customer=customer,
+        explicit_visits=extra_properties,
+    )
     return _compact_unomi_properties(merged)
 
 

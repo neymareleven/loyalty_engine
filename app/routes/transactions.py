@@ -82,6 +82,8 @@ def ingest_transaction(
     return {
         "transactionId": str(transaction.id),
         "status": transaction.status,
+        "errorCode": transaction.error_code,
+        "errorMessage": transaction.error_message,
     }
 
 

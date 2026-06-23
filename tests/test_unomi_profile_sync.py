@@ -1,5 +1,6 @@
 """Unomi profile payload build + contact property merge."""
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -76,7 +77,48 @@ def test_identity_from_customer_row():
     assert identity["gender"] == "F"
 
 
-def test_merge_preserves_cdp_visit_fields():
+def test_merge_sets_visit_fields_from_loyalty_timestamps():
+    created = datetime(2026, 6, 23, 8, 25, 27)
+    updated = datetime(2026, 6, 23, 13, 8, 29)
+    merged = merge_unomi_profile_properties(
+        existing_profile=None,
+        customer=_customer(
+            created_at=created,
+            updated_at=updated,
+            last_activity_at=updated,
+        ),
+        loyalty_program_properties={"loyaltyStatus": "base"},
+        extra_properties={},
+        profile_id="prof-x",
+    )
+    assert merged["firstVisit"] == "2026-06-23T08:25:27Z"
+    assert merged["lastVisit"] == "2026-06-23T13:08:29Z"
+
+
+def test_merge_preserves_cdp_first_visit():
+    existing = {
+        "properties": {
+            "firstVisit": "2026-06-18T11:10:47Z",
+            "lastVisit": "2026-06-20T10:00:00Z",
+        }
+    }
+    merged = merge_unomi_profile_properties(
+        existing_profile=existing,
+        customer=_customer(
+            email="kevine@gmail.com",
+            created_at=datetime(2026, 6, 23, 8, 0, 0),
+            updated_at=datetime(2026, 6, 23, 13, 0, 0),
+            last_activity_at=datetime(2026, 6, 23, 13, 0, 0),
+        ),
+        loyalty_program_properties={"loyaltyStatus": "base", "statusPoints": 0},
+        extra_properties={},
+        profile_id="prof-x",
+    )
+    assert merged["firstVisit"] == "2026-06-18T11:10:47Z"
+    assert merged["lastVisit"] == "2026-06-23T13:00:00Z"
+
+
+def test_merge_preserves_cdp_visit_fields_when_loyalty_has_no_timestamps():
     existing = {
         "properties": {
             "lastVisit": "2026-06-18T11:10:47Z",

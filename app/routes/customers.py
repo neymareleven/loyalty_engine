@@ -189,6 +189,8 @@ def upsert_customer(
                 refresh_window=True,
                 emit_events=False,
             )
+
+        customer.last_activity_at = datetime.utcnow()
         db.commit()
         db.refresh(customer)
 
