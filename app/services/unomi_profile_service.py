@@ -545,8 +545,13 @@ def sync_customer_profile_to_unomi(
     customer: Customer,
     reason: str = "update",
     extra_properties: dict[str, Any] | None = None,
+    transport_override: str | None = None,
 ) -> dict[str, Any] | None:
-    """Push loyalty customer state to Unomi (best-effort unless UNOMI_PROFILE_SYNC_STRICT=true)."""
+    """Push loyalty customer state to Unomi (best-effort unless UNOMI_PROFILE_SYNC_STRICT=true).
+
+    transport_override: force ``profiles`` (save only, no eventcollector) or ``eventcollector``.
+    Used after Unomi-initiated upsert to avoid contactInfoSubmitted → loyalty_profile loops.
+    """
     if should_skip_unomi_profile_push():
         return {"skipped": True, "reason": "sync_source_unomi"}
 
@@ -584,7 +589,7 @@ def sync_customer_profile_to_unomi(
         extra_properties=extra_properties,
         existing_profile=existing_profile,
     )
-    transport = unomi_profile_sync_transport()
+    transport = (transport_override or unomi_profile_sync_transport() or "profiles").strip().lower()
     try:
         if transport == "eventcollector":
             # Unomi eventcollector alone may assign a random profile UUID.

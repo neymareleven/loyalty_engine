@@ -136,8 +136,10 @@ def upsert_customer(
                 raise HTTPException(status_code=400, detail=str(e)) from e
 
     token = None
-    if (x_profile_sync_source or "").strip().lower() == "unomi":
+    from_unomi = (x_profile_sync_source or "").strip().lower() == "unomi"
+    if from_unomi:
         token = set_profile_sync_source("unomi")
+    unomi_sync = None
     try:
         existed = bool(
             db.query(Customer.id)
@@ -194,18 +196,29 @@ def upsert_customer(
         db.commit()
         db.refresh(customer)
 
-        unomi_sync = sync_customer_profile_to_unomi(
-            db,
-            customer=customer,
-            reason="customer_upsert",
-            extra_properties=props,
-        )
-
-        out = serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
-        return CustomerUpsertOut(**out, unomi_sync=unomi_sync)
+        if not from_unomi:
+            unomi_sync = sync_customer_profile_to_unomi(
+                db,
+                customer=customer,
+                reason="customer_upsert",
+                extra_properties=props,
+            )
     finally:
         if token is not None:
             reset_profile_sync_source(token)
+
+    # Unomi → Loyalty: push loyalty fields after releasing sync guard (profiles-only, no eventcollector loop).
+    if from_unomi:
+        unomi_sync = sync_customer_profile_to_unomi(
+            db,
+            customer=customer,
+            reason="unomi_upsert_deferred",
+            extra_properties=props,
+            transport_override="profiles",
+        )
+
+    out = serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
+    return CustomerUpsertOut(**out, unomi_sync=unomi_sync)
 
 
 @router.delete("/{brand}/{profile_id}")

@@ -66,11 +66,17 @@ Propriétés poussées (extrait) :
 
 `loyalty_profile.groovy` appelle `POST /customers/upsert`.
 
-**Important** : ajouter l’en-tête pour éviter une boucle push → Unomi :
+**Important** : ajouter l’en-tête pour éviter une boucle push pendant le traitement :
 
 ```http
 X-Profile-Sync-Source: unomi
 ```
+
+Pendant cet upsert, le push Loyalty → Unomi est **suspendu** (évite le ping-pong sur les champs CDP).
+
+**Après** l’upsert (token libéré), le moteur pousse **automatiquement** les champs fidélité vers Unomi via `POST /cxs/profiles` uniquement (`transport_override=profiles`, sans `contactInfoSubmitted`) — pour que le profil CDP ait `loyaltyStatus`, `statusPoints`, etc. dès l’inscription.
+
+Redéployer `loyalty_profile.groovy` (garde anti-écho sur `profileUpdated` sans delta contact) pour éviter une boucle upsert infinie.
 
 ## Suppression
 

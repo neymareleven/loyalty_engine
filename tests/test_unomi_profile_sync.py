@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.services.unomi_profile_service import (
     build_customer_identity_unomi_properties,
@@ -154,6 +154,33 @@ def test_skip_push_when_sync_source_is_unomi():
         assert should_skip_unomi_profile_push() is True
     finally:
         reset_profile_sync_source(token)
+
+
+@patch("app.services.unomi_profile_service.UnomiClient")
+@patch("app.services.unomi_profile_service.resolve_unomi_profile_connection")
+def test_deferred_sync_uses_profiles_transport_only(mock_resolve, mock_client_cls):
+    from app.services.unomi_profile_service import sync_customer_profile_to_unomi
+
+    mock_resolve.return_value = SimpleNamespace(scope="batira", base_url="https://u", username="k", password="p")
+    client = MagicMock()
+    mock_client_cls.return_value = client
+    client.get_profile.return_value = None
+
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+
+    customer = _customer()
+    result = sync_customer_profile_to_unomi(
+        db,
+        customer=customer,
+        reason="unomi_upsert_deferred",
+        transport_override="profiles",
+    )
+
+    assert result["synced"] is True
+    assert result["transport"] == "profiles"
+    client.save_profile.assert_called_once()
+    client.collect_events.assert_not_called()
 
 
 def test_eventcollector_contact_info_submitted_payload():

@@ -46,6 +46,28 @@ def execute() {
     def eventProps = [:]
     try { eventProps = event.getProperties() ?: [:] } catch (Exception ignore) {}
 
+    // Skip echo when Loyalty Engine just pushed loyalty fields (POST /cxs/profiles).
+    if (eventType == "profileUpdated") {
+        def loyaltyLinked = null
+        try { loyaltyLinked = profile?.getProperty("loyaltyEngineCustomerId") } catch (Exception ignore) {}
+        if (loyaltyLinked) {
+            def loyaltyOnlyKeys = [
+                "loyaltyStatus", "statusPoints", "loyaltyCustomerStatus", "loyaltyTierName",
+                "loyaltyEngineCustomerId", "loyaltyEngineSyncedAt", "loyaltyPointsBalance",
+                "lastActivityAt", "loyaltyStatusAssignedAt", "loyaltyStatusExpiresAt",
+                "pointsExpiresAt", "statusPointsResetAt", "loyaltyCreatedAt", "loyaltyUpdatedAt",
+                "unomiProfileId", "unomi_profile_id", "metrics", "firstVisit", "lastVisit"
+            ] as Set
+            def hasNonLoyaltyDelta = eventProps.keySet().any { k ->
+                !loyaltyOnlyKeys.contains(k?.toString())
+            }
+            if (!hasNonLoyaltyDelta) {
+                logger.debug("[loyalty_profile] Skipping profileUpdated (loyalty sync echo)")
+                return EventService.NO_CHANGE
+            }
+        }
+    }
+
     // ── 3. Resolve brand — exhaustive fallback chain ─────────────────────────
     //
     //  WHY this is needed:
