@@ -289,7 +289,7 @@ def _as_number_from_text(value: str) -> int | None:
     if not m:
         return None
 
-    token = m.group(0)
+    token = re.sub(r"[\s\u00a0\u202f]+", " ", m.group(0)).strip()
     token = token.replace(" ", "")
     token = token.strip(".,")
     if not token:
@@ -816,6 +816,8 @@ def process_transaction_rules(db: Session, transaction):
         return
 
     had_rule_failures = False
+    points_earned_total = 0
+    had_matching_rule = False
     for rule in rules:
 
         try:
@@ -866,6 +868,12 @@ def process_transaction_rules(db: Session, transaction):
                 db.flush()
 
             execution.details = {"matched": True, "actions": executed_actions}
+            had_matching_rule = True
+            for act in executed_actions:
+                if isinstance(act, dict) and act.get("type") == "earn_points":
+                    pts = act.get("points")
+                    if isinstance(pts, int) and pts > 0:
+                        points_earned_total += pts
 
         except Exception as e:
             had_rule_failures = True
@@ -878,3 +886,16 @@ def process_transaction_rules(db: Session, transaction):
             db.add(execution)
 
     transaction.status = "PROCESSED_ERRORS" if had_rule_failures else "PROCESSED"
+
+    if not had_rule_failures and (transaction.transaction_type or "").lower() == "sale" and points_earned_total <= 0:
+        if had_matching_rule and not transaction.error_code:
+            transaction.error_code = "NO_POINTS_EARNED"
+            transaction.error_message = (
+                "Sale processed but no points were earned. "
+                "Check sale rules (earn_points expression, conditions, product catalog)."
+            )
+        elif rules and not transaction.error_code:
+            transaction.error_code = "SALE_RULES_SKIPPED"
+            transaction.error_message = (
+                "Sale processed but no active sale rule matched this customer/transaction."
+            )

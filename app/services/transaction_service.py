@@ -6,11 +6,14 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.services.contact_service import resolve_customer_for_transaction
+from app.models.customer import Customer
 from app.models.event_type import TransactionType
 from app.models.transaction import Transaction
 from app.services.loyalty_status_service import update_customer_status
 from app.services.payload_schema_service import enrich_payload_schema_on_ingest, infer_json_schema_from_payload
 from app.services.rule_engine import process_transaction_rules
+from app.services.sale_payload_service import normalize_sale_payload
+from app.services.unomi_profile_service import sync_customer_profile_to_unomi
 
 
 def _infer_json_schema_from_payload(value: Any, *, _depth: int = 0, _max_depth: int = 6) -> dict | None:
@@ -93,6 +96,50 @@ def create_internal_transaction(
     return transaction
 
 
+def _maybe_normalize_business_payload(*, transaction_type: str, payload: dict | None) -> dict | None:
+    if (transaction_type or "").lower() == "sale":
+        return normalize_sale_payload(payload)
+    return payload
+
+
+def _sync_customer_after_business_transaction(
+    db: Session,
+    *,
+    transaction: Transaction,
+    customer: Customer | None = None,
+) -> None:
+    """Push loyalty state to Unomi after sale / business events (profiles-only, no loop)."""
+    if transaction.status not in ("PROCESSED", "PROCESSED_ERRORS"):
+        return
+    blocked = {
+        "CUSTOMER_PROFILE",
+        "CONTACT",
+        "CUSTOMER_UPSERT",
+        "CONTACTINFOSUBMITTED",
+        "SOCIALCONTACTS",
+    }
+    if (transaction.transaction_type or "").upper() in blocked:
+        return
+
+    cust = customer
+    if cust is None:
+        cust = resolve_customer_for_transaction(
+            db,
+            brand=transaction.brand,
+            profile_id=transaction.profile_id,
+            payload=transaction.payload if isinstance(transaction.payload, dict) else None,
+        )
+    if not cust:
+        return
+
+    sync_customer_profile_to_unomi(
+        db,
+        customer=cust,
+        reason=f"transaction_{transaction.transaction_type}",
+        transport_override="profiles",
+    )
+
+
 def _retry_blocked_customer_not_found(db: Session, transaction: Transaction) -> Transaction:
     """Re-process sale if customer was created after a BLOCKED ingest (idempotency + race)."""
     if transaction.status != "BLOCKED" or transaction.error_code != "CUSTOMER_NOT_FOUND":
@@ -117,6 +164,7 @@ def _retry_blocked_customer_not_found(db: Session, transaction: Transaction) -> 
         process_transaction_rules(db, transaction)
         transaction.processed_at = datetime.utcnow()
         db.commit()
+        _sync_customer_after_business_transaction(db, transaction=transaction)
     except Exception as e:
         db.rollback()
         msg = str(e)
@@ -174,13 +222,18 @@ def create_transaction(db: Session, event_data):
     if blocked_customer_profile_event:
         status = "BLOCKED"
 
+    normalized_payload = _maybe_normalize_business_payload(
+        transaction_type=event_data.eventType,
+        payload=event_data.payload,
+    )
+
     transaction = Transaction(
         transaction_id=event_data.eventId,   # 🔐 clé d'idempotence
         brand=event_data.brand,
         profile_id=event_data.profileId,
         transaction_type=event_data.eventType,
         source=event_data.source,
-        payload=event_data.payload,
+        payload=normalized_payload,
         status=status,
     )
 
@@ -256,6 +309,7 @@ def create_transaction(db: Session, event_data):
             process_transaction_rules(db, transaction)
             transaction.processed_at = datetime.utcnow()
             db.commit()
+            _sync_customer_after_business_transaction(db, transaction=transaction)
         except Exception as e:
             db.rollback()
             msg = str(e)

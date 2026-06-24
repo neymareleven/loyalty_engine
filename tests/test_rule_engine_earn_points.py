@@ -21,6 +21,15 @@ def test_resolve_order_total_to_number_fn():
     assert _resolve_action_number(db=None, customer=None, action_value=points, transaction=tx) == 25000
 
 
+def test_resolve_order_total_with_nbsp():
+    from app.services.rule_engine import _as_number_from_text
+
+    assert _as_number_from_text("6\u00a0300 CFA") == 6300
+    tx = _tx(orderTotal="525 CFA")
+    points = {"$fn": "to_number", "args": [{"$path": "payload.orderTotal"}]}
+    assert _resolve_action_number(db=None, customer=None, action_value=points, transaction=tx) == 525
+
+
 def test_resolve_coalesce_order_total_or_total():
     tx = _tx(total="800")
     points = {
