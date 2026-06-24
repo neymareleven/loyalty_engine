@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +16,7 @@ from app.services.transaction_service import create_transaction
 
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
+logger = logging.getLogger(__name__)
 
 
 def _serialize_transaction_out(tx: Transaction) -> dict:
@@ -79,6 +81,15 @@ def ingest_transaction(
     )
 
     transaction = create_transaction(db, mapped)
+    logger.info(
+        "transaction ingested brand=%s type=%s profileId=%s eventId=%s status=%s errorCode=%s",
+        transaction.brand,
+        transaction.transaction_type,
+        transaction.profile_id,
+        transaction.transaction_id,
+        transaction.status,
+        transaction.error_code,
+    )
     return {
         "transactionId": str(transaction.id),
         "status": transaction.status,
