@@ -21,7 +21,7 @@ from app.schemas.customer_coupon import CustomerCouponOut, CustomerCouponStatusU
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.customer_upsert_service import customer_identity_payload, parse_customer_upsert_payload
-from app.services.contact_service import get_or_create_customer
+from app.services.contact_service import get_or_create_customer, normalize_lookup_email, resolve_customer_for_lookup
 from app.services.customer_delete_service import delete_loyalty_customer
 from app.services.unomi_profile_service import reset_profile_sync_source, set_profile_sync_source, sync_customer_profile_to_unomi
 from app.services.customer_coupon_service import set_customer_coupon_status
@@ -40,6 +40,27 @@ from app.services.wallet_service import get_status_points_balance
 router = APIRouter(prefix="/customers", tags=["customers"])
 
 
+def _require_customer(
+    db: Session,
+    *,
+    brand: str,
+    profile_id: str,
+    email: str | None = None,
+) -> Customer:
+    customer, updated = resolve_customer_for_lookup(
+        db,
+        brand=brand,
+        profile_id=profile_id,
+        email=email,
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if updated:
+        db.commit()
+        db.refresh(customer)
+    return customer
+
+
 @router.get("")
 def list_customers(
     q: str | None = None,
@@ -56,7 +77,13 @@ def list_customers(
     query = db.query(Customer).filter(Customer.brand == active_brand)
 
     if q:
-        query = query.filter(Customer.profile_id.ilike(f"%{q}%"))
+        like = f"%{q}%"
+        query = query.filter(
+            or_(
+                Customer.profile_id.ilike(like),
+                Customer.email.ilike(like),
+            )
+        )
 
     if status:
         query = query.filter(Customer.status == status)
@@ -87,19 +114,13 @@ def list_customers(
 def get_customer(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
     return serialize_customer_out(db, customer=customer, brand=brand)
 
 
@@ -141,6 +162,19 @@ def upsert_customer(
         token = set_profile_sync_source("unomi")
     unomi_sync = None
     try:
+        if email:
+            norm_email = normalize_lookup_email(email, brand=brand)
+            if norm_email:
+                by_email = (
+                    db.query(Customer)
+                    .filter(Customer.brand == brand)
+                    .filter(func.lower(Customer.email) == norm_email)
+                    .first()
+                )
+                if by_email and by_email.profile_id != profile_id:
+                    by_email.profile_id = profile_id
+                    db.flush()
+
         existed = bool(
             db.query(Customer.id)
             .filter(Customer.brand == brand)
@@ -523,18 +557,13 @@ def patch_customer_loyalty_status(
 def get_customer_loyalty(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     tiers = (
         db.query(LoyaltyTier)

@@ -18,6 +18,55 @@ def get_customer(db: Session, brand: str, profile_id: str):
     )
 
 
+def normalize_lookup_email(value: str | None, *, brand: str) -> str | None:
+    """Normalize email or scopeEmail (batira-user@x.com) for customer lookup."""
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    prefix = f"{brand}-".lower()
+    if raw.lower().startswith(prefix) and "@" in raw:
+        return raw[len(prefix) :].strip().lower()
+    extracted = _extract_email_from_payload({"email": raw, "scopeEmail": raw}, brand=brand)
+    return extracted
+
+
+def resolve_customer_for_lookup(
+    db: Session,
+    *,
+    brand: str,
+    profile_id: str,
+    email: str | None = None,
+    reconcile_profile_id: bool = True,
+) -> tuple[Customer | None, bool]:
+    """
+    Find loyalty customer by Unomi profileId, else by email when IDs diverge
+    (Unomi mergeProfilesOnEmail / session cookie vs form registration profile).
+    Returns (customer, profile_id_updated).
+    """
+    customer = get_customer(db, brand, profile_id)
+    if customer:
+        return customer, False
+
+    norm_email = normalize_lookup_email(email, brand=brand)
+    if not norm_email:
+        return None, False
+
+    customer = (
+        db.query(Customer)
+        .filter(Customer.brand == brand)
+        .filter(func.lower(Customer.email) == norm_email)
+        .first()
+    )
+    if not customer:
+        return None, False
+
+    updated = False
+    if reconcile_profile_id and customer.profile_id != profile_id:
+        customer.profile_id = profile_id
+        updated = True
+    return customer, updated
+
+
 def _extract_email_from_payload(payload: dict | None, *, brand: str) -> str | None:
     """WooCommerce / Unomi sale payloads — billing_email, email, scopeEmail."""
     if not isinstance(payload, dict):
