@@ -15,10 +15,21 @@ _LOYALTY_IDENTITY_KEYS = frozenset(
         "birthdate",
         "birthDate",
         "brand",
+        "your-brand",
+        "your_brand",
         "profileId",
         "profile_id",
     }
 )
+
+_CF7_INTERNAL_PREFIXES = ("_wpcf7", "phone-cf7it")
+
+
+def _is_cf7_internal_property(key: str) -> bool:
+    k = (key or "").strip()
+    if not k:
+        return True
+    return any(k.startswith(prefix) for prefix in _CF7_INTERNAL_PREFIXES)
 
 
 def parse_customer_upsert_payload(payload: CustomerUpsert) -> dict[str, Any]:
@@ -31,7 +42,13 @@ def parse_customer_upsert_payload(payload: CustomerUpsert) -> dict[str, Any]:
     """
     props = dict(payload.properties or {})
 
-    brand = (payload.brand or props.get("brand") or "").strip() or None
+    brand = (
+        payload.brand
+        or props.get("brand")
+        or props.get("your-brand")
+        or props.get("your_brand")
+        or ""
+    ).strip() or None
 
     email_raw = payload.email if payload.email is not None else props.get("email")
     email = str(email_raw).strip() if email_raw not in (None, "") else None
@@ -50,7 +67,9 @@ def parse_customer_upsert_payload(payload: CustomerUpsert) -> dict[str, Any]:
     extra_properties = {
         k: v
         for k, v in props.items()
-        if k not in _LOYALTY_IDENTITY_KEYS and v not in (None, "")
+        if k not in _LOYALTY_IDENTITY_KEYS
+        and v not in (None, "")
+        and not _is_cf7_internal_property(str(k))
     }
 
     return {

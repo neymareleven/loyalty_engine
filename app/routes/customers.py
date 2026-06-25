@@ -207,15 +207,25 @@ def upsert_customer(
         if token is not None:
             reset_profile_sync_source(token)
 
-    # Unomi → Loyalty: push loyalty fields after releasing sync guard (profiles-only, no eventcollector loop).
+    # Unomi → Loyalty: optional loyalty-field push (skipped on new registration by default).
     if from_unomi:
-        unomi_sync = sync_customer_profile_to_unomi(
-            db,
-            customer=customer,
-            reason="unomi_upsert_deferred",
-            extra_properties=props,
-            transport_override="profiles",
-        )
+        from app.services.unomi_profile_service import should_skip_unomi_sync_after_unomi_registration
+
+        if should_skip_unomi_sync_after_unomi_registration(from_unomi=True, customer_existed=existed):
+            unomi_sync = {
+                "synced": False,
+                "skipped": True,
+                "reason": "registration_deferred_to_first_sale",
+                "profileId": profile_id,
+            }
+        else:
+            unomi_sync = sync_customer_profile_to_unomi(
+                db,
+                customer=customer,
+                reason="unomi_upsert_deferred",
+                extra_properties=props,
+                transport_override="profiles",
+            )
 
     out = serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
     return CustomerUpsertOut(**out, unomi_sync=unomi_sync)

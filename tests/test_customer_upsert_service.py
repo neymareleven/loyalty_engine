@@ -38,6 +38,24 @@ def test_parse_upsert_from_properties_bag():
     assert parsed["extra_properties"] == {"firstName": "Ada"}
 
 
+def test_parse_upsert_cf7_form_fields():
+    parsed = parse_customer_upsert_payload(
+        CustomerUpsert(
+            profileId="uuid-3",
+            properties={
+                "your-brand": "batira",
+                "email": "new@test.com",
+                "firstName": "New",
+                "_wpcf7": "123",
+                "phone-cf7it-national": "687894563",
+            },
+        )
+    )
+    assert parsed["brand"] == "batira"
+    assert parsed["email"] == "new@test.com"
+    assert parsed["extra_properties"] == {"firstName": "New"}
+
+
 def test_customer_identity_payload():
     parsed = parse_customer_upsert_payload(
         CustomerUpsert(

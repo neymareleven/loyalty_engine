@@ -12,6 +12,7 @@ from app.services.unomi_profile_service import (
     reset_profile_sync_source,
     set_profile_sync_source,
     should_skip_unomi_profile_push,
+    should_skip_unomi_sync_after_unomi_registration,
     _derive_scope_email,
 )
 
@@ -173,6 +174,12 @@ def test_skip_push_when_sync_source_is_unomi():
         assert should_skip_unomi_profile_push() is True
     finally:
         reset_profile_sync_source(token)
+
+
+def test_skip_sync_after_unomi_registration_defaults_true():
+    assert should_skip_unomi_sync_after_unomi_registration(from_unomi=True, customer_existed=False) is True
+    assert should_skip_unomi_sync_after_unomi_registration(from_unomi=True, customer_existed=True) is False
+    assert should_skip_unomi_sync_after_unomi_registration(from_unomi=False, customer_existed=False) is False
 
 
 @patch("app.services.unomi_profile_service.UnomiClient")

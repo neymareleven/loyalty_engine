@@ -16,6 +16,7 @@ Indépendant du mode de segmentation (`INTERNAL` / `UNOMI`). Dès que `UNOMI_BAS
 | `UNOMI_PROFILE_SYNC_MODE` | `minimal` | `minimal` = push **uniquement** champs fidélité (ne réécrit pas `scopeEmail` / `mergeIdentifier`). `full` = comportement legacy |
 | `UNOMI_PROFILE_SYNC_SET_MERGE_IDENTIFIER` | `false` | Ne pas alimenter `systemProperties.mergeIdentifier` (la règle Unomi `mergeProfilesOnEmail` le gère déjà) |
 | `UNOMI_PROFILE_SYNC_SKIP_UNCHANGED` | `true` | Skip push si `statusPoints` / `loyaltyStatus` inchangés sur Unomi |
+| `UNOMI_PROFILE_SYNC_SKIP_ON_REGISTRATION` | `true` | Après upsert Unomi (inscription), ne pas pousser tout de suite les champs fidélité vers Unomi (évite tempête `profileUpdated` ; sync au 1er achat) |
 | `UNOMI_WEBHOOK_SECRET` | — | Secret optionnel pour `POST /integrations/unomi/profile-events` |
 
 Vérification : `GET /admin/segments/segmentation-mode` → `profileSyncEnabled`.
@@ -77,9 +78,9 @@ X-Profile-Sync-Source: unomi
 
 Pendant cet upsert, le push Loyalty → Unomi est **suspendu** (évite le ping-pong sur les champs CDP).
 
-**Après** l’upsert (token libéré), le moteur pousse **automatiquement** les champs fidélité vers Unomi via `POST /cxs/profiles` uniquement (`transport_override=profiles`, sans `contactInfoSubmitted`) — pour que le profil CDP ait `loyaltyStatus`, `statusPoints`, etc. dès l’inscription.
+**Après** l’upsert (token libéré), le moteur peut pousser les champs fidélité vers Unomi via `POST /cxs/profiles` (`transport_override=profiles`). Par défaut (`UNOMI_PROFILE_SYNC_SKIP_ON_REGISTRATION=true`), ce push est **reporté** pour une **nouvelle** inscription Unomi : les champs fidélité partent au premier achat / changement de statut, ce qui évite une cascade `profileUpdated` (mergeProfilesOnEmail, batira, …).
 
-Redéployer `loyalty_profile.groovy` (garde anti-écho sur `profileUpdated` sans delta contact) pour éviter une boucle upsert infinie.
+Redéployer `loyalty_profile.groovy` (garde anti-écho sur `profileUpdated` + flatten CF7 `your-brand` / champs formulaire) pour éviter une boucle upsert infinie.
 
 ## Suppression
 

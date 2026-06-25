@@ -128,6 +128,17 @@ def _should_set_merge_identifier() -> bool:
     return _env_bool("UNOMI_PROFILE_SYNC_SET_MERGE_IDENTIFIER", default=False)
 
 
+def should_skip_unomi_sync_after_unomi_registration(*, from_unomi: bool, customer_existed: bool) -> bool:
+    """
+    After Unomi form registration, skip the immediate Loyalty→Unomi loyalty-field push.
+    That push triggers profileUpdated and Unomi rule storms (mergeProfilesOnEmail, batira, …).
+    Fields are synced on the first sale / status change instead.
+    """
+    if not from_unomi or customer_existed:
+        return False
+    return _env_bool("UNOMI_PROFILE_SYNC_SKIP_ON_REGISTRATION", default=True)
+
+
 def _birthdate_to_unomi_value(customer: Customer) -> str | int | None:
     formatted = _format_birthdate(customer)
     if not formatted:

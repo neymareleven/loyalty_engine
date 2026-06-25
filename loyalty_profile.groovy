@@ -46,6 +46,32 @@ def execute() {
     def eventProps = [:]
     try { eventProps = event.getProperties() ?: [:] } catch (Exception ignore) {}
 
+    // ── 2b. Flatten CF7 / Unomi form field values ────────────────────────────
+    // Form events (Contact Form 7) store answers in nested flattenedProperties.fields
+    // and/or at the top level (email, firstName, your-brand, …).
+    def formFields = [:]
+    try {
+        def fp = eventProps?.get("flattenedProperties")
+        if (fp instanceof Map) {
+            def fields = fp.get("fields")
+            if (fields instanceof Map) {
+                formFields.putAll(fields)
+            }
+        }
+    } catch (Exception ignore) {}
+    eventProps.each { k, v ->
+        def key = k?.toString()
+        if (!key || key.startsWith("_") || v == null || v instanceof Map || v instanceof List) {
+            return
+        }
+        if (!formFields.containsKey(key)) {
+            formFields[key] = v
+        }
+    }
+    if (formFields) {
+        logger.debug("[loyalty_profile] flattenedProperties.fields keys: ${formFields.keySet()}")
+    }
+
     // Skip echo when Loyalty Engine just pushed loyalty fields (POST /cxs/profiles).
     if (eventType == "profileUpdated") {
         def loyaltyLinked = null
@@ -84,11 +110,18 @@ def execute() {
 
     def brand = null
 
-    // (a) event.properties.brand
+    // (a) event.properties.brand or CF7 your-brand
     def brandFromProps = eventProps?.get("brand")?.toString()?.trim()
     if (brandFromProps) {
         brand = brandFromProps
         logger.debug("[loyalty_profile] brand resolved from event.properties: ${brand}")
+    }
+    if (!brand) {
+        def brandFromForm = formFields?.get("your-brand")?.toString()?.trim()
+        if (brandFromForm) {
+            brand = brandFromForm
+            logger.debug("[loyalty_profile] brand resolved from event.properties/formFields: ${brand}")
+        }
     }
 
     // (b) event.scope — set in the event JSON envelope; not null-safe to skip
@@ -147,11 +180,28 @@ def execute() {
     }
 
     // ── 6. Build properties sub-object ───────────────────────────────────────
-    // Forward all event properties so the Loyalty Engine has full context.
-    // Also enrich with profile fields not already present from the event.
+    // Forward form/contact fields; drop CF7 internals (_wpcf7*, phone-cf7it*).
     def properties = [:]
+    formFields.each { k, v ->
+        def key = k?.toString()
+        if (!key || key.startsWith("_") || key.startsWith("phone-cf7it")) {
+            return
+        }
+        if (key == "your-brand" || key == "your_brand") {
+            return
+        }
+        properties[key] = v
+    }
     if (eventProps) {
-        eventProps.each { k, v -> properties[k] = v }
+        eventProps.each { k, v ->
+            def key = k?.toString()
+            if (!key || key.startsWith("_") || key == "flattenedProperties" || v == null) {
+                return
+            }
+            if (!properties.containsKey(key)) {
+                properties[key] = v
+            }
+        }
     }
     ["firstName", "lastName", "email", "phoneNumber", "phone", "scopeEmail"].each { field ->
         if (!properties.containsKey(field)) {
