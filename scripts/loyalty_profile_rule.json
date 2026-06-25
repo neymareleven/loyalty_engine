@@ -1,0 +1,95 @@
+{
+  "itemId": "loyalty_profile",
+  "itemType": "rule",
+  "condition": {
+    "type": "booleanCondition",
+    "parameterValues": {
+      "operator": "or",
+      "subConditions": [
+        {
+          "type": "booleanCondition",
+          "parameterValues": {
+            "operator": "and",
+            "subConditions": [
+              {
+                "type": "eventTypeCondition",
+                "parameterValues": {
+                  "eventTypeId": "form"
+                }
+              },
+              {
+                "type": "eventPropertyCondition",
+                "parameterValues": {
+                  "propertyName": "target.itemId",
+                  "comparisonOperator": "equals",
+                  "propertyValue": "enregistrementbat"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "booleanCondition",
+          "parameterValues": {
+            "operator": "and",
+            "subConditions": [
+              {
+                "type": "profileUpdatedEventCondition",
+                "parameterValues": {}
+              },
+              {
+                "type": "profilePropertyCondition",
+                "parameterValues": {
+                  "propertyName": "properties.email",
+                  "comparisonOperator": "exists"
+                }
+              },
+              {
+                "type": "profilePropertyCondition",
+                "parameterValues": {
+                  "propertyName": "properties.firstName",
+                  "comparisonOperator": "exists"
+                }
+              },
+              {
+                "type": "profilePropertyCondition",
+                "parameterValues": {
+                  "propertyName": "properties.brand",
+                  "comparisonOperator": "exists"
+                }
+              },
+              {
+                "type": "profilePropertyCondition",
+                "parameterValues": {
+                  "propertyName": "properties.loyaltyEngineCustomerId",
+                  "comparisonOperator": "missing"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "actions": [
+    {
+      "type": "loyalty_profile",
+      "parameterValues": {
+        "loyaltyUrl": "https://qilinsa.com",
+        "loyaltyUsername": "karaf",
+        "loyaltyPassword": "karaf"
+      }
+    }
+  ],
+  "raiseEventOnlyOnceForProfile": false,
+  "raiseEventOnlyOnceForSession": false,
+  "raiseEventOnlyOnce": false,
+  "priority": 2,
+  "metadata": {
+    "id": "loyalty_profile",
+    "name": "loyalty profile",
+    "description": "Unomi registration -> Loyalty upsert (form + profileUpdated backfill after merge)",
+    "scope": "systemscope",
+    "enabled": true
+  }
+}
