@@ -1,0 +1,53 @@
+{
+  "itemId": "loyalty_profile",
+  "itemType": "rule",
+  "version": 10,
+  "condition": {
+    "parameterValues": {
+      "operator": "and",
+      "subConditions": [
+        {
+          "parameterValues": {
+            "eventTypeId": "form"
+          },
+          "type": "eventTypeCondition"
+        },
+        {
+          "parameterValues": {
+            "propertyName": "target.itemId",
+            "comparisonOperator": "equals",
+            "propertyValue": "enregistrementbat"
+          },
+          "type": "eventPropertyCondition"
+        }
+      ]
+    },
+    "type": "booleanCondition"
+  },
+  "actions": [
+    {
+      "parameterValues": {
+        "loyaltyUrl": "https://loyalty.qilinsa.com",
+        "loyaltyUsername": "karaf",
+        "loyaltyPassword": "karaf"
+      },
+      "type": "loyalty_profile"
+    }
+  ],
+  "raiseEventOnlyOnceForProfile": false,
+  "raiseEventOnlyOnceForSession": false,
+  "raiseEventOnlyOnce": false,
+  "priority": 2,
+  "metadata": {
+    "id": "loyalty_profile",
+    "name": "loyalty profile",
+    "description": "Creating loyalty profile in the loyalty engine only on registration",
+    "scope": "batira",
+    "tags": [],
+    "systemTags": [],
+    "enabled": true,
+    "missingPlugins": false,
+    "hidden": false,
+    "readOnly": false
+  }
+}

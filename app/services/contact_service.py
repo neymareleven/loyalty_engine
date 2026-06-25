@@ -110,8 +110,20 @@ def resolve_customer_for_transaction(
         .first()
     )
     if customer:
-        if customer.profile_id != profile_id:
-            customer.profile_id = profile_id
+        email = _extract_email_from_payload(payload, brand=brand)
+        canonical_profile_id = profile_id
+        if email:
+            from app.services.unomi_profile_service import get_unomi_profile_client
+
+            client = get_unomi_profile_client(brand=brand)
+            if client:
+                canonical_profile_id = client.resolve_canonical_profile_id(
+                    brand=brand,
+                    email=email,
+                    fallback_profile_id=profile_id,
+                )
+        if customer.profile_id != canonical_profile_id:
+            customer.profile_id = canonical_profile_id
         return customer
 
     return get_or_create_customer(

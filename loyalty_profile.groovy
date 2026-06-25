@@ -223,28 +223,29 @@ def execute() {
     def scopeEmailForm = formFields?.get("scopeEmail")?.toString()?.trim()
     def sessionEmail = profile?.getProperty("email")?.toString()?.trim()
 
-    if (profileService && formEmail) {
-        def sessionEmailNorm = sessionEmail?.toLowerCase()
+    if profileService && formEmail) {
         def formEmailNorm = formEmail.toLowerCase()
-        def needsResolve = (eventType == "form") && (!sessionEmailNorm || sessionEmailNorm != formEmailNorm)
-        if (needsResolve || eventType == "profileUpdated") {
-            def resolvedId = resolveCanonicalProfileId(
-                profileService,
-                brand,
-                formEmailNorm,
-                scopeEmailForm,
-                sessionProfileId
+        def resolvedId = resolveCanonicalProfileId(
+            profileService,
+            brand,
+            formEmailNorm,
+            scopeEmailForm,
+            sessionProfileId
+        )
+        if (resolvedId && resolvedId != sessionProfileId) {
+            logger.info(
+                "[loyalty_profile] Canonical profile resolved: session=${sessionProfileId} " +
+                "sessionEmail=${sessionEmail} formEmail=${formEmailNorm} -> ${resolvedId}"
             )
-            if (resolvedId && resolvedId != sessionProfileId) {
-                logger.info(
-                    "[loyalty_profile] Canonical profile resolved: session=${sessionProfileId} " +
-                    "sessionEmail=${sessionEmail} formEmail=${formEmailNorm} -> ${resolvedId}"
-                )
-                profileId = resolvedId
-                try {
-                    profile = profileService.load(profileId)
-                } catch (Exception ignore) {}
-            }
+            profileId = resolvedId
+            try {
+                profile = profileService.load(profileId)
+            } catch (Exception ignore) {}
+        } else if (eventType == "form") {
+            logger.info(
+                "[loyalty_profile] Using session profileId=${sessionProfileId} for formEmail=${formEmailNorm} " +
+                "(canonical search returned same id; profileUpdated backfill may follow)"
+            )
         }
     }
 

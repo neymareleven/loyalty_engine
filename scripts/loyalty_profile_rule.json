@@ -1,95 +1,102 @@
 {
   "itemId": "loyalty_profile",
   "itemType": "rule",
+  "version": 11,
   "condition": {
-    "type": "booleanCondition",
     "parameterValues": {
       "operator": "or",
       "subConditions": [
         {
-          "type": "booleanCondition",
           "parameterValues": {
             "operator": "and",
             "subConditions": [
               {
-                "type": "eventTypeCondition",
                 "parameterValues": {
                   "eventTypeId": "form"
-                }
+                },
+                "type": "eventTypeCondition"
               },
               {
-                "type": "eventPropertyCondition",
                 "parameterValues": {
                   "propertyName": "target.itemId",
                   "comparisonOperator": "equals",
                   "propertyValue": "enregistrementbat"
-                }
+                },
+                "type": "eventPropertyCondition"
               }
             ]
-          }
+          },
+          "type": "booleanCondition"
         },
         {
-          "type": "booleanCondition",
           "parameterValues": {
             "operator": "and",
             "subConditions": [
               {
-                "type": "profileUpdatedEventCondition",
-                "parameterValues": {}
+                "parameterValues": {},
+                "type": "profileUpdatedEventCondition"
               },
               {
-                "type": "profilePropertyCondition",
                 "parameterValues": {
                   "propertyName": "properties.email",
                   "comparisonOperator": "exists"
-                }
+                },
+                "type": "profilePropertyCondition"
               },
               {
-                "type": "profilePropertyCondition",
                 "parameterValues": {
                   "propertyName": "properties.firstName",
                   "comparisonOperator": "exists"
-                }
+                },
+                "type": "profilePropertyCondition"
               },
               {
-                "type": "profilePropertyCondition",
                 "parameterValues": {
                   "propertyName": "properties.brand",
-                  "comparisonOperator": "exists"
-                }
+                  "comparisonOperator": "equals",
+                  "propertyValue": "batira"
+                },
+                "type": "profilePropertyCondition"
               },
               {
-                "type": "profilePropertyCondition",
                 "parameterValues": {
                   "propertyName": "properties.loyaltyEngineCustomerId",
                   "comparisonOperator": "missing"
-                }
+                },
+                "type": "profilePropertyCondition"
               }
             ]
-          }
+          },
+          "type": "booleanCondition"
         }
       ]
-    }
+    },
+    "type": "booleanCondition"
   },
   "actions": [
     {
-      "type": "loyalty_profile",
       "parameterValues": {
-        "loyaltyUrl": "https://qilinsa.com",
+        "loyaltyUrl": "https://loyalty.qilinsa.com",
         "loyaltyUsername": "karaf",
         "loyaltyPassword": "karaf"
-      }
+      },
+      "type": "loyalty_profile"
     }
   ],
   "raiseEventOnlyOnceForProfile": false,
   "raiseEventOnlyOnceForSession": false,
   "raiseEventOnlyOnce": false,
-  "priority": 2,
+  "priority": 15,
   "metadata": {
     "id": "loyalty_profile",
     "name": "loyalty profile",
-    "description": "Unomi registration -> Loyalty upsert (form + profileUpdated backfill after merge)",
-    "scope": "systemscope",
-    "enabled": true
+    "description": "Inscription form + profileUpdated (profil canonique Unomi après merge)",
+    "scope": "batira",
+    "tags": [],
+    "systemTags": [],
+    "enabled": true,
+    "missingPlugins": false,
+    "hidden": false,
+    "readOnly": false
   }
 }
