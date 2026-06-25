@@ -82,6 +82,7 @@ def update_customer_status(
     refresh_window: bool = False,
     emit_events: bool = True,
     allow_downgrade_before_expiry: bool = False,
+    sync_unomi: bool = True,
 ):
     """
     Recalcule et met à jour le statut fidélité du client
@@ -92,9 +93,10 @@ def update_customer_status(
         if not customer.loyalty_status:
             customer.loyalty_status = "UNCONFIGURED"
             db.flush()
-        from app.services.unomi_profile_service import sync_customer_profile_to_unomi
+        if sync_unomi:
+            from app.services.unomi_profile_service import sync_customer_profile_to_unomi
 
-        sync_customer_profile_to_unomi(db, customer=customer, reason="loyalty_status")
+            sync_customer_profile_to_unomi(db, customer=customer, reason="loyalty_status")
         return customer.loyalty_status
 
     settings = get_loyalty_settings(db, brand=customer.brand)
@@ -217,7 +219,8 @@ def update_customer_status(
             commit=False,
         )
 
-    from app.services.unomi_profile_service import sync_customer_profile_to_unomi
+    if sync_unomi:
+        from app.services.unomi_profile_service import sync_customer_profile_to_unomi
 
-    sync_customer_profile_to_unomi(db, customer=customer, reason="loyalty_status")
+        sync_customer_profile_to_unomi(db, customer=customer, reason="loyalty_status")
     return customer.loyalty_status

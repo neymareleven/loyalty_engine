@@ -52,6 +52,7 @@ def test_build_payload_merges_contact_properties():
         scope="batira",
         include_points_balance=False,
         extra_properties={},
+        sync_mode="full",
     )
 
     props = body["properties"]
@@ -65,8 +66,26 @@ def test_build_payload_merges_contact_properties():
     assert body["itemId"] == "prof-1"
     assert body["itemType"] == "profile"
     assert body["systemProperties"]["scope"] == "batira"
-    assert body["systemProperties"]["mergeIdentifier"] == "batira-ada@example.com"
+    assert "mergeIdentifier" not in body["systemProperties"]
     assert body["segments"] == []
+
+
+def test_build_payload_minimal_mode_does_not_touch_identity():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+
+    body = build_unomi_profile_payload(
+        db,
+        customer=_customer(),
+        scope="batira",
+        sync_mode="minimal",
+    )
+    props = body["properties"]
+    assert props["loyaltyStatus"] == "BRONZE"
+    assert props["statusPoints"] == 100
+    assert "email" not in props
+    assert "scopeEmail" not in props
+    assert "mergeIdentifier" not in body["systemProperties"]
 
 
 def test_identity_from_customer_row():

@@ -13,6 +13,9 @@ Indépendant du mode de segmentation (`INTERNAL` / `UNOMI`). Dès que `UNOMI_BAS
 | `UNOMI_PROFILE_SYNC_DISABLED` | — | Liste de marques exclues (`batira,qilinsa`) |
 | `UNOMI_PROFILE_SYNC_BRANDS` | — | Opt-in (sinon toutes les marques avec credentials) |
 | `UNOMI_PROFILE_SYNC_STRICT` | `false` | Si `true`, une erreur Unomi fait échouer l’opération loyalty |
+| `UNOMI_PROFILE_SYNC_MODE` | `minimal` | `minimal` = push **uniquement** champs fidélité (ne réécrit pas `scopeEmail` / `mergeIdentifier`). `full` = comportement legacy |
+| `UNOMI_PROFILE_SYNC_SET_MERGE_IDENTIFIER` | `false` | Ne pas alimenter `systemProperties.mergeIdentifier` (la règle Unomi `mergeProfilesOnEmail` le gère déjà) |
+| `UNOMI_PROFILE_SYNC_SKIP_UNCHANGED` | `true` | Skip push si `statusPoints` / `loyaltyStatus` inchangés sur Unomi |
 | `UNOMI_WEBHOOK_SECRET` | — | Secret optionnel pour `POST /integrations/unomi/profile-events` |
 
 Vérification : `GET /admin/segments/segmentation-mode` → `profileSyncEnabled`.

@@ -65,6 +65,7 @@ def earn_points(
         reason="EARN_POINTS",
         source_transaction_id=source_transaction_id,
         depth=depth,
+        sync_unomi=False,
     )
 
     db.flush()
