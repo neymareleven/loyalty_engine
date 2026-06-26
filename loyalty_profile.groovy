@@ -220,6 +220,10 @@ def execute() {
     }
 
     def formEmail = (formFields?.get("email") ?: eventProps?.get("email") ?: profile?.getProperty("email"))?.toString()?.trim()
+    if (!formEmail && eventType == "form") {
+        logger.warn("[loyalty_profile] Missing email on form event; skipping upsert profileId=${profileId}")
+        return EventService.NO_CHANGE
+    }
     def scopeEmailForm = formFields?.get("scopeEmail")?.toString()?.trim()
     def sessionEmail = profile?.getProperty("email")?.toString()?.trim()
 

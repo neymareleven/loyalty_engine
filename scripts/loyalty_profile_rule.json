@@ -1,73 +1,24 @@
 {
   "itemId": "loyalty_profile",
   "itemType": "rule",
-  "version": 11,
+  "version": 10,
   "condition": {
     "parameterValues": {
-      "operator": "or",
+      "operator": "and",
       "subConditions": [
         {
           "parameterValues": {
-            "operator": "and",
-            "subConditions": [
-              {
-                "parameterValues": {
-                  "eventTypeId": "form"
-                },
-                "type": "eventTypeCondition"
-              },
-              {
-                "parameterValues": {
-                  "propertyName": "target.itemId",
-                  "comparisonOperator": "equals",
-                  "propertyValue": "enregistrementbat"
-                },
-                "type": "eventPropertyCondition"
-              }
-            ]
+            "eventTypeId": "form"
           },
-          "type": "booleanCondition"
+          "type": "eventTypeCondition"
         },
         {
           "parameterValues": {
-            "operator": "and",
-            "subConditions": [
-              {
-                "parameterValues": {},
-                "type": "profileUpdatedEventCondition"
-              },
-              {
-                "parameterValues": {
-                  "propertyName": "properties.email",
-                  "comparisonOperator": "exists"
-                },
-                "type": "profilePropertyCondition"
-              },
-              {
-                "parameterValues": {
-                  "propertyName": "properties.firstName",
-                  "comparisonOperator": "exists"
-                },
-                "type": "profilePropertyCondition"
-              },
-              {
-                "parameterValues": {
-                  "propertyName": "properties.brand",
-                  "comparisonOperator": "equals",
-                  "propertyValue": "batira"
-                },
-                "type": "profilePropertyCondition"
-              },
-              {
-                "parameterValues": {
-                  "propertyName": "properties.loyaltyEngineCustomerId",
-                  "comparisonOperator": "missing"
-                },
-                "type": "profilePropertyCondition"
-              }
-            ]
+            "propertyName": "target.itemId",
+            "comparisonOperator": "equals",
+            "propertyValue": "enregistrementbat"
           },
-          "type": "booleanCondition"
+          "type": "eventPropertyCondition"
         }
       ]
     },
@@ -86,11 +37,11 @@
   "raiseEventOnlyOnceForProfile": false,
   "raiseEventOnlyOnceForSession": false,
   "raiseEventOnlyOnce": false,
-  "priority": 15,
+  "priority": 2,
   "metadata": {
     "id": "loyalty_profile",
     "name": "loyalty profile",
-    "description": "Inscription form + profileUpdated (profil canonique Unomi après merge)",
+    "description": "Creating loyalty profile in the loyalty engine only on registration",
     "scope": "batira",
     "tags": [],
     "systemTags": [],

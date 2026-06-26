@@ -156,6 +156,116 @@ def _normalize_gender(value: str) -> str:
 from app.services.birthdate_targeting import parse_customer_birthdate_storage
 
 
+def _apply_customer_identity(customer: Customer, payload: dict | None) -> None:
+    """Update customer identity fields; never overwrite email with a different address."""
+    if not payload:
+        return
+    if "email" in payload and payload["email"]:
+        new_email = str(payload["email"]).strip()
+        new_norm = new_email.lower()
+        existing = (customer.email or "").strip().lower()
+        if existing and existing != new_norm:
+            raise ValueError(
+                f"profile_id {customer.profile_id} is already linked to email {customer.email}"
+            )
+        customer.email = new_email
+
+    if "gender" in payload and payload["gender"]:
+        customer.gender = _normalize_gender(payload["gender"])
+
+    if "birthdate" in payload and payload["birthdate"]:
+        raw_bd = payload["birthdate"]
+        if isinstance(raw_bd, date):
+            d = raw_bd
+            customer.birthdate = d
+            customer.birth_month = d.month
+            customer.birth_day = d.day
+            customer.birth_year = d.year
+        else:
+            full, mm, dd, yy = parse_customer_birthdate_storage(str(raw_bd))
+            customer.birth_month = mm
+            customer.birth_day = dd
+            customer.birth_year = yy
+            customer.birthdate = full
+
+
+def resolve_customer_for_unomi_upsert(
+    db: Session,
+    *,
+    brand: str,
+    incoming_profile_id: str,
+    norm_email: str | None,
+    identity_payload: dict | None,
+) -> tuple[Customer, bool, str]:
+    """
+    Safe Unomi → Loyalty upsert.
+
+    Email is the loyalty identity anchor. A recycled Unomi session profileId must never
+    overwrite an existing customer row that belongs to another email.
+    """
+    incoming_profile_id = incoming_profile_id.strip()
+    effective_profile_id = incoming_profile_id
+
+    from app.services.unomi_profile_service import get_unomi_profile_client
+
+    client = get_unomi_profile_client(brand=brand) if norm_email else None
+    if client and norm_email:
+        effective_profile_id = client.resolve_canonical_profile_id(
+            brand=brand,
+            email=norm_email,
+            fallback_profile_id=incoming_profile_id,
+        )
+
+    if norm_email:
+        by_email = (
+            db.query(Customer)
+            .filter(Customer.brand == brand)
+            .filter(func.lower(Customer.email) == norm_email)
+            .first()
+        )
+        if by_email:
+            if by_email.profile_id != effective_profile_id:
+                by_email.profile_id = effective_profile_id
+            _apply_customer_identity(by_email, identity_payload)
+            return by_email, True, effective_profile_id
+
+    by_profile = (
+        db.query(Customer)
+        .filter(Customer.brand == brand, Customer.profile_id == incoming_profile_id)
+        .first()
+    )
+    if by_profile:
+        existing_email = (by_profile.email or "").strip().lower()
+        if norm_email and existing_email and existing_email != norm_email:
+            customer = Customer(
+                brand=brand,
+                profile_id=effective_profile_id,
+                status="ACTIVE",
+                loyalty_status=compute_loyalty_status_from_tiers(db, brand, status_points=0)
+                or "UNCONFIGURED",
+            )
+            db.add(customer)
+            db.flush()
+            _apply_customer_identity(customer, identity_payload)
+            return customer, False, effective_profile_id
+
+        if by_profile.profile_id != effective_profile_id and norm_email:
+            by_profile.profile_id = effective_profile_id
+        _apply_customer_identity(by_profile, identity_payload)
+        return by_profile, True, effective_profile_id
+
+    customer = Customer(
+        brand=brand,
+        profile_id=effective_profile_id,
+        status="ACTIVE",
+        loyalty_status=compute_loyalty_status_from_tiers(db, brand, status_points=0) or "UNCONFIGURED",
+    )
+    db.add(customer)
+    db.flush()
+    _apply_customer_identity(customer, identity_payload)
+    return customer, False, effective_profile_id
+
+
 def get_or_create_customer(
     db: Session,
     brand: str,
@@ -186,29 +296,7 @@ def get_or_create_customer(
         db.add(customer)
         db.flush()
 
-    # --- Mise à jour des attributs métier depuis le payload ---
-    if payload:
-        if "email" in payload and payload["email"]:
-            customer.email = str(payload["email"]).strip()
-
-        if "gender" in payload and payload["gender"]:
-            customer.gender = _normalize_gender(payload["gender"])
-
-        if "birthdate" in payload and payload["birthdate"]:
-            raw_bd = payload["birthdate"]
-            # Allow passing a python date (legacy) or string (new partial format)
-            if isinstance(raw_bd, date):
-                d = raw_bd
-                customer.birthdate = d
-                customer.birth_month = d.month
-                customer.birth_day = d.day
-                customer.birth_year = d.year
-            else:
-                full, mm, dd, yy = parse_customer_birthdate_storage(str(raw_bd))
-                customer.birth_month = mm
-                customer.birth_day = dd
-                customer.birth_year = yy
-                customer.birthdate = full
+    _apply_customer_identity(customer, payload)
 
     from app.services.unomi_profile_service import sync_customer_profile_to_unomi
 
