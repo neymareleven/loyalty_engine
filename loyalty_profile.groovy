@@ -219,9 +219,26 @@ def execute() {
         return EventService.NO_CHANGE
     }
 
-    def formEmail = (formFields?.get("email") ?: eventProps?.get("email") ?: profile?.getProperty("email"))?.toString()?.trim()
+    def resolveFormEmail = {
+        def keys = ["email", "your-email", "your_email", "e-mail", "mail", "billing_email", "billingEmail"]
+        for (def key : keys) {
+            def val = formFields?.get(key) ?: eventProps?.get(key)
+            if (val?.toString()?.trim()) {
+                return val.toString().trim()
+            }
+        }
+        try {
+            return profile?.getProperty("email")?.toString()?.trim()
+        } catch (Exception ignore) {
+            return null
+        }
+    }
+    def formEmail = resolveFormEmail()
     if (!formEmail && eventType == "form") {
-        logger.warn("[loyalty_profile] Missing email on form event; skipping upsert profileId=${profileId}")
+        logger.warn(
+            "[loyalty_profile] Missing email on form event; skipping upsert profileId=${profileId} " +
+            "formFieldKeys=${formFields?.keySet()}"
+        )
         return EventService.NO_CHANGE
     }
     def scopeEmailForm = formFields?.get("scopeEmail")?.toString()?.trim()
@@ -308,11 +325,19 @@ def execute() {
         }
     }
 
+    if (formEmail && !properties.containsKey("email")) {
+        properties["email"] = formEmail
+    }
+    if (brand && !properties.containsKey("brand")) {
+        properties["brand"] = brand
+    }
+
     def payload = [
         brand     : brand,
         profileId : profileId,
         properties: properties
     ]
+    if (formEmail) payload["email"] = formEmail
     if (gender)    payload["gender"]    = gender
     if (birthdate) payload["birthdate"] = birthdate
 

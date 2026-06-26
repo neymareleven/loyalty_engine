@@ -29,6 +29,7 @@ def execute() {
     if (!eventType || eventType != "sale") {
         return EventService.NO_CHANGE
     }
+    logger.info("[sale] Triggered orderNumber=${event.getProperties()?.get('orderNumber')} profileId=${event.getProfileId()}")
 
     Profile profile = null
     try { profile = event.getProfile() } catch (Exception ignore) {}
@@ -51,6 +52,15 @@ def execute() {
     try { props = event.getProperties() ?: [:] } catch (Exception ignore) {}
 
     def brand = (props?.get("brand") ?: profile?.getProperty("brand"))?.toString()?.trim()
+    if (!brand) {
+        try {
+            def scope = event.getScope()?.toString()?.trim()
+            if (scope && scope != "systemscope") {
+                brand = scope
+                logger.debug("[sale] brand resolved from event.scope: ${brand}")
+            }
+        } catch (Exception ignore) {}
+    }
     if (!brand) {
         logger.warn("[sale] Missing brand; skipping. profileId=${profileId}")
         return EventService.NO_CHANGE
@@ -146,6 +156,13 @@ def execute() {
     }
 
     def endpoint = loyaltyUrl.endsWith("/") ? (loyaltyUrl + "transactions") : (loyaltyUrl + "/transactions")
+
+    def profileEmail = profile?.getProperty("email")?.toString()?.trim()
+    if (profileEmail) {
+        if (!props.billing_email && !props.billingEmail) props.billing_email = profileEmail
+        if (!props.email) props.email = profileEmail
+    }
+    if (!props.brand) props.brand = brand
 
     def payload = [
         itemId    : (event.getItemId() ?: UUID.randomUUID().toString()),
