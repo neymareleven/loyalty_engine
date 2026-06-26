@@ -285,8 +285,6 @@ def create_transaction(db: Session, event_data):
             payload=transaction.payload if isinstance(transaction.payload, dict) else None,
         )
         if customer:
-            if customer.profile_id and customer.profile_id != transaction.profile_id:
-                transaction.profile_id = customer.profile_id
             customer.last_activity_at = datetime.utcnow()
             db.commit()
 

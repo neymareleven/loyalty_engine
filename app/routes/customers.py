@@ -21,12 +21,7 @@ from app.schemas.customer_coupon import CustomerCouponOut, CustomerCouponStatusU
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.customer_upsert_service import customer_identity_payload, parse_customer_upsert_payload
-from app.services.contact_service import (
-    get_or_create_customer,
-    normalize_lookup_email,
-    resolve_customer_for_lookup,
-    resolve_customer_for_unomi_upsert,
-)
+from app.services.contact_service import get_or_create_customer, normalize_lookup_email, resolve_customer_for_lookup
 from app.services.customer_delete_service import delete_loyalty_customer
 from app.services.unomi_profile_service import reset_profile_sync_source, set_profile_sync_source, sync_customer_profile_to_unomi
 from app.services.customer_coupon_service import set_customer_coupon_status
@@ -147,7 +142,6 @@ def upsert_customer(
     gender = parsed["gender"]
     birthdate = parsed["birthdate"]
     email = parsed["email"]
-    norm_email = normalize_lookup_email(email, brand=brand) if email else None
 
     if gender is not None and not isinstance(gender, str):
         raise HTTPException(status_code=400, detail="gender must be a string")
@@ -168,35 +162,36 @@ def upsert_customer(
         token = set_profile_sync_source("unomi")
     unomi_sync = None
     try:
-        identity = customer_identity_payload(parsed)
-        if from_unomi:
-            if not norm_email:
-                raise HTTPException(status_code=400, detail="email is required for Unomi profile upsert")
-            customer, existed, profile_id = resolve_customer_for_unomi_upsert(
-                db,
-                brand=brand,
-                incoming_profile_id=profile_id,
-                norm_email=norm_email,
-                identity_payload=identity,
-            )
-        else:
-            existed = bool(
-                db.query(Customer.id)
-                .filter(Customer.brand == brand)
-                .filter(Customer.profile_id == profile_id)
-                .first()
-            )
-            try:
-                customer = get_or_create_customer(
-                    db,
-                    brand,
-                    profile_id,
-                    identity,
-                    contact_properties=props,
-                    push_to_unomi=False,
+        if email:
+            norm_email = normalize_lookup_email(email, brand=brand)
+            if norm_email:
+                by_email = (
+                    db.query(Customer)
+                    .filter(Customer.brand == brand)
+                    .filter(func.lower(Customer.email) == norm_email)
+                    .first()
                 )
-            except ValueError as e:
-                raise HTTPException(status_code=409, detail=str(e)) from e
+                if by_email and by_email.profile_id != profile_id:
+                    by_email.profile_id = profile_id
+                    db.flush()
+
+        existed = bool(
+            db.query(Customer.id)
+            .filter(Customer.brand == brand)
+            .filter(Customer.profile_id == profile_id)
+            .first()
+        )
+        try:
+            customer = get_or_create_customer(
+                db,
+                brand,
+                profile_id,
+                customer_identity_payload(parsed),
+                contact_properties=props,
+                push_to_unomi=False,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         if not existed:
             from app.services.transaction_service import create_internal_transaction

@@ -23,29 +23,35 @@ final Logger logger = LoggerFactory.getLogger("loyalty_profile")
 ])
 def execute() {
 
+    // ── 0. Log event type for debugging ──────────────────────────────────────
     def eventType = null
     try { eventType = event.getEventType() } catch (Exception ignore) {}
     logger.info("[loyalty_profile] Triggered by eventType=${eventType}")
 
+    // ── 1. Resolve profile ────────────────────────────────────────────────────
     Profile profile = null
     try { profile = event.getProfile() } catch (Exception ignore) {}
 
-    def sessionProfileId = null
+    def profileId = null
     try {
-        sessionProfileId = event.getProfileId()
+        profileId = event.getProfileId()
     } catch (Exception ignore) {
-        sessionProfileId = profile?.getItemId()
+        profileId = profile?.getItemId()
     }
-    if (!sessionProfileId || !sessionProfileId.toString().trim()) {
+
+    if (!profileId || !profileId.toString().trim()) {
         logger.warn("[loyalty_profile] Missing profileId; skipping profile upsert.")
         return EventService.NO_CHANGE
     }
-    sessionProfileId = sessionProfileId.toString().trim()
-    def profileId = sessionProfileId
+    profileId = profileId.toString().trim()
 
+    // ── 2. Collect event properties ──────────────────────────────────────────
     def eventProps = [:]
     try { eventProps = event.getProperties() ?: [:] } catch (Exception ignore) {}
 
+    // ── 2b. Flatten CF7 / Unomi form field values ────────────────────────────
+    // Form events (Contact Form 7) store answers in nested flattenedProperties.fields
+    // and/or at the top level (email, firstName, your-brand, …).
     def formFields = [:]
     try {
         def fp = eventProps?.get("flattenedProperties")
@@ -69,89 +75,7 @@ def execute() {
         logger.debug("[loyalty_profile] flattenedProperties.fields keys: ${formFields.keySet()}")
     }
 
-    ProfileService profileService = null
-    try {
-        def bundle = FrameworkUtil.getBundle(GroovyActionDispatcher.class)
-        def ref = bundle?.getBundleContext()?.getServiceReference(ProfileService.class)
-        if (ref) {
-            profileService = bundle.getBundleContext().getService(ref)
-        }
-    } catch (Exception e) {
-        logger.debug("[loyalty_profile] ProfileService unavailable: ${e.message}")
-    }
-
-    def resolveScopeEmail = { String brandValue, String emailValue, String scopeFromForm ->
-        def se = scopeFromForm?.toString()?.trim()
-        if (se) {
-            return se.toLowerCase()
-        }
-        def em = emailValue?.toString()?.trim()?.toLowerCase()
-        if (brandValue && em && em.contains("@")) {
-            return "${brandValue}-${em}".toLowerCase()
-        }
-        return null
-    }
-
-    def pickBestProfileForEmail = { Collection profiles, String emailValue ->
-        if (!profiles || !emailValue) {
-            return null
-        }
-        def target = emailValue.trim().toLowerCase()
-        Profile best = null
-        profiles.each { Profile candidate ->
-            if (!candidate) {
-                return
-            }
-            def candidateEmail = candidate.getProperty("email")?.toString()?.trim()?.toLowerCase()
-            if (candidateEmail != target) {
-                return
-            }
-            if (best == null) {
-                best = candidate
-                return
-            }
-            def lu = candidate.getSystemProperties()?.get("lastUpdated")?.toString()
-            def blu = best.getSystemProperties()?.get("lastUpdated")?.toString()
-            if (lu && blu && lu > blu) {
-                best = candidate
-            }
-        }
-        return best
-    }
-
-    def findProfilesByProperty = { ProfileService ps, String propertyName, String propertyValue ->
-        if (!ps || !propertyName || !propertyValue) {
-            return []
-        }
-        try {
-            def result = ps.findProfilesByPropertyValue(propertyName, propertyValue, 0, 10, "systemProperties.lastUpdated:desc")
-            if (result?.list) {
-                return result.list
-            }
-        } catch (Exception e) {
-            logger.debug("[loyalty_profile] findProfilesByPropertyValue(${propertyName}) failed: ${e.message}")
-        }
-        return []
-    }
-
-    def resolveCanonicalProfileId = { ProfileService ps, String brandValue, String emailValue, String scopeFromForm, String fallbackProfileId ->
-        if (!ps || !emailValue?.trim()) {
-            return fallbackProfileId
-        }
-        def emailNorm = emailValue.trim().toLowerCase()
-        def scopeEmail = resolveScopeEmail(brandValue, emailNorm, scopeFromForm)
-        def candidates = [] as LinkedHashSet
-        if (scopeEmail) {
-            candidates.addAll(findProfilesByProperty(ps, "properties.scopeEmail", scopeEmail))
-        }
-        candidates.addAll(findProfilesByProperty(ps, "properties.email", emailNorm))
-        def best = pickBestProfileForEmail(candidates, emailNorm)
-        if (best?.itemId) {
-            return best.itemId.toString().trim()
-        }
-        return fallbackProfileId
-    }
-
+    // Skip echo when Loyalty Engine just pushed loyalty fields (POST /cxs/profiles).
     if (eventType == "profileUpdated") {
         def loyaltyLinked = null
         try { loyaltyLinked = profile?.getProperty("loyaltyEngineCustomerId") } catch (Exception ignore) {}
@@ -170,19 +94,26 @@ def execute() {
                 logger.debug("[loyalty_profile] Skipping profileUpdated (loyalty sync echo)")
                 return EventService.NO_CHANGE
             }
-        } else {
-            def regEmail = profile?.getProperty("email")?.toString()?.trim()
-            def regBrand = profile?.getProperty("brand")?.toString()?.trim()
-            def regFirstName = profile?.getProperty("firstName")?.toString()?.trim()
-            if (!regEmail || !regBrand || !regFirstName) {
-                logger.debug("[loyalty_profile] Skipping profileUpdated (not registration-like)")
-                return EventService.NO_CHANGE
-            }
-            logger.info("[loyalty_profile] profileUpdated registration backfill profileId=${profileId} email=${regEmail}")
         }
     }
 
+    // ── 3. Resolve brand — exhaustive fallback chain ─────────────────────────
+    //
+    //  WHY this is needed:
+    //  When the rule uses profileUpdatedEventCondition, the `event` object in
+    //  the action is the internal Unomi "profileUpdated" event — NOT the original
+    //  contactInfoSubmitted event. That internal event has NO brand in its
+    //  properties. So we must fall back to event.scope (always set on the
+    //  original event envelope) and then the profile property.
+    //
+    //  Priority order:
+    //    a) event.properties.brand   ← present when rule fires on contactInfoSubmitted directly
+    //    b) event.scope              ← always set; e.g. "batira" from the event envelope
+    //    c) profile.brand            ← already-enriched profiles
+
     def brand = null
+
+    // (a) event.properties.brand or CF7 your-brand
     def brandFromProps = eventProps?.get("brand")?.toString()?.trim()
     if (brandFromProps) {
         brand = brandFromProps
@@ -195,6 +126,8 @@ def execute() {
             logger.debug("[loyalty_profile] brand resolved from event.properties/formFields: ${brand}")
         }
     }
+
+    // (b) event.scope — set in the event JSON envelope; not null-safe to skip
     if (!brand) {
         try {
             def scope = event.getScope()?.toString()?.trim()
@@ -204,6 +137,8 @@ def execute() {
             }
         } catch (Exception ignore) {}
     }
+
+    // (c) profile.getProperty("brand") — for already-enriched profiles
     if (!brand) {
         try {
             def profileBrand = profile?.getProperty("brand")?.toString()?.trim()
@@ -219,57 +154,88 @@ def execute() {
         return EventService.NO_CHANGE
     }
 
-    def resolveFormEmail = {
-        def keys = ["email", "your-email", "your_email", "e-mail", "mail", "billing_email", "billingEmail"]
-        for (def key : keys) {
-            def val = formFields?.get(key) ?: eventProps?.get(key)
-            if (val?.toString()?.trim()) {
-                return val.toString().trim()
-            }
+    // ── 3b. Resolve canonical profileId (form registration / stale session cookie) ──
+    // Unomi reuses the browser session profileId on form submit — often ONE registration
+    // behind the profile actually created in CDP. Resolve by email/scopeEmail like sale.groovy.
+    ProfileService profileService = null
+    try {
+        def bundle = FrameworkUtil.getBundle(GroovyActionDispatcher.class)
+        def ref = bundle?.getBundleContext()?.getServiceReference(ProfileService.class)
+        if (ref) {
+            profileService = bundle.getBundleContext().getService(ref)
+        }
+    } catch (Exception ignore) {}
+
+    def findProfilesByProperty = { ProfileService ps, String propertyName, String propertyValue ->
+        if (!ps || !propertyName || !propertyValue) {
+            return []
         }
         try {
-            return profile?.getProperty("email")?.toString()?.trim()
-        } catch (Exception ignore) {
-            return null
+            def result = ps.findProfilesByPropertyValue(propertyName, propertyValue, 0, 10, "systemProperties.lastUpdated:desc")
+            return result?.list ?: []
+        } catch (Exception e) {
+            logger.debug("[loyalty_profile] findProfilesByPropertyValue(${propertyName}) failed: ${e.message}")
+            return []
         }
     }
-    def formEmail = resolveFormEmail()
-    if (!formEmail && eventType == "form") {
-        logger.warn(
-            "[loyalty_profile] Missing email on form event; skipping upsert profileId=${profileId} " +
-            "formFieldKeys=${formFields?.keySet()}"
-        )
-        return EventService.NO_CHANGE
-    }
-    def scopeEmailForm = formFields?.get("scopeEmail")?.toString()?.trim()
-    def sessionEmail = profile?.getProperty("email")?.toString()?.trim()
 
-    if profileService && formEmail) {
-        def formEmailNorm = formEmail.toLowerCase()
-        def resolvedId = resolveCanonicalProfileId(
-            profileService,
-            brand,
-            formEmailNorm,
-            scopeEmailForm,
-            sessionProfileId
-        )
+    def pickNewestProfile = { Collection profiles ->
+        Profile best = null
+        profiles?.each { Profile candidate ->
+            if (!candidate) {
+                return
+            }
+            if (best == null) {
+                best = candidate
+                return
+            }
+            def lu = candidate.getSystemProperties()?.get("lastUpdated")?.toString()
+            def blu = best.getSystemProperties()?.get("lastUpdated")?.toString()
+            if (lu && blu && lu > blu) {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    def resolveRegistrationProfileId = { ProfileService ps, String brandValue, Map fields, String fallbackProfileId ->
+        if (!ps) {
+            return fallbackProfileId
+        }
+        def email = fields?.get("email")?.toString()?.trim()?.toLowerCase()
+        if (!email) {
+            return fallbackProfileId
+        }
+        def scopeEmail = (fields?.get("scopeEmail") ?: "${brandValue}-${email}").toString().trim().toLowerCase()
+        def candidates = [] as LinkedHashSet
+        candidates.addAll(findProfilesByProperty(ps, "properties.scopeEmail", scopeEmail))
+        candidates.addAll(findProfilesByProperty(ps, "properties.email", email))
+        def best = pickNewestProfile(candidates)
+        if (best?.itemId) {
+            return best.itemId.toString().trim()
+        }
+        return fallbackProfileId
+    }
+
+    def sessionProfileId = profileId
+    def formEmail = formFields?.get("email")?.toString()?.trim()?.toLowerCase()
+    def shouldResolveCanonical = (eventType == "form" || formEmail) && profileService != null
+    if (shouldResolveCanonical) {
+        def resolvedId = resolveRegistrationProfileId(profileService, brand, formFields, sessionProfileId)
         if (resolvedId && resolvedId != sessionProfileId) {
-            logger.info(
-                "[loyalty_profile] Canonical profile resolved: session=${sessionProfileId} " +
-                "sessionEmail=${sessionEmail} formEmail=${formEmailNorm} -> ${resolvedId}"
-            )
+            logger.info("[loyalty_profile] Canonical profile resolved: session=${sessionProfileId} -> ${resolvedId} email=${formEmail}")
             profileId = resolvedId
-            try {
-                profile = profileService.load(profileId)
-            } catch (Exception ignore) {}
-        } else if (eventType == "form") {
-            logger.info(
-                "[loyalty_profile] Using session profileId=${sessionProfileId} for formEmail=${formEmailNorm} " +
-                "(canonical search returned same id; profileUpdated backfill may follow)"
-            )
+            try { profile = profileService.load(profileId) } catch (Exception ignore) {}
+        } else if (formEmail) {
+            def sessionEmail = null
+            try { sessionEmail = profile?.getProperty("email")?.toString()?.trim()?.toLowerCase() } catch (Exception ignore) {}
+            if (sessionEmail && sessionEmail != formEmail) {
+                logger.warn("[loyalty_profile] Session profile email (${sessionEmail}) != form email (${formEmail}); using session=${sessionProfileId}")
+            }
         }
     }
 
+    // ── 4. Read action parameters ─────────────────────────────────────────────
     def loyaltyUrl  = action.getParameterValues().get("loyaltyUrl")?.toString()?.trim()
     def loyaltyUser = action.getParameterValues().get("loyaltyUsername")?.toString()
     def loyaltyPass = action.getParameterValues().get("loyaltyPassword")?.toString()
@@ -279,10 +245,13 @@ def execute() {
         return EventService.NO_CHANGE
     }
 
-    def gender = (eventProps?.get("gender") ?: formFields?.get("gender") ?: profile?.getProperty("gender"))?.toString()?.trim() ?: null
+    // ── 5. Resolve optional profile fields ───────────────────────────────────
+    // gender
+    def gender = (eventProps?.get("gender") ?: profile?.getProperty("gender"))?.toString()?.trim() ?: null
 
+    // birthdate — accepts YYYY-MM-DD or MM-DD
     def birthdate = null
-    def bdRaw = eventProps?.get("birthdate") ?: eventProps?.get("birthDate") ?: formFields?.get("birthdate")
+    def bdRaw = eventProps?.get("birthdate") ?: eventProps?.get("birthDate")
     if (bdRaw != null) {
         birthdate = bdRaw.toString().trim() ?: null
     }
@@ -294,6 +263,8 @@ def execute() {
         }
     }
 
+    // ── 6. Build properties sub-object ───────────────────────────────────────
+    // Forward form/contact fields; drop CF7 internals (_wpcf7*, phone-cf7it*).
     def properties = [:]
     formFields.each { k, v ->
         def key = k?.toString()
@@ -325,30 +296,25 @@ def execute() {
         }
     }
 
-    if (formEmail && !properties.containsKey("email")) {
-        properties["email"] = formEmail
-    }
-    if (brand && !properties.containsKey("brand")) {
-        properties["brand"] = brand
-    }
-
+    // ── 7. Build the CustomerUpsert payload ──────────────────────────────────
     def payload = [
         brand     : brand,
         profileId : profileId,
         properties: properties
     ]
-    if (formEmail) payload["email"] = formEmail
     if (gender)    payload["gender"]    = gender
     if (birthdate) payload["birthdate"] = birthdate
 
-    def postUpsert = { Map body ->
-        String jsonPayload = JsonOutput.toJson(body)
-        logger.info("[loyalty_profile] Sending upsert: brand=${body.brand} profileId=${body.profileId} gender=${body.gender} birthdate=${body.birthdate}")
+    logger.info("[loyalty_profile] Sending upsert: brand=${brand} profileId=${profileId} sessionProfileId=${sessionProfileId} gender=${gender} birthdate=${birthdate}")
 
-        def endpoint = loyaltyUrl.endsWith("/")
-            ? (loyaltyUrl + "customers/upsert")
-            : (loyaltyUrl + "/customers/upsert")
+    // ── 8. POST to /customers/upsert ─────────────────────────────────────────
+    def endpoint = loyaltyUrl.endsWith("/")
+        ? (loyaltyUrl + "customers/upsert")
+        : (loyaltyUrl + "/customers/upsert")
 
+    def postUpsert = {
+        payload.profileId = profileId.toString()
+        String jsonPayload = JsonOutput.toJson(payload)
         CloseableHttpClient httpClient = HttpClientBuilder.create().build()
         try {
             HttpPost req = new HttpPost(endpoint)
@@ -364,53 +330,41 @@ def execute() {
 
             HttpResponse resp = httpClient.execute(req)
             int code = resp.getStatusLine().getStatusCode()
-            String respBody = resp.getEntity() ? EntityUtils.toString(resp.getEntity()) : ""
+            String body = resp.getEntity() ? EntityUtils.toString(resp.getEntity()) : ""
 
             if (code >= 200 && code < 300) {
-                logger.info("[loyalty_profile] Profile upserted. brand=${body.brand} profileId=${body.profileId} code=${code}")
+                logger.info("[loyalty_profile] Profile upserted. brand=${brand} profileId=${profileId} code=${code}")
             } else {
-                logger.error("[loyalty_profile] Profile upsert failed. brand=${body.brand} profileId=${body.profileId} code=${code} body=${respBody?.substring(0, Math.min(800, respBody.length()))}")
+                logger.error("[loyalty_profile] Profile upsert failed. brand=${brand} profileId=${profileId} code=${code} body=${body?.substring(0, Math.min(800, body.length()))}")
             }
             return code
         } catch (Exception e) {
-            logger.error("[loyalty_profile] Error upserting profile. brand=${body.brand} profileId=${body.profileId}", e)
+            logger.error("[loyalty_profile] Error upserting profile. brand=${brand} profileId=${profileId}", e)
             return 0
         } finally {
             try { httpClient.close() } catch (Exception ignore) {}
         }
     }
 
-    postUpsert(payload)
+    postUpsert()
 
-    // After mergeProfilesOnEmail, the canonical profile id may appear a moment later.
-    if (eventType == "form" && profileService && formEmail) {
+    if (profileService && shouldResolveCanonical) {
         try {
             Thread.sleep(2500)
-            def lateId = resolveCanonicalProfileId(
-                profileService,
-                brand,
-                formEmail.toLowerCase(),
-                scopeEmailForm,
-                profileId
-            )
+            def lateId = resolveRegistrationProfileId(profileService, brand, formFields, profileId)
             if (lateId && lateId != profileId) {
-                logger.info("[loyalty_profile] Post-merge reconcile upsert: ${profileId} -> ${lateId}")
-                def retryPayload = new LinkedHashMap(payload)
-                retryPayload.profileId = lateId
-                try {
-                    profile = profileService.load(lateId)
-                } catch (Exception ignore) {}
+                logger.info("[loyalty_profile] Post-merge reconcile: ${profileId} -> ${lateId}")
+                profileId = lateId
+                try { profile = profileService.load(profileId) } catch (Exception ignore) {}
                 ["firstName", "lastName", "email", "phoneNumber", "phone", "scopeEmail"].each { field ->
                     try {
                         def val = profile?.getProperty(field)
-                        if (val != null) retryPayload.properties[field] = val
+                        if (val != null) properties[field] = val
                     } catch (Exception ignore) {}
                 }
-                postUpsert(retryPayload)
+                postUpsert()
             }
-        } catch (Exception e) {
-            logger.debug("[loyalty_profile] Post-merge reconcile skipped: ${e.message}")
-        }
+        } catch (Exception ignore) {}
     }
 
     return EventService.NO_CHANGE

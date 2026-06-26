@@ -80,7 +80,11 @@ Pendant cet upsert, le push Loyalty → Unomi est **suspendu** (évite le ping-p
 
 **Après** l’upsert (token libéré), le moteur peut pousser les champs fidélité vers Unomi via `POST /cxs/profiles` (`transport_override=profiles`). Par défaut (`UNOMI_PROFILE_SYNC_SKIP_ON_REGISTRATION=true`), ce push est **reporté** pour une **nouvelle** inscription Unomi : les champs fidélité partent au premier achat / changement de statut, ce qui évite une cascade `profileUpdated` (mergeProfilesOnEmail, batira, …).
 
-Redéployer `loyalty_profile.groovy` (garde anti-écho sur `profileUpdated` + flatten CF7 `your-brand` / champs formulaire) pour éviter une boucle upsert infinie.
+Redéployer `loyalty_profile.groovy` :
+- garde anti-écho sur `profileUpdated`
+- flatten CF7 (`your-brand`, champs formulaire)
+- **résolution du profileId canonique par email/scopeEmail** (cookie session Unomi souvent en décalage d’une inscription)
+- réconciliation post-merge après 2,5 s (comme `sale.groovy`)
 
 ## Suppression
 

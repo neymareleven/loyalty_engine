@@ -18,9 +18,8 @@ def test_extract_email_from_billing_and_scope():
     )
 
 
-@patch("app.services.unomi_profile_service.get_unomi_profile_client")
 @patch("app.services.contact_service.get_customer")
-def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_customer, mock_unomi_client):
+def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_customer):
     db = MagicMock()
     merged_customer = SimpleNamespace(
         brand="batira",
@@ -33,19 +32,15 @@ def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_custom
     query.first.return_value = merged_customer
     db.query.return_value = query
 
-    client = MagicMock()
-    client.resolve_canonical_profile_id.return_value = "canonical-unomi-profile-id"
-    mock_unomi_client.return_value = client
-
     out = resolve_customer_for_transaction(
         db,
         brand="batira",
-        profile_id="stale-session-profile-id",
+        profile_id="new-unomi-profile-id",
         payload={"billing_email": "new@gmail.com", "orderNumber": "7001"},
     )
 
     assert out is merged_customer
-    assert merged_customer.profile_id == "canonical-unomi-profile-id"
+    assert merged_customer.profile_id == "new-unomi-profile-id"
 
 
 @patch("app.services.transaction_service.process_transaction_rules")
