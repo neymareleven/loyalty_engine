@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.db import get_db
@@ -23,7 +23,6 @@ from app.schemas.point_movement import PointMovementOut
 from app.services.customer_upsert_service import customer_identity_payload, parse_customer_upsert_payload
 from app.services.contact_service import get_or_create_customer, normalize_lookup_email, resolve_customer_for_lookup
 from app.services.customer_delete_service import delete_loyalty_customer
-from app.services.unomi_profile_service import reset_profile_sync_source, set_profile_sync_source, sync_customer_profile_to_unomi
 from app.services.customer_coupon_service import set_customer_coupon_status
 from app.services.customer_entitlement_serialization import (
     serialize_customer_coupon_out,
@@ -128,7 +127,6 @@ def get_customer(
 def upsert_customer(
     payload: CustomerUpsert,
     db: Session = Depends(get_db),
-    x_profile_sync_source: str | None = Header(None, alias="X-Profile-Sync-Source"),
 ):
     parsed = parse_customer_upsert_payload(payload)
     props = parsed["extra_properties"]
@@ -156,11 +154,6 @@ def upsert_customer(
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
 
-    token = None
-    from_unomi = (x_profile_sync_source or "").strip().lower() == "unomi"
-    if from_unomi:
-        token = set_profile_sync_source("unomi")
-    unomi_sync = None
     try:
         if email:
             norm_email = normalize_lookup_email(email, brand=brand)
@@ -187,8 +180,6 @@ def upsert_customer(
                 brand,
                 profile_id,
                 customer_identity_payload(parsed),
-                contact_properties=props,
-                push_to_unomi=False,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -229,40 +220,12 @@ def upsert_customer(
         customer.last_activity_at = datetime.utcnow()
         db.commit()
         db.refresh(customer)
-
-        if not from_unomi:
-            unomi_sync = sync_customer_profile_to_unomi(
-                db,
-                customer=customer,
-                reason="customer_upsert",
-                extra_properties=props,
-            )
-    finally:
-        if token is not None:
-            reset_profile_sync_source(token)
-
-    # Unomi → Loyalty: optional loyalty-field push (skipped on new registration by default).
-    if from_unomi:
-        from app.services.unomi_profile_service import should_skip_unomi_sync_after_unomi_registration
-
-        if should_skip_unomi_sync_after_unomi_registration(from_unomi=True, customer_existed=existed):
-            unomi_sync = {
-                "synced": False,
-                "skipped": True,
-                "reason": "registration_deferred_to_first_sale",
-                "profileId": profile_id,
-            }
-        else:
-            unomi_sync = sync_customer_profile_to_unomi(
-                db,
-                customer=customer,
-                reason="unomi_upsert_deferred",
-                extra_properties=props,
-                transport_override="profiles",
-            )
+    except Exception:
+        db.rollback()
+        raise
 
     out = serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
-    return CustomerUpsertOut(**out, unomi_sync=unomi_sync)
+    return CustomerUpsertOut(**out, unomi_sync={"skipped": True, "reason": "profile_sync_disabled"})
 
 
 @router.delete("/{brand}/{profile_id}")

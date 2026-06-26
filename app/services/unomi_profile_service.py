@@ -17,6 +17,7 @@ from app.services.unomi_client import UnomiClient, UnomiClientError
 from app.services.unomi_settings_service import (
     resolve_unomi_profile_connection,
     resolve_unomi_profile_sync_peer_key,
+    unomi_profile_sync_enabled_for_brand,
     unomi_profile_sync_event_type,
     unomi_profile_sync_transport,
 )
@@ -657,6 +658,14 @@ def sync_customer_profile_to_unomi(
     if should_skip_unomi_profile_push():
         return {"skipped": True, "reason": "sync_source_unomi"}
 
+    if not unomi_profile_sync_enabled_for_brand(brand=customer.brand):
+        return {
+            "synced": False,
+            "skipped": True,
+            "reason": "profile_sync_disabled",
+            "profileId": customer.profile_id,
+        }
+
     cfg = resolve_unomi_profile_connection(brand=customer.brand)
     if not cfg:
         logger.warning(
@@ -759,6 +768,9 @@ def sync_customer_profile_to_unomi(
 def delete_profile_from_unomi(*, brand: str, profile_id: str) -> dict[str, Any] | None:
     if should_skip_unomi_profile_push():
         return {"skipped": True, "reason": "sync_source_unomi"}
+
+    if not unomi_profile_sync_enabled_for_brand(brand=brand):
+        return {"skipped": True, "reason": "profile_sync_disabled", "profileId": profile_id}
 
     cfg = resolve_unomi_profile_connection(brand=brand)
     if not cfg:

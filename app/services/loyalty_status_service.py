@@ -82,7 +82,7 @@ def update_customer_status(
     refresh_window: bool = False,
     emit_events: bool = True,
     allow_downgrade_before_expiry: bool = False,
-    sync_unomi: bool = True,
+    sync_unomi: bool = False,
 ):
     """
     Recalcule et met à jour le statut fidélité du client

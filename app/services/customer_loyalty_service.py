@@ -122,9 +122,6 @@ def set_customer_loyalty_tier(
 
     db.flush()
 
-    from app.services.unomi_profile_service import sync_customer_profile_to_unomi
-
-    sync_customer_profile_to_unomi(db, customer=customer, reason="admin_set_tier")
     return LoyaltyTierOverrideResult(
         customer=customer,
         transaction=tx,

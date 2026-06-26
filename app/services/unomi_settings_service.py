@@ -114,7 +114,7 @@ def unomi_profile_sync_enabled_for_brand(*, brand: str) -> bool:
     """Profile sync is independent of segmentation mode (INTERNAL vs UNOMI)."""
     if not _unomi_credentials_configured(brand):
         return False
-    if not _env_bool("UNOMI_PROFILE_SYNC", default=True):
+    if not _env_bool("UNOMI_PROFILE_SYNC", default=False):
         return False
     key = brand.strip().lower()
     disabled = _parse_brand_list(os.getenv("UNOMI_PROFILE_SYNC_DISABLED"))

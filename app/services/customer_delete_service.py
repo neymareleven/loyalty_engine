@@ -22,7 +22,7 @@ def delete_loyalty_customer(
     *,
     brand: str,
     profile_id: str,
-    skip_unomi: bool = False,
+    skip_unomi: bool = True,
 ) -> dict:
     """Remove customer row and dependent loyalty data; optionally delete Unomi profile."""
     customer = (

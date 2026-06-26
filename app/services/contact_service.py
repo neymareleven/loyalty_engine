@@ -119,7 +119,6 @@ def resolve_customer_for_transaction(
         brand,
         profile_id,
         payload={"email": email},
-        push_to_unomi=False,
     )
 
 
@@ -149,9 +148,6 @@ def get_or_create_customer(
     brand: str,
     profile_id: str,
     payload: dict | None = None,
-    *,
-    contact_properties: dict | None = None,
-    push_to_unomi: bool = True,
 ):
     customer = (
         db.query(Customer)
@@ -198,13 +194,4 @@ def get_or_create_customer(
                 customer.birth_year = yy
                 customer.birthdate = full
 
-    from app.services.unomi_profile_service import sync_customer_profile_to_unomi
-
-    if push_to_unomi:
-        sync_customer_profile_to_unomi(
-            db,
-            customer=customer,
-            reason="customer_upsert",
-            extra_properties=contact_properties,
-        )
     return customer

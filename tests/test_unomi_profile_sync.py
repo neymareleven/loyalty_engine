@@ -182,6 +182,7 @@ def test_skip_sync_after_unomi_registration_defaults_true():
     assert should_skip_unomi_sync_after_unomi_registration(from_unomi=False, customer_existed=False) is False
 
 
+@patch.dict("os.environ", {"UNOMI_PROFILE_SYNC": "true", "UNOMI_BASE_URL": "https://u", "UNOMI_PASSWORD": "p"})
 @patch("app.services.unomi_profile_service.UnomiClient")
 @patch("app.services.unomi_profile_service.resolve_unomi_profile_connection")
 def test_deferred_sync_uses_profiles_transport_only(mock_resolve, mock_client_cls):

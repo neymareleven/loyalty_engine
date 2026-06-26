@@ -9,7 +9,7 @@ Indépendant du mode de segmentation (`INTERNAL` / `UNOMI`). Dès que `UNOMI_BAS
 | Variable | Défaut | Rôle |
 |----------|--------|------|
 | `UNOMI_BASE_URL` / `UNOMI_PASSWORD` | — | Requis |
-| `UNOMI_PROFILE_SYNC` | `true` | Désactiver globalement : `false` |
+| `UNOMI_PROFILE_SYNC` | `false` | Mettre `true` pour réactiver le push fidélité → Unomi |
 | `UNOMI_PROFILE_SYNC_DISABLED` | — | Liste de marques exclues (`batira,qilinsa`) |
 | `UNOMI_PROFILE_SYNC_BRANDS` | — | Opt-in (sinon toutes les marques avec credentials) |
 | `UNOMI_PROFILE_SYNC_STRICT` | `false` | Si `true`, une erreur Unomi fait échouer l’opération loyalty |
