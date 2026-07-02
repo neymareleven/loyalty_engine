@@ -12,6 +12,7 @@ from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_metrics import CustomerMetrics
 from app.models.customer_reward import CustomerReward
 from app.models.point_movement import PointMovement
+from app.services.contact_service import get_customer
 from app.services.unomi_profile_service import delete_profile_from_unomi, set_profile_sync_source, reset_profile_sync_source
 
 logger = logging.getLogger(__name__)
@@ -25,11 +26,7 @@ def delete_loyalty_customer(
     skip_unomi: bool = True,
 ) -> dict:
     """Remove customer row and dependent loyalty data; optionally delete Unomi profile."""
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
     if not customer:
         return {"deleted": False, "reason": "not_found"}
 

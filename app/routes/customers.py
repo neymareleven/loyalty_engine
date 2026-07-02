@@ -23,9 +23,10 @@ from app.schemas.point_movement import PointMovementOut
 from app.services.customer_upsert_service import customer_identity_payload, parse_customer_upsert_payload
 from app.services.contact_service import (
     customer_transaction_filters,
+    get_customer,
     get_or_create_customer,
     normalize_lookup_email,
-    reconcile_customer_unomi_profile_id,
+    register_unomi_profile_alias,
     resolve_customer_for_lookup,
 )
 from app.services.customer_delete_service import delete_loyalty_customer
@@ -171,11 +172,12 @@ def upsert_customer(
                     .first()
                 )
                 if by_email and by_email.profile_id != profile_id:
-                    reconcile_customer_unomi_profile_id(
+                    register_unomi_profile_alias(
                         db,
                         brand=brand,
                         customer=by_email,
-                        new_profile_id=profile_id,
+                        incoming_profile_id=profile_id,
+                        source="session",
                     )
                     db.flush()
 
@@ -274,16 +276,11 @@ def list_point_movements(
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
     from app.models.point_movement import PointMovement
-
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
@@ -309,11 +306,7 @@ def list_customer_rewards(
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -345,11 +338,7 @@ def list_customer_coupons(
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -380,11 +369,7 @@ def get_customer_entitlements_history(
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer.id)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     limit = max(1, min(limit, 500))
@@ -392,7 +377,7 @@ def get_customer_entitlements_history(
     return build_customer_entitlement_history(
         db,
         brand=brand,
-        profile_id=profile_id,
+        customer=customer,
         limit=limit,
         offset=offset,
     )
@@ -411,11 +396,7 @@ def list_customer_coupons_with_rewards(
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -570,7 +551,7 @@ def get_customer_loyalty(
         last_tier_event = (
             db.query(Transaction.transaction_type)
             .filter(Transaction.brand == brand)
-            .filter(customer_transaction_filters(brand=brand, customer=customer))
+            .filter(customer_transaction_filters(db, brand=brand, customer=customer))
             .filter(
                 Transaction.transaction_type.in_(
                     [
@@ -673,7 +654,7 @@ def get_customer_loyalty_history(
     q = (
         db.query(Transaction)
         .filter(Transaction.brand == brand)
-        .filter(customer_transaction_filters(brand=brand, customer=customer))
+        .filter(customer_transaction_filters(db, brand=brand, customer=customer))
         .filter(Transaction.transaction_type.in_(tier_event_types))
     )
 

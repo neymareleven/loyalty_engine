@@ -10,6 +10,7 @@ from app.models.customer import Customer
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.models.transaction import Transaction
+from app.services.contact_service import get_customer
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import update_customer_status
 from app.services.wallet_service import get_status_points_balance
@@ -43,9 +44,13 @@ def set_customer_loyalty_tier(
     if not tier_key:
         raise HTTPException(status_code=400, detail="tierKey is required")
 
+    customer = get_customer(db, brand, profile_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
     customer = (
         db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
+        .filter(Customer.id == customer.id)
         .with_for_update()
         .first()
     )

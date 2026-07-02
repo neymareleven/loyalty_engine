@@ -33,6 +33,7 @@ from app.models.product import Product  # noqa: F401
 from app.models.reward_product import RewardProduct  # noqa: F401
 from app.models.segment import Segment  # noqa: F401
 from app.models.segment_member import SegmentMember  # noqa: F401
+from app.models.customer_unomi_profile_alias import CustomerUnomiProfileAlias  # noqa: F401
 from app.models.transaction import Transaction  # noqa: F401
 from app.models.transaction_rule_execution import TransactionRuleExecution  # noqa: F401
 

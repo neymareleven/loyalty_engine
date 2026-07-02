@@ -170,7 +170,7 @@ def list_transactions_by_user(
     q = (
         db.query(Transaction)
         .filter(Transaction.brand == active_brand)
-        .filter(customer_transaction_filters(brand=active_brand, customer=customer))
+        .filter(customer_transaction_filters(db, brand=active_brand, customer=customer))
     )
 
     limit = max(1, min(limit, 200))
@@ -204,7 +204,7 @@ def list_transactions_by_user_and_type(
     q = (
         db.query(Transaction)
         .filter(Transaction.brand == active_brand)
-        .filter(customer_transaction_filters(brand=active_brand, customer=customer))
+        .filter(customer_transaction_filters(db, brand=active_brand, customer=customer))
         .filter(Transaction.transaction_type == transactionType)
     )
 

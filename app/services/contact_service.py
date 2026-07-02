@@ -1,15 +1,21 @@
-from sqlalchemy.orm import Session
+from datetime import date, datetime
+
 from sqlalchemy import func, or_
+from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
+from app.models.customer_unomi_profile_alias import CustomerUnomiProfileAlias
 from app.models.transaction import Transaction
 from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
 
-from datetime import date
 
+def get_customer(db: Session, brand: str, profile_id: str) -> Customer | None:
+    """Resolve customer by master profile_id or any registered Unomi alias."""
+    profile_id = (profile_id or "").strip()
+    if not profile_id:
+        return None
 
-def get_customer(db: Session, brand: str, profile_id: str):
-    return (
+    customer = (
         db.query(Customer)
         .filter(
             Customer.brand == brand,
@@ -17,6 +23,40 @@ def get_customer(db: Session, brand: str, profile_id: str):
         )
         .first()
     )
+    if customer:
+        return customer
+
+    alias = (
+        db.query(CustomerUnomiProfileAlias)
+        .filter(
+            CustomerUnomiProfileAlias.brand == brand,
+            CustomerUnomiProfileAlias.profile_id == profile_id,
+        )
+        .first()
+    )
+    if not alias:
+        return None
+
+    return db.query(Customer).filter(Customer.id == alias.customer_id).first()
+
+
+def list_customer_unomi_profile_ids(db: Session, customer: Customer) -> list[str]:
+    """Master profile_id plus all known Unomi aliases (deduplicated, stable order)."""
+    ids: list[str] = []
+    master = (customer.profile_id or "").strip()
+    if master:
+        ids.append(master)
+
+    rows = (
+        db.query(CustomerUnomiProfileAlias.profile_id)
+        .filter(CustomerUnomiProfileAlias.customer_id == customer.id)
+        .all()
+    )
+    for (profile_id,) in rows:
+        pid = (profile_id or "").strip()
+        if pid and pid not in ids:
+            ids.append(pid)
+    return ids
 
 
 def normalize_lookup_email(value: str | None, *, brand: str) -> str | None:
@@ -31,39 +71,87 @@ def normalize_lookup_email(value: str | None, *, brand: str) -> str | None:
     return extracted
 
 
+def register_unomi_profile_alias(
+    db: Session,
+    *,
+    brand: str,
+    customer: Customer,
+    incoming_profile_id: str,
+    source: str = "session",
+) -> bool:
+    """
+    Record a Unomi profileId that maps to an existing customer without changing the master.
+
+    Used when mergeProfilesOnEmail or a new session cookie sends a different profileId
+    for the same email. Transactions keep the profile_id they were ingested with.
+    """
+    incoming_profile_id = (incoming_profile_id or "").strip()
+    if not incoming_profile_id:
+        return False
+
+    master_profile_id = (customer.profile_id or "").strip()
+    if not master_profile_id or incoming_profile_id == master_profile_id:
+        return False
+
+    existing_owner = get_customer(db, brand, incoming_profile_id)
+    if existing_owner and existing_owner.id != customer.id:
+        return False
+
+    now = datetime.utcnow()
+    row = (
+        db.query(CustomerUnomiProfileAlias)
+        .filter(
+            CustomerUnomiProfileAlias.brand == brand,
+            CustomerUnomiProfileAlias.customer_id == customer.id,
+            CustomerUnomiProfileAlias.profile_id == incoming_profile_id,
+        )
+        .first()
+    )
+    if row:
+        row.last_seen_at = now
+        if source and row.source in (None, "", "session") and source != "session":
+            row.source = source
+        return False
+
+    db.add(
+        CustomerUnomiProfileAlias(
+            brand=brand,
+            customer_id=customer.id,
+            profile_id=incoming_profile_id,
+            source=(source or "session").strip() or "session",
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+    )
+    return True
+
+
 def reconcile_customer_unomi_profile_id(
     db: Session,
     *,
     brand: str,
     customer: Customer,
     new_profile_id: str,
+    source: str = "session",
 ) -> bool:
-    """
-    After Unomi mergeProfilesOnEmail the canonical profileId can change.
-    Loyalty identifies customers by email; profile_id is the latest Unomi reference.
-    When it changes, migrate historical transactions so /by-user stays complete.
-    """
-    new_profile_id = (new_profile_id or "").strip()
-    if not new_profile_id:
-        return False
-    old_profile_id = (customer.profile_id or "").strip()
-    if not old_profile_id or old_profile_id == new_profile_id:
-        return False
-
-    db.query(Transaction).filter(
-        Transaction.brand == brand,
-        Transaction.profile_id == old_profile_id,
-    ).update({Transaction.profile_id: new_profile_id}, synchronize_session=False)
-    customer.profile_id = new_profile_id
-    return True
+    """Backward-compatible name: registers an alias, never overwrites master or transactions."""
+    return register_unomi_profile_alias(
+        db,
+        brand=brand,
+        customer=customer,
+        incoming_profile_id=new_profile_id,
+        source=source,
+    )
 
 
-def customer_transaction_filters(*, brand: str, customer: Customer):
+def customer_transaction_filters(db: Session, *, brand: str, customer: Customer):
     """
     Match transactions for a customer across Unomi profileId changes (pre/post merge).
-    Primary key for listing is customer identity (email), not a single profile_id snapshot.
+    Each transaction keeps the profile_id from ingest time; listing spans master + aliases + email.
     """
-    clauses = [Transaction.profile_id == customer.profile_id]
+    profile_ids = list_customer_unomi_profile_ids(db, customer)
+    clauses = [Transaction.profile_id.in_(profile_ids)] if profile_ids else []
+
     email = (customer.email or "").strip().lower()
     if email:
         scope_email = f"{brand}-{email}".lower()
@@ -74,6 +162,8 @@ def customer_transaction_filters(*, brand: str, customer: Customer):
                 func.lower(Transaction.payload["scopeEmail"].as_string()) == scope_email,
             ]
         )
+    if not clauses:
+        return Transaction.profile_id == customer.profile_id
     return or_(*clauses)
 
 
@@ -86,9 +176,8 @@ def resolve_customer_for_lookup(
     reconcile_profile_id: bool = True,
 ) -> tuple[Customer | None, bool]:
     """
-    Find loyalty customer by Unomi profileId, else by email when IDs diverge
-    (Unomi mergeProfilesOnEmail / session cookie vs form registration profile).
-    Returns (customer, profile_id_updated).
+    Find loyalty customer by Unomi profileId (master or alias), else by email.
+    Returns (customer, alias_registered).
     """
     customer = get_customer(db, brand, profile_id)
     if customer:
@@ -110,13 +199,13 @@ def resolve_customer_for_lookup(
     if not reconcile_profile_id:
         return customer, False
 
-    updated = reconcile_customer_unomi_profile_id(
+    registered = register_unomi_profile_alias(
         db,
         brand=brand,
         customer=customer,
-        new_profile_id=profile_id,
+        incoming_profile_id=profile_id,
     )
-    return customer, updated
+    return customer, registered
 
 
 def _extract_email_from_payload(payload: dict | None, *, brand: str) -> str | None:
@@ -144,8 +233,8 @@ def resolve_customer_for_transaction(
     payload: dict | None,
 ) -> Customer | None:
     """
-    Match customer by Unomi profileId, else by email from sale payload.
-    Handles profile merges (same email, new profileId) and guest checkout auto-create.
+    Match customer by Unomi profileId (master or alias), else by email from sale payload.
+    Registers session/merge profileIds as aliases — master profile_id stays unchanged.
     """
     customer = get_customer(db, brand, profile_id)
     if customer:
@@ -162,11 +251,12 @@ def resolve_customer_for_transaction(
         .first()
     )
     if customer:
-        reconcile_customer_unomi_profile_id(
+        register_unomi_profile_alias(
             db,
             brand=brand,
             customer=customer,
-            new_profile_id=profile_id,
+            incoming_profile_id=profile_id,
+            source="session",
         )
         return customer
 
@@ -205,14 +295,7 @@ def get_or_create_customer(
     profile_id: str,
     payload: dict | None = None,
 ):
-    customer = (
-        db.query(Customer)
-        .filter(
-            Customer.brand == brand,
-            Customer.profile_id == profile_id,
-        )
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
 
     if not customer:
         initial_status = compute_loyalty_status_from_tiers(db, brand, status_points=0)
@@ -236,7 +319,6 @@ def get_or_create_customer(
 
         if "birthdate" in payload and payload["birthdate"]:
             raw_bd = payload["birthdate"]
-            # Allow passing a python date (legacy) or string (new partial format)
             if isinstance(raw_bd, date):
                 d = raw_bd
                 customer.birthdate = d

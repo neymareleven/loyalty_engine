@@ -11,6 +11,7 @@ from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
 from app.models.transaction import Transaction
 from app.services.catalog_invalidation_service import ENTITLEMENT_HISTORY_TX_TYPES
+from app.services.contact_service import customer_transaction_filters, get_customer
 
 
 def _coupon_label(coupon: CustomerCoupon) -> str:
@@ -107,22 +108,14 @@ def build_customer_entitlement_history(
     db: Session,
     *,
     brand: str,
-    profile_id: str,
+    customer: Customer,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
-    if not customer:
-        return {"brand": brand, "profileId": profile_id, "total": 0, "items": []}
-
     tx_rows = (
         db.query(Transaction)
         .filter(Transaction.brand == brand)
-        .filter(Transaction.profile_id == profile_id)
+        .filter(customer_transaction_filters(db, brand=brand, customer=customer))
         .filter(Transaction.transaction_type.in_(sorted(ENTITLEMENT_HISTORY_TX_TYPES)))
         .order_by(Transaction.created_at.desc())
         .all()
@@ -149,7 +142,7 @@ def build_customer_entitlement_history(
     page = events[offset : offset + limit]
     return {
         "brand": brand,
-        "profileId": profile_id,
+        "profileId": customer.profile_id,
         "total": total,
         "limit": limit,
         "offset": offset,

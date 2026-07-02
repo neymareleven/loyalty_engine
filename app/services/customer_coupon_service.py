@@ -9,6 +9,7 @@ from app.models.customer import Customer
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
 from app.models.transaction import Transaction
+from app.services.contact_service import get_customer
 from app.services.catalog_invalidation_service import coupon_admin_allowed_transitions
 
 ALLOWED_COUPON_STATUSES = frozenset({"ISSUED", "USED", "EXPIRED", "INVALIDATED"})
@@ -45,11 +46,7 @@ def _get_customer_coupon_for_update(
     profile_id: str,
     customer_coupon_id: str,
 ) -> tuple[Customer, CustomerCoupon]:
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
+    customer = get_customer(db, brand, profile_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
