@@ -27,10 +27,13 @@ def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_custom
         email="new@gmail.com",
     )
     mock_get_customer.return_value = None
-    query = MagicMock()
-    query.filter.return_value = query
-    query.first.return_value = merged_customer
-    db.query.return_value = query
+    customer_query = MagicMock()
+    customer_query.filter.return_value = customer_query
+    customer_query.first.return_value = merged_customer
+    tx_query = MagicMock()
+    tx_query.filter.return_value = tx_query
+    tx_query.update.return_value = 1
+    db.query.side_effect = [customer_query, tx_query]
 
     out = resolve_customer_for_transaction(
         db,

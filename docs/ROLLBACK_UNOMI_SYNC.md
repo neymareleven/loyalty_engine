@@ -2,6 +2,8 @@
 
 La push **Loyalty → Unomi** (`POST /cxs/profiles`, champs fidélité) a été **désactivée par défaut** car elle déclenchait des tempêtes `profileUpdated` dans Unomi (fusion profils, lenteurs, impossibilité de créer/supprimer des contacts).
 
+Voir aussi [UNOMI_LOYALTY_SYNC_DESIGN.md](./UNOMI_LOYALTY_SYNC_DESIGN.md) pour la refonte sûre (étude complète).
+
 ## Ce qui reste actif
 
 | Flux | Statut |

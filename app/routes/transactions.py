@@ -6,11 +6,13 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps.brand import get_active_brand
+from app.models.customer import Customer
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.schemas.event import EventCreate, UnomiEventCreate
 from app.schemas.transaction import TransactionOut
 from app.schemas.execution import RuleExecutionOut
+from app.services.contact_service import customer_transaction_filters, resolve_customer_for_lookup
 from app.services.transaction_protection import transaction_deletion_meta
 from app.services.transaction_service import create_transaction
 
@@ -124,10 +126,32 @@ def list_transactions(
     return [_serialize_transaction_out(tx) for tx in rows]
 
 
+def _resolve_customer_for_transaction_list(
+    db: Session,
+    *,
+    brand: str,
+    profile_id: str,
+    email: str | None = None,
+) -> Customer:
+    customer, updated = resolve_customer_for_lookup(
+        db,
+        brand=brand,
+        profile_id=profile_id,
+        email=email,
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if updated:
+        db.commit()
+        db.refresh(customer)
+    return customer
+
+
 @router.get("/by-user", response_model=list[TransactionOut])
 def list_transactions_by_user(
     brand: str,
     profileId: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     limit: int = 50,
     offset: int = 0,
@@ -136,10 +160,17 @@ def list_transactions_by_user(
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
 
+    customer = _resolve_customer_for_transaction_list(
+        db,
+        brand=active_brand,
+        profile_id=profileId,
+        email=email,
+    )
+
     q = (
         db.query(Transaction)
         .filter(Transaction.brand == active_brand)
-        .filter(Transaction.profile_id == profileId)
+        .filter(customer_transaction_filters(brand=active_brand, customer=customer))
     )
 
     limit = max(1, min(limit, 200))
@@ -154,6 +185,7 @@ def list_transactions_by_user_and_type(
     brand: str,
     transactionType: str,
     profileId: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     limit: int = 50,
     offset: int = 0,
@@ -162,10 +194,17 @@ def list_transactions_by_user_and_type(
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
 
+    customer = _resolve_customer_for_transaction_list(
+        db,
+        brand=active_brand,
+        profile_id=profileId,
+        email=email,
+    )
+
     q = (
         db.query(Transaction)
         .filter(Transaction.brand == active_brand)
-        .filter(Transaction.profile_id == profileId)
+        .filter(customer_transaction_filters(brand=active_brand, customer=customer))
         .filter(Transaction.transaction_type == transactionType)
     )
 

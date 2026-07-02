@@ -1,7 +1,8 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app.models.customer import Customer
+from app.models.transaction import Transaction
 from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
 
 from datetime import date
@@ -28,6 +29,52 @@ def normalize_lookup_email(value: str | None, *, brand: str) -> str | None:
         return raw[len(prefix) :].strip().lower()
     extracted = _extract_email_from_payload({"email": raw, "scopeEmail": raw}, brand=brand)
     return extracted
+
+
+def reconcile_customer_unomi_profile_id(
+    db: Session,
+    *,
+    brand: str,
+    customer: Customer,
+    new_profile_id: str,
+) -> bool:
+    """
+    After Unomi mergeProfilesOnEmail the canonical profileId can change.
+    Loyalty identifies customers by email; profile_id is the latest Unomi reference.
+    When it changes, migrate historical transactions so /by-user stays complete.
+    """
+    new_profile_id = (new_profile_id or "").strip()
+    if not new_profile_id:
+        return False
+    old_profile_id = (customer.profile_id or "").strip()
+    if not old_profile_id or old_profile_id == new_profile_id:
+        return False
+
+    db.query(Transaction).filter(
+        Transaction.brand == brand,
+        Transaction.profile_id == old_profile_id,
+    ).update({Transaction.profile_id: new_profile_id}, synchronize_session=False)
+    customer.profile_id = new_profile_id
+    return True
+
+
+def customer_transaction_filters(*, brand: str, customer: Customer):
+    """
+    Match transactions for a customer across Unomi profileId changes (pre/post merge).
+    Primary key for listing is customer identity (email), not a single profile_id snapshot.
+    """
+    clauses = [Transaction.profile_id == customer.profile_id]
+    email = (customer.email or "").strip().lower()
+    if email:
+        scope_email = f"{brand}-{email}".lower()
+        clauses.extend(
+            [
+                func.lower(Transaction.payload["email"].as_string()) == email,
+                func.lower(Transaction.payload["billing_email"].as_string()) == email,
+                func.lower(Transaction.payload["scopeEmail"].as_string()) == scope_email,
+            ]
+        )
+    return or_(*clauses)
 
 
 def resolve_customer_for_lookup(
@@ -60,10 +107,15 @@ def resolve_customer_for_lookup(
     if not customer:
         return None, False
 
-    updated = False
-    if reconcile_profile_id and customer.profile_id != profile_id:
-        customer.profile_id = profile_id
-        updated = True
+    if not reconcile_profile_id:
+        return customer, False
+
+    updated = reconcile_customer_unomi_profile_id(
+        db,
+        brand=brand,
+        customer=customer,
+        new_profile_id=profile_id,
+    )
     return customer, updated
 
 
@@ -110,8 +162,12 @@ def resolve_customer_for_transaction(
         .first()
     )
     if customer:
-        if customer.profile_id != profile_id:
-            customer.profile_id = profile_id
+        reconcile_customer_unomi_profile_id(
+            db,
+            brand=brand,
+            customer=customer,
+            new_profile_id=profile_id,
+        )
         return customer
 
     return get_or_create_customer(

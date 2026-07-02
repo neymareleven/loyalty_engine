@@ -21,7 +21,13 @@ from app.schemas.customer_coupon import CustomerCouponOut, CustomerCouponStatusU
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
 from app.services.customer_upsert_service import customer_identity_payload, parse_customer_upsert_payload
-from app.services.contact_service import get_or_create_customer, normalize_lookup_email, resolve_customer_for_lookup
+from app.services.contact_service import (
+    customer_transaction_filters,
+    get_or_create_customer,
+    normalize_lookup_email,
+    reconcile_customer_unomi_profile_id,
+    resolve_customer_for_lookup,
+)
 from app.services.customer_delete_service import delete_loyalty_customer
 from app.services.customer_coupon_service import set_customer_coupon_status
 from app.services.customer_entitlement_serialization import (
@@ -165,7 +171,12 @@ def upsert_customer(
                     .first()
                 )
                 if by_email and by_email.profile_id != profile_id:
-                    by_email.profile_id = profile_id
+                    reconcile_customer_unomi_profile_id(
+                        db,
+                        brand=brand,
+                        customer=by_email,
+                        new_profile_id=profile_id,
+                    )
                     db.flush()
 
         existed = bool(
@@ -239,7 +250,7 @@ def delete_customer(
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
     try:
-        result = delete_loyalty_customer(db, brand=brand, profile_id=profile_id, skip_unomi=False)
+        result = delete_loyalty_customer(db, brand=brand, profile_id=profile_id, skip_unomi=True)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail="Customer not found")
         db.commit()
@@ -436,7 +447,7 @@ def list_customer_coupons_with_rewards(
 
     return {
         "brand": brand,
-        "profileId": profile_id,
+        "profileId": customer.profile_id,
         "items": [
             {
                 "coupon": serialize_customer_coupon_out(db, coupon=c),
@@ -559,7 +570,7 @@ def get_customer_loyalty(
         last_tier_event = (
             db.query(Transaction.transaction_type)
             .filter(Transaction.brand == brand)
-            .filter(Transaction.profile_id == profile_id)
+            .filter(customer_transaction_filters(brand=brand, customer=customer))
             .filter(
                 Transaction.transaction_type.in_(
                     [
@@ -594,7 +605,7 @@ def get_customer_loyalty(
 
     return {
         "brand": brand,
-        "profileId": profile_id,
+        "profileId": customer.profile_id,
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": sp,
         "pointsBalance": get_status_points_balance(db, customer.id),
@@ -637,6 +648,7 @@ def get_customer_loyalty(
 def get_customer_loyalty_history(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     limit: int = 100,
     offset: int = 0,
@@ -644,13 +656,7 @@ def get_customer_loyalty_history(
 ):
     if brand != active_brand:
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = (
-        db.query(Customer.id)
-        .filter(Customer.brand == brand, Customer.profile_id == profile_id)
-        .first()
-    )
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
@@ -667,7 +673,7 @@ def get_customer_loyalty_history(
     q = (
         db.query(Transaction)
         .filter(Transaction.brand == brand)
-        .filter(Transaction.profile_id == profile_id)
+        .filter(customer_transaction_filters(brand=brand, customer=customer))
         .filter(Transaction.transaction_type.in_(tier_event_types))
     )
 
@@ -681,7 +687,7 @@ def get_customer_loyalty_history(
 
     return {
         "brand": brand,
-        "profileId": profile_id,
+        "profileId": customer.profile_id,
         "count": total,
         "items": [
             {

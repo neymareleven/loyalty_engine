@@ -1,4 +1,7 @@
-import org.apache.unomi.api.Profile
+"""Write loyalty_profile.groovy as UTF-8 (fixes UTF-16 corruption on Windows)."""
+from pathlib import Path
+
+CONTENT = r'''import org.apache.unomi.api.Profile
 import org.apache.unomi.api.services.EventService
 import org.apache.unomi.api.services.ProfileService
 import org.apache.unomi.groovy.actions.GroovyActionDispatcher
@@ -255,3 +258,8 @@ def execute() {
 
     return EventService.NO_CHANGE
 }
+'''
+
+path = Path(__file__).resolve().parents[1] / "loyalty_profile.groovy"
+path.write_text(CONTENT, encoding="utf-8", newline="\n")
+print(f"Wrote {path} ({path.stat().st_size} bytes)")
