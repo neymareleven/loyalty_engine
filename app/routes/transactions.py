@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps.brand import get_active_brand
+from app.deps.brand import assert_brand_matches, brands_match, get_active_brand
 from app.models.customer import Customer
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
@@ -111,7 +111,7 @@ def list_transactions(
     db: Session = Depends(get_db),
 ):
     q = db.query(Transaction)
-    if brand and brand != active_brand:
+    if brand and not brands_match(brand, active_brand):
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
     q = q.filter(Transaction.brand == active_brand)
     if profileId:
@@ -157,8 +157,7 @@ def list_transactions_by_user(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
 
     customer = _resolve_customer_for_transaction_list(
         db,
@@ -191,8 +190,7 @@ def list_transactions_by_user_and_type(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
 
     customer = _resolve_customer_for_transaction_list(
         db,

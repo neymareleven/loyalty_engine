@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.deps.brand import get_active_brand
+from app.deps.brand import assert_brand_matches, get_active_brand
 from app.models.customer import Customer
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
@@ -124,8 +124,7 @@ def get_customer(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
     return serialize_customer_out(db, customer=customer, brand=brand)
 
@@ -245,8 +244,7 @@ def delete_customer(
     db: Session = Depends(get_db),
 ):
     """Delete loyalty customer and the matching Unomi profile (when profile sync is enabled)."""
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     try:
         result = delete_loyalty_customer(db, brand=brand, profile_id=profile_id, skip_unomi=True)
         if not result.get("deleted"):
@@ -265,16 +263,14 @@ def delete_customer(
 def list_point_movements(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = get_customer(db, brand, profile_id)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     from app.models.point_movement import PointMovement
     limit = max(1, min(limit, 500))
@@ -294,17 +290,15 @@ def list_point_movements(
 def list_customer_rewards(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     status: str | None = None,
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = get_customer(db, brand, profile_id)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     q = db.query(CustomerReward).filter(CustomerReward.customer_id == customer.id)
     if status:
@@ -326,17 +320,15 @@ def list_customer_rewards(
 def list_customer_coupons(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     status: str | None = None,
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = get_customer(db, brand, profile_id)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     q = db.query(CustomerCoupon).filter(CustomerCoupon.customer_id == customer.id)
     if status:
@@ -358,16 +350,14 @@ def list_customer_coupons(
 def get_customer_entitlements_history(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = get_customer(db, brand, profile_id)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
     return build_customer_entitlement_history(
@@ -383,6 +373,7 @@ def get_customer_entitlements_history(
 def list_customer_coupons_with_rewards(
     brand: str,
     profile_id: str,
+    email: str | None = None,
     active_brand: str = Depends(get_active_brand),
     status: str | None = None,
     coupon_limit: int = 100,
@@ -390,11 +381,8 @@ def list_customer_coupons_with_rewards(
     reward_status: str | None = None,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
-    customer = get_customer(db, brand, profile_id)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     q = db.query(CustomerCoupon).filter(CustomerCoupon.customer_id == customer.id)
     if status:
@@ -446,8 +434,7 @@ def patch_customer_coupon_status(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
 
     try:
         coupon = set_customer_coupon_status(
@@ -479,8 +466,7 @@ def patch_customer_loyalty_status(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
 
     result = set_customer_loyalty_tier(
         db,
@@ -512,8 +498,7 @@ def get_customer_loyalty(
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     tiers = (
@@ -586,6 +571,7 @@ def get_customer_loyalty(
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": sp,
         "pointsBalance": get_status_points_balance(db, customer.id),
+        "pointsExpiresAt": customer.points_expires_at,
         "lastActivityAt": customer.last_activity_at,
         "lastChange": last_change,
         "currentTier": (
@@ -631,8 +617,7 @@ def get_customer_loyalty_history(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    if brand != active_brand:
-        raise HTTPException(status_code=400, detail="brand does not match active brand context")
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
 
     limit = max(1, min(limit, 500))
