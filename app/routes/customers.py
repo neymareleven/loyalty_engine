@@ -181,12 +181,8 @@ def upsert_customer(
                     )
                     db.flush()
 
-        existed = bool(
-            db.query(Customer.id)
-            .filter(Customer.brand == brand)
-            .filter(Customer.profile_id == profile_id)
-            .first()
-        )
+        # Use master-or-alias lookup to avoid duplicate customers / wrong registration tx
+        existed = bool(get_customer(db, brand, profile_id))
         try:
             customer = get_or_create_customer(
                 db,
