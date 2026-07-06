@@ -3,6 +3,8 @@ import hmac
 import os
 import re
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -142,6 +144,20 @@ async def db_sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
         status_code=503,
         detail="Database error",
         error=orig,
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logging.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error",
+            "error": str(exc),
+            "type": type(exc).__name__,
+        },
+        headers=_cors_headers_for_request(request),
     )
 
 

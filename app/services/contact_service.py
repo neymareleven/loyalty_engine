@@ -289,6 +289,90 @@ def _normalize_gender(value: str) -> str:
 from app.services.birthdate_targeting import parse_customer_birthdate_storage
 
 
+def apply_customer_identity(
+    customer: Customer,
+    payload: dict | None,
+) -> None:
+    """Update loyalty identity fields on an existing customer row."""
+    if not payload:
+        return
+
+    if payload.get("email"):
+        customer.email = str(payload["email"]).strip()
+
+    if payload.get("gender"):
+        customer.gender = _normalize_gender(payload["gender"])
+
+    if payload.get("birthdate"):
+        raw_bd = payload["birthdate"]
+        if isinstance(raw_bd, date):
+            d = raw_bd
+            customer.birthdate = d
+            customer.birth_month = d.month
+            customer.birth_day = d.day
+            customer.birth_year = d.year
+        else:
+            full, mm, dd, yy = parse_customer_birthdate_storage(str(raw_bd))
+            customer.birth_month = mm
+            customer.birth_day = dd
+            customer.birth_year = yy
+            customer.birthdate = full
+
+
+def resolve_customer_for_upsert(
+    db: Session,
+    *,
+    brand: str,
+    profile_id: str,
+    identity_payload: dict | None,
+) -> tuple[Customer, bool]:
+    """
+    Resolve the canonical loyalty customer for Unomi upsert.
+
+    Email wins over profileId (master/alias). Incoming profileId is registered as an alias
+    when it differs from the stored master. Returns (customer, is_new_registration).
+    """
+    profile_id = (profile_id or "").strip()
+    norm_email = None
+    if identity_payload and identity_payload.get("email"):
+        norm_email = str(identity_payload["email"]).strip().lower() or None
+
+    by_email = None
+    if norm_email:
+        by_email = (
+            db.query(Customer)
+            .filter(Customer.brand == brand)
+            .filter(func.lower(Customer.email) == norm_email)
+            .first()
+        )
+
+    by_profile = get_customer(db, brand, profile_id)
+
+    if by_email:
+        if by_email.profile_id != profile_id:
+            register_unomi_profile_alias(
+                db,
+                brand=brand,
+                customer=by_email,
+                incoming_profile_id=profile_id,
+                source="session",
+            )
+        apply_customer_identity(by_email, identity_payload)
+        return by_email, False
+
+    if by_profile:
+        apply_customer_identity(by_profile, identity_payload)
+        return by_profile, False
+
+    customer = get_or_create_customer(
+        db,
+        brand,
+        profile_id,
+        payload=identity_payload,
+    )
+    return customer, True
+
+
 def get_or_create_customer(
     db: Session,
     brand: str,
@@ -310,26 +394,6 @@ def get_or_create_customer(
         db.flush()
 
     # --- Mise à jour des attributs métier depuis le payload ---
-    if payload:
-        if "email" in payload and payload["email"]:
-            customer.email = str(payload["email"]).strip()
-
-        if "gender" in payload and payload["gender"]:
-            customer.gender = _normalize_gender(payload["gender"])
-
-        if "birthdate" in payload and payload["birthdate"]:
-            raw_bd = payload["birthdate"]
-            if isinstance(raw_bd, date):
-                d = raw_bd
-                customer.birthdate = d
-                customer.birth_month = d.month
-                customer.birth_day = d.day
-                customer.birth_year = d.year
-            else:
-                full, mm, dd, yy = parse_customer_birthdate_storage(str(raw_bd))
-                customer.birth_month = mm
-                customer.birth_day = dd
-                customer.birth_year = yy
-                customer.birthdate = full
+    apply_customer_identity(customer, payload)
 
     return customer

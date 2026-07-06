@@ -24,10 +24,8 @@ from app.services.customer_upsert_service import customer_identity_payload, pars
 from app.services.contact_service import (
     customer_transaction_filters,
     get_customer,
-    get_or_create_customer,
-    normalize_lookup_email,
-    register_unomi_profile_alias,
     resolve_customer_for_lookup,
+    resolve_customer_for_upsert,
 )
 from app.services.customer_delete_service import delete_loyalty_customer
 from app.services.customer_coupon_service import set_customer_coupon_status
@@ -161,38 +159,16 @@ def upsert_customer(
                 raise HTTPException(status_code=400, detail=str(e)) from e
 
     try:
-        if email:
-            norm_email = normalize_lookup_email(email, brand=brand)
-            if norm_email:
-                by_email = (
-                    db.query(Customer)
-                    .filter(Customer.brand == brand)
-                    .filter(func.lower(Customer.email) == norm_email)
-                    .first()
-                )
-                if by_email and by_email.profile_id != profile_id:
-                    register_unomi_profile_alias(
-                        db,
-                        brand=brand,
-                        customer=by_email,
-                        incoming_profile_id=profile_id,
-                        source="session",
-                    )
-                    db.flush()
+        identity = customer_identity_payload(parsed)
+        customer, is_new_registration = resolve_customer_for_upsert(
+            db,
+            brand=brand,
+            profile_id=profile_id,
+            identity_payload=identity,
+        )
+        db.flush()
 
-        # Use master-or-alias lookup to avoid duplicate customers / wrong registration tx
-        existed = bool(get_customer(db, brand, profile_id))
-        try:
-            customer = get_or_create_customer(
-                db,
-                brand,
-                profile_id,
-                customer_identity_payload(parsed),
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-        if not existed:
+        if is_new_registration:
             from app.services.transaction_service import create_internal_transaction
 
             ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
