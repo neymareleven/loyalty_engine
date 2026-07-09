@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.db import get_db
@@ -26,6 +26,11 @@ from app.services.contact_service import (
     get_customer,
     resolve_customer_for_lookup,
     resolve_customer_for_upsert,
+)
+from app.services.unomi_profile_service import (
+    build_upsert_unomi_sync_result,
+    reset_profile_sync_source,
+    set_profile_sync_source,
 )
 from app.services.customer_delete_service import delete_loyalty_customer
 from app.services.customer_coupon_service import set_customer_coupon_status
@@ -130,6 +135,7 @@ def get_customer(
 @router.post("/upsert", response_model=CustomerUpsertOut)
 def upsert_customer(
     payload: CustomerUpsert,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     parsed = parse_customer_upsert_payload(payload)
@@ -157,6 +163,10 @@ def upsert_customer(
                 parse_birthdate_wire(s)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
+
+    from_unomi = (request.headers.get("X-Profile-Sync-Source") or "").strip().lower() == "unomi"
+    sync_token = set_profile_sync_source("unomi") if from_unomi else None
+    unomi_sync: dict | None = None
 
     try:
         identity = customer_identity_payload(parsed)
@@ -204,12 +214,23 @@ def upsert_customer(
         customer.last_activity_at = datetime.utcnow()
         db.commit()
         db.refresh(customer)
+
+        unomi_sync = build_upsert_unomi_sync_result(
+            db,
+            customer=customer,
+            from_unomi=from_unomi,
+            is_new_registration=is_new_registration,
+            extra_properties=props or None,
+        )
     except Exception:
         db.rollback()
         raise
+    finally:
+        if sync_token is not None:
+            reset_profile_sync_source(sync_token)
 
     out = serialize_customer_out(db, customer=customer, brand=brand, include_points_balance=False)
-    return CustomerUpsertOut(**out, unomi_sync={"skipped": True, "reason": "profile_sync_disabled"})
+    return CustomerUpsertOut(**out, unomi_sync=unomi_sync)
 
 
 @router.delete("/{brand}/{profile_id}")
@@ -222,7 +243,7 @@ def delete_customer(
     """Delete loyalty customer and the matching Unomi profile (when profile sync is enabled)."""
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     try:
-        result = delete_loyalty_customer(db, brand=brand, profile_id=profile_id, skip_unomi=True)
+        result = delete_loyalty_customer(db, brand=brand, profile_id=profile_id, skip_unomi=False)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail="Customer not found")
         db.commit()

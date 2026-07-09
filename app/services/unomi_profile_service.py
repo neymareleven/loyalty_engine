@@ -86,6 +86,76 @@ _UNOMI_UPSERT_SKIP_KEYS = frozenset(
 )
 
 
+_INTERNAL_TRANSACTION_TYPES_NO_UNOMI_SYNC = frozenset(
+    {
+        "CUSTOMER_REGISTRATION",
+        "TIER_UPGRADED",
+        "TIER_DOWNGRADED",
+        "TIER_RENEWED",
+        "ADMIN_SET_TIER",
+    }
+)
+
+
+def should_sync_customer_to_unomi_after_transaction(*, transaction) -> bool:
+    """One loyalty push per business transaction (not internal tier/registration events)."""
+    if (transaction.status or "").strip().upper() != "PROCESSED":
+        return False
+    tt = (transaction.transaction_type or "").strip().upper()
+    if tt in _INTERNAL_TRANSACTION_TYPES_NO_UNOMI_SYNC:
+        return False
+    if not unomi_profile_sync_enabled_for_brand(brand=transaction.brand):
+        return False
+    return True
+
+
+def maybe_sync_customer_to_unomi_after_transaction(
+    db: Session,
+    *,
+    customer: Customer,
+    transaction,
+    transport_override: str = "profiles",
+) -> dict[str, Any] | None:
+    """Best-effort push after a successfully processed business transaction."""
+    if should_skip_unomi_profile_push():
+        return {"skipped": True, "reason": "sync_source_unomi"}
+    if not should_sync_customer_to_unomi_after_transaction(transaction=transaction):
+        return None
+    return sync_customer_profile_to_unomi(
+        db,
+        customer=customer,
+        reason="transaction_processed",
+        transport_override=transport_override,
+    )
+
+
+def build_upsert_unomi_sync_result(
+    db: Session,
+    *,
+    customer: Customer,
+    from_unomi: bool,
+    is_new_registration: bool,
+    extra_properties: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve outbound Unomi sync for POST /customers/upsert (no ping-pong on Unomi ingress)."""
+    if from_unomi:
+        if should_skip_unomi_sync_after_unomi_registration(
+            from_unomi=True,
+            customer_existed=not is_new_registration,
+        ):
+            return {"skipped": True, "reason": "registration_deferred"}
+        return {"skipped": True, "reason": "sync_source_unomi"}
+
+    result = sync_customer_profile_to_unomi(
+        db,
+        customer=customer,
+        reason="customer_upsert",
+        extra_properties=extra_properties,
+        transport_override="profiles",
+    )
+    return result or {"skipped": True, "reason": "profile_sync_disabled"}
+
+
 def set_profile_sync_source(source: str | None):
     return _profile_sync_source.set(source)
 

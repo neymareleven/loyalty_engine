@@ -18,8 +18,9 @@ def test_extract_email_from_billing_and_scope():
     )
 
 
+@patch("app.services.contact_service.register_unomi_profile_alias")
 @patch("app.services.contact_service.get_customer")
-def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_customer):
+def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_customer, mock_register):
     db = MagicMock()
     merged_customer = SimpleNamespace(
         id="cust-1",
@@ -31,11 +32,8 @@ def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_custom
     customer_query = MagicMock()
     customer_query.filter.return_value = customer_query
     customer_query.first.return_value = merged_customer
-    alias_query = MagicMock()
-    alias_query.filter.return_value = alias_query
-    alias_query.first.return_value = None
-    db.query.side_effect = [customer_query, alias_query]
-    db.add = MagicMock()
+    db.query.return_value = customer_query
+    mock_register.return_value = True
 
     out = resolve_customer_for_transaction(
         db,
@@ -46,6 +44,47 @@ def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_custom
 
     assert out is merged_customer
     assert merged_customer.profile_id == "old-profile-id"
+    mock_register.assert_called_once()
+
+
+@patch("app.services.contact_service.register_unomi_profile_alias")
+@patch("app.services.contact_service.get_customer")
+def test_resolve_transaction_email_wins_over_different_profile_master(mock_get_customer, mock_register):
+    db = MagicMock()
+    master = SimpleNamespace(
+        id="cust-master",
+        brand="batira",
+        profile_id="6b8555e2-master",
+        email="test17@gmail.com",
+    )
+    orphan = SimpleNamespace(
+        id="cust-orphan",
+        brand="batira",
+        profile_id="87a759c2-session",
+        email="other@gmail.com",
+    )
+
+    def get_customer_side_effect(_db, brand, pid):
+        if pid == "87a759c2-session":
+            return orphan
+        return None
+
+    mock_get_customer.side_effect = get_customer_side_effect
+
+    email_query = MagicMock()
+    email_query.filter.return_value = email_query
+    email_query.first.return_value = master
+    db.query.return_value = email_query
+
+    out = resolve_customer_for_transaction(
+        db,
+        brand="batira",
+        profile_id="87a759c2-session",
+        payload={"billing_email": "test17@gmail.com", "orderNumber": "7026"},
+    )
+
+    assert out is master
+    mock_register.assert_called_once()
 
 
 @patch("app.services.transaction_service.process_transaction_rules")

@@ -8,11 +8,14 @@ from app.services.unomi_profile_service import (
     build_customer_identity_unomi_properties,
     build_unomi_eventcollector_payload,
     build_unomi_profile_payload,
+    build_upsert_unomi_sync_result,
     merge_unomi_profile_properties,
+    maybe_sync_customer_to_unomi_after_transaction,
     reset_profile_sync_source,
     set_profile_sync_source,
     should_skip_unomi_profile_push,
     should_skip_unomi_sync_after_unomi_registration,
+    should_sync_customer_to_unomi_after_transaction,
     _derive_scope_email,
 )
 
@@ -238,3 +241,104 @@ def test_eventcollector_update_properties_payload():
     assert event["properties"]["targetId"] == "prof-abc"
     assert event["properties"]["add"]["properties.email"] == "a@b.com"
     assert event["properties"]["add"]["properties.loyaltyStatus"] == "GOLD"
+
+
+def _transaction(**kwargs):
+    defaults = {
+        "status": "PROCESSED",
+        "transaction_type": "sale",
+        "brand": "batira",
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
+@patch.dict("os.environ", {"UNOMI_PROFILE_SYNC": "true", "UNOMI_BASE_URL": "https://u", "UNOMI_PASSWORD": "p"})
+def test_should_sync_after_sale_when_processed():
+    assert should_sync_customer_to_unomi_after_transaction(transaction=_transaction()) is True
+
+
+@patch.dict("os.environ", {"UNOMI_PROFILE_SYNC": "false"})
+def test_should_not_sync_when_profile_sync_disabled():
+    assert should_sync_customer_to_unomi_after_transaction(transaction=_transaction()) is False
+
+
+def test_should_not_sync_internal_registration_transaction():
+    tx = _transaction(transaction_type="CUSTOMER_REGISTRATION")
+    with patch.dict("os.environ", {"UNOMI_PROFILE_SYNC": "true", "UNOMI_BASE_URL": "https://u", "UNOMI_PASSWORD": "p"}):
+        assert should_sync_customer_to_unomi_after_transaction(transaction=tx) is False
+
+
+def test_build_upsert_unomi_sync_skips_new_unomi_registration():
+    db = MagicMock()
+    result = build_upsert_unomi_sync_result(
+        db,
+        customer=_customer(),
+        from_unomi=True,
+        is_new_registration=True,
+    )
+    assert result == {"skipped": True, "reason": "registration_deferred"}
+
+
+def test_build_upsert_unomi_sync_skips_existing_unomi_upsert():
+    db = MagicMock()
+    result = build_upsert_unomi_sync_result(
+        db,
+        customer=_customer(),
+        from_unomi=True,
+        is_new_registration=False,
+    )
+    assert result == {"skipped": True, "reason": "sync_source_unomi"}
+
+
+@patch("app.services.unomi_profile_service.sync_customer_profile_to_unomi")
+def test_build_upsert_unomi_sync_pushes_direct_upsert(mock_sync):
+    db = MagicMock()
+    mock_sync.return_value = {"synced": True, "profileId": "prof-1"}
+    customer = _customer()
+
+    result = build_upsert_unomi_sync_result(
+        db,
+        customer=customer,
+        from_unomi=False,
+        is_new_registration=False,
+        extra_properties={"firstName": "Ada"},
+    )
+
+    assert result["synced"] is True
+    mock_sync.assert_called_once_with(
+        db,
+        customer=customer,
+        reason="customer_upsert",
+        extra_properties={"firstName": "Ada"},
+        transport_override="profiles",
+    )
+
+
+@patch("app.services.unomi_profile_service.sync_customer_profile_to_unomi")
+def test_maybe_sync_after_transaction_calls_sync_for_sale(mock_sync):
+    db = MagicMock()
+    mock_sync.return_value = {"synced": True}
+    customer = _customer()
+    tx = _transaction()
+
+    with patch.dict("os.environ", {"UNOMI_PROFILE_SYNC": "true", "UNOMI_BASE_URL": "https://u", "UNOMI_PASSWORD": "p"}):
+        result = maybe_sync_customer_to_unomi_after_transaction(db, customer=customer, transaction=tx)
+
+    assert result["synced"] is True
+    mock_sync.assert_called_once()
+
+
+@patch("app.services.unomi_profile_service.sync_customer_profile_to_unomi")
+def test_maybe_sync_after_transaction_skips_when_source_is_unomi(mock_sync):
+    db = MagicMock()
+    customer = _customer()
+    tx = _transaction()
+    token = set_profile_sync_source("unomi")
+    try:
+        result = maybe_sync_customer_to_unomi_after_transaction(db, customer=customer, transaction=tx)
+    finally:
+        reset_profile_sync_source(token)
+
+    assert result == {"skipped": True, "reason": "sync_source_unomi"}
+    mock_sync.assert_not_called()

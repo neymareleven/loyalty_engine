@@ -127,8 +127,8 @@ def unomi_profile_sync_enabled_for_brand(*, brand: str) -> bool:
 
 
 def unomi_profile_sync_transport() -> str:
-    """eventcollector (Unomi 2.x recommended) or profiles (admin REST fallback)."""
-    raw = (os.getenv("UNOMI_PROFILE_SYNC_TRANSPORT") or "eventcollector").strip().lower()
+    """profiles (recommended) or eventcollector (legacy CDP rules)."""
+    raw = (os.getenv("UNOMI_PROFILE_SYNC_TRANSPORT") or "profiles").strip().lower()
     if raw in {"eventcollector", "event_collector", "events"}:
         return "eventcollector"
     if raw in {"profiles", "profile", "rest"}:

@@ -233,39 +233,49 @@ def resolve_customer_for_transaction(
     payload: dict | None,
 ) -> Customer | None:
     """
-    Match customer by Unomi profileId (master or alias), else by email from sale payload.
-    Registers session/merge profileIds as aliases — master profile_id stays unchanged.
+    Match customer for sale/business events.
+
+    Email wins over profileId (same as upsert): Unomi sale.groovy may send the newest
+    CDP profileId while Loyalty keeps the oldest master. Points always attach to the
+    email-matched customer; incoming profileId is registered as alias when safe.
     """
-    customer = get_customer(db, brand, profile_id)
-    if customer:
-        return customer
-
+    profile_id = (profile_id or "").strip()
     email = _extract_email_from_payload(payload, brand=brand)
-    if not email:
-        return None
 
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand)
-        .filter(func.lower(Customer.email) == email)
-        .first()
-    )
-    if customer:
-        register_unomi_profile_alias(
-            db,
-            brand=brand,
-            customer=customer,
-            incoming_profile_id=profile_id,
-            source="session",
+    by_email = None
+    if email:
+        by_email = (
+            db.query(Customer)
+            .filter(Customer.brand == brand)
+            .filter(func.lower(Customer.email) == email)
+            .first()
         )
-        return customer
 
-    return get_or_create_customer(
-        db,
-        brand,
-        profile_id,
-        payload={"email": email},
-    )
+    by_profile = get_customer(db, brand, profile_id)
+
+    if by_email:
+        if by_email.profile_id != profile_id:
+            register_unomi_profile_alias(
+                db,
+                brand=brand,
+                customer=by_email,
+                incoming_profile_id=profile_id,
+                source="session",
+            )
+        return by_email
+
+    if by_profile:
+        return by_profile
+
+    if email:
+        return get_or_create_customer(
+            db,
+            brand,
+            profile_id,
+            payload={"email": email},
+        )
+
+    return None
 
 
 def _normalize_gender(value: str) -> str:

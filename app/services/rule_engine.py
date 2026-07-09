@@ -887,6 +887,11 @@ def process_transaction_rules(db: Session, transaction):
 
     transaction.status = "PROCESSED_ERRORS" if had_rule_failures else "PROCESSED"
 
+    if transaction.status == "PROCESSED":
+        from app.services.unomi_profile_service import maybe_sync_customer_to_unomi_after_transaction
+
+        maybe_sync_customer_to_unomi_after_transaction(db, customer=customer, transaction=transaction)
+
     if not had_rule_failures and (transaction.transaction_type or "").lower() == "sale" and points_earned_total <= 0:
         if had_matching_rule and not transaction.error_code:
             transaction.error_code = "NO_POINTS_EARNED"
