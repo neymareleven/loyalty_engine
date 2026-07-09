@@ -199,6 +199,18 @@ def main() -> int:
                 )
             elif tx.error_code == "CUSTOMER_NOT_FOUND":
                 print("\n>>> CUSTOMER_NOT_FOUND: no loyalty customer at ingest time.")
+            elif tx.status == "PROCESSED_ERRORS":
+                failed = [e for e in execs if e.result == "FAILED"]
+                if failed:
+                    err = (failed[0].details or {}).get("error", "")
+                    if "StringDataRightTruncation" in err and "loyalty_status" in err:
+                        print(
+                            "\n>>> PROCESSED_ERRORS: loyalty_status tier key too long for "
+                            "customers.loyalty_status column (varchar 20). "
+                            "Run: alembic upgrade head  (migration e2f3a4b5c6d7)"
+                        )
+                    else:
+                        print(f"\n>>> PROCESSED_ERRORS: {err[:500]}")
 
         if args.profile_id:
             c = get_customer(db, args.brand, args.profile_id)

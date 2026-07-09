@@ -21,7 +21,7 @@ class Customer(Base):
     birth_year = Column(Integer)
 
     status = Column(String(20), default="ACTIVE")
-    loyalty_status = Column(String(20), nullable=True)
+    loyalty_status = Column(String(50), nullable=True)
 
     status_points = Column(Integer, nullable=False, default=0)
     last_activity_at = Column(TIMESTAMP)
