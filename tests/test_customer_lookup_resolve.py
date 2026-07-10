@@ -46,6 +46,8 @@ def test_resolve_customer_for_lookup_registers_alias_by_email(mock_get_customer,
         brand="batira",
         customer=stored,
         incoming_profile_id="2289a7d1-session",
+        corroborating_email="new@test.com",
+        caller="resolve_customer_for_lookup",
     )
 
 
@@ -72,6 +74,8 @@ def test_register_unomi_profile_alias_keeps_master_and_does_not_touch_transactio
         customer=customer,
         incoming_profile_id="2289a7d1-session",
         source="session",
+        corroborating_email="yes@gmail.com",
+        caller="test",
     )
 
     assert registered is True

@@ -1,4 +1,6 @@
 from datetime import date, datetime
+import logging
+from uuid import UUID
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -7,6 +9,8 @@ from app.models.customer import Customer
 from app.models.customer_unomi_profile_alias import CustomerUnomiProfileAlias
 from app.models.transaction import Transaction
 from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
+
+logger = logging.getLogger(__name__)
 
 
 def get_customer(db: Session, brand: str, profile_id: str) -> Customer | None:
@@ -59,6 +63,56 @@ def list_customer_unomi_profile_ids(db: Session, customer: Customer) -> list[str
     return ids
 
 
+def _normalize_email(value: str | None) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    return str(value).strip().lower()
+
+
+def _customer_email(customer: Customer | None) -> str | None:
+    if customer is None:
+        return None
+    return _normalize_email(getattr(customer, "email", None))
+
+
+def build_brand_profile_id_to_customer_map(
+    db: Session,
+    *,
+    brand: str,
+    customer_ids: list[UUID] | None = None,
+) -> dict[str, UUID]:
+    """Map master or alias Unomi profileId -> loyalty customer_id for a brand."""
+    q = db.query(Customer.id, Customer.profile_id).filter(Customer.brand == brand)
+    if customer_ids:
+        q = q.filter(Customer.id.in_(customer_ids))
+
+    customers = q.all()
+    if not customers:
+        return {}
+
+    allowed_customer_ids = {row.id for row in customers}
+    mapping: dict[str, UUID] = {}
+    for row in customers:
+        master = (row.profile_id or "").strip()
+        if master:
+            mapping[master] = row.id
+
+    alias_q = (
+        db.query(
+            CustomerUnomiProfileAlias.profile_id,
+            CustomerUnomiProfileAlias.customer_id,
+        )
+        .filter(CustomerUnomiProfileAlias.brand == brand)
+        .filter(CustomerUnomiProfileAlias.customer_id.in_(allowed_customer_ids))
+    )
+    for profile_id, customer_id in alias_q.all():
+        pid = (profile_id or "").strip()
+        if pid:
+            mapping[pid] = customer_id
+
+    return mapping
+
+
 def normalize_lookup_email(value: str | None, *, brand: str) -> str | None:
     """Normalize email or scopeEmail (batira-user@x.com) for customer lookup."""
     if value is None or not str(value).strip():
@@ -78,12 +132,13 @@ def register_unomi_profile_alias(
     customer: Customer,
     incoming_profile_id: str,
     source: str = "session",
+    corroborating_email: str | None = None,
+    caller: str = "unknown",
 ) -> bool:
     """
     Record a Unomi profileId that maps to an existing customer without changing the master.
 
-    Used when mergeProfilesOnEmail or a new session cookie sends a different profileId
-    for the same email. Transactions keep the profile_id they were ingested with.
+    Session aliases require a corroborating email that exactly matches the target customer.
     """
     incoming_profile_id = (incoming_profile_id or "").strip()
     if not incoming_profile_id:
@@ -93,8 +148,56 @@ def register_unomi_profile_alias(
     if not master_profile_id or incoming_profile_id == master_profile_id:
         return False
 
+    source_norm = (source or "session").strip() or "session"
+    customer_email = _customer_email(customer)
+    corroborating = _normalize_email(corroborating_email)
+
+    if source_norm == "session":
+        if not customer_email or not corroborating:
+            logger.warning(
+                "unomi alias refused (session requires email corroboration): brand=%s caller=%s "
+                "customer_id=%s master_profile_id=%s incoming_profile_id=%s customer_email=%s "
+                "corroborating_email=%s",
+                brand,
+                caller,
+                customer.id,
+                master_profile_id,
+                incoming_profile_id,
+                customer_email,
+                corroborating,
+            )
+            return False
+        if customer_email != corroborating:
+            logger.warning(
+                "unomi alias refused (email mismatch — should not link different people): "
+                "brand=%s caller=%s customer_id=%s master_profile_id=%s incoming_profile_id=%s "
+                "customer_email=%s corroborating_email=%s",
+                brand,
+                caller,
+                customer.id,
+                master_profile_id,
+                incoming_profile_id,
+                customer_email,
+                corroborating,
+            )
+            return False
+
     existing_owner = get_customer(db, brand, incoming_profile_id)
     if existing_owner and existing_owner.id != customer.id:
+        owner_email = _customer_email(existing_owner)
+        if owner_email and customer_email and owner_email != customer_email:
+            logger.warning(
+                "unomi alias refused (incoming profile owned by another customer with different email): "
+                "brand=%s caller=%s target_customer_id=%s target_email=%s owner_customer_id=%s "
+                "owner_email=%s incoming_profile_id=%s",
+                brand,
+                caller,
+                customer.id,
+                customer_email,
+                existing_owner.id,
+                owner_email,
+                incoming_profile_id,
+            )
         return False
 
     now = datetime.utcnow()
@@ -109,8 +212,8 @@ def register_unomi_profile_alias(
     )
     if row:
         row.last_seen_at = now
-        if source and row.source in (None, "", "session") and source != "session":
-            row.source = source
+        if source_norm and row.source in (None, "", "session") and source_norm != "session":
+            row.source = source_norm
         return False
 
     db.add(
@@ -118,10 +221,22 @@ def register_unomi_profile_alias(
             brand=brand,
             customer_id=customer.id,
             profile_id=incoming_profile_id,
-            source=(source or "session").strip() or "session",
+            source=source_norm,
             first_seen_at=now,
             last_seen_at=now,
         )
+    )
+    logger.info(
+        "unomi alias registered: brand=%s caller=%s customer_id=%s master_profile_id=%s "
+        "incoming_profile_id=%s customer_email=%s corroborating_email=%s source=%s",
+        brand,
+        caller,
+        customer.id,
+        master_profile_id,
+        incoming_profile_id,
+        customer_email,
+        corroborating,
+        source_norm,
     )
     return True
 
@@ -177,35 +292,69 @@ def resolve_customer_for_lookup(
 ) -> tuple[Customer | None, bool]:
     """
     Find loyalty customer by Unomi profileId (master or alias), else by email.
+
+    When email is provided it wins over a stale profileId alias that belongs to another
+    customer. Session alias registration requires matching corroborating email.
     Returns (customer, alias_registered).
     """
-    customer = get_customer(db, brand, profile_id)
-    if customer:
-        return customer, False
-
+    profile_id = (profile_id or "").strip()
     norm_email = normalize_lookup_email(email, brand=brand)
-    if not norm_email:
-        return None, False
 
-    customer = (
-        db.query(Customer)
-        .filter(Customer.brand == brand)
-        .filter(func.lower(Customer.email) == norm_email)
-        .first()
-    )
-    if not customer:
-        return None, False
+    by_email = None
+    if norm_email:
+        by_email = (
+            db.query(Customer)
+            .filter(Customer.brand == brand)
+            .filter(func.lower(Customer.email) == norm_email)
+            .first()
+        )
 
-    if not reconcile_profile_id:
-        return customer, False
+    by_profile = get_customer(db, brand, profile_id) if profile_id else None
 
-    registered = register_unomi_profile_alias(
-        db,
-        brand=brand,
-        customer=customer,
-        incoming_profile_id=profile_id,
-    )
-    return customer, registered
+    if by_email and by_profile and by_email.id != by_profile.id:
+        profile_email = _customer_email(by_profile)
+        logger.warning(
+            "profile/email customer mismatch; trusting email: brand=%s caller=resolve_customer_for_lookup "
+            "profile_id=%s profile_customer_id=%s profile_email=%s email_customer_id=%s lookup_email=%s",
+            brand,
+            profile_id,
+            by_profile.id,
+            profile_email,
+            by_email.id,
+            norm_email,
+        )
+        by_profile = None
+
+    if by_email:
+        registered = False
+        if reconcile_profile_id and by_email.profile_id != profile_id:
+            registered = register_unomi_profile_alias(
+                db,
+                brand=brand,
+                customer=by_email,
+                incoming_profile_id=profile_id,
+                corroborating_email=norm_email,
+                caller="resolve_customer_for_lookup",
+            )
+        return by_email, registered
+
+    if by_profile:
+        if norm_email:
+            profile_email = _customer_email(by_profile)
+            if profile_email and profile_email != norm_email:
+                logger.warning(
+                    "profile lookup rejected (email does not match profile owner): brand=%s "
+                    "profile_id=%s customer_id=%s profile_email=%s lookup_email=%s caller=resolve_customer_for_lookup",
+                    brand,
+                    profile_id,
+                    by_profile.id,
+                    profile_email,
+                    norm_email,
+                )
+                return None, False
+        return by_profile, False
+
+    return None, False
 
 
 def _extract_email_from_payload(payload: dict | None, *, brand: str) -> str | None:
@@ -261,10 +410,25 @@ def resolve_customer_for_transaction(
                 customer=by_email,
                 incoming_profile_id=profile_id,
                 source="session",
+                corroborating_email=email,
+                caller="resolve_customer_for_transaction",
             )
         return by_email
 
     if by_profile:
+        if email:
+            profile_email = _customer_email(by_profile)
+            if profile_email and profile_email != email:
+                logger.warning(
+                    "transaction profile/email mismatch rejected: brand=%s profile_id=%s "
+                    "customer_id=%s profile_email=%s payload_email=%s caller=resolve_customer_for_transaction",
+                    brand,
+                    profile_id,
+                    by_profile.id,
+                    profile_email,
+                    email,
+                )
+                return None
         return by_profile
 
     if email:
@@ -366,6 +530,8 @@ def resolve_customer_for_upsert(
                 customer=by_email,
                 incoming_profile_id=profile_id,
                 source="session",
+                corroborating_email=norm_email,
+                caller="resolve_customer_for_upsert",
             )
         apply_customer_identity(by_email, identity_payload)
         return by_email, False
