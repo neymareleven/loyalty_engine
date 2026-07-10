@@ -7,6 +7,13 @@ Usage:
   # Transfer points for a mis-attributed PROCESSED sale (dry-run)
   python scripts/repair_session_aliases.py --brand batira --fix-points --order-number 7026
 
+  # Explicit transfer after manual cleanup (when --fix-points no longer detects mismatch)
+  python scripts/repair_session_aliases.py --brand batira --force-transfer \
+    --from-customer 6a5aa537-e2c5-447d-b1df-9f28528a87b8 \
+    --to-customer b6153492-0832-45c8-8d78-889970809cbc \
+    --order-number 7026
+  python scripts/repair_session_aliases.py --brand batira --force-transfer ... --commit
+
   # Apply point transfer + Unomi sync for both customers
   python scripts/repair_session_aliases.py --brand batira --fix-points --order-number 7026 --commit
 
@@ -188,6 +195,295 @@ def _correction_already_applied(db: Session, *, brand: str, order_number: str | 
     return existing is not None
 
 
+def _correction_already_applied_for_sale(
+    db: Session,
+    *,
+    brand: str,
+    order_number: str | None,
+    sale_transaction_uuid: UUID,
+) -> bool:
+    if _correction_already_applied(db, brand=brand, order_number=order_number):
+        return True
+    existing = (
+        db.query(Transaction.id)
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.transaction_type == CORRECTION_TX_TYPE)
+        .filter(Transaction.payload["sourceSaleTransactionId"].as_string() == str(sale_transaction_uuid))
+        .first()
+    )
+    return existing is not None
+
+
+def _find_sale_transaction(
+    db: Session,
+    *,
+    brand: str,
+    order_number: str | None,
+    sale_transaction_id: str | None = None,
+) -> Transaction | None:
+    if sale_transaction_id:
+        tx = (
+            db.query(Transaction)
+            .filter(Transaction.brand == brand)
+            .filter(Transaction.id == sale_transaction_id)
+            .first()
+        )
+        if tx:
+            return tx
+        tx = (
+            db.query(Transaction)
+            .filter(Transaction.brand == brand)
+            .filter(Transaction.transaction_id == sale_transaction_id)
+            .first()
+        )
+        if tx:
+            return tx
+    if not order_number:
+        return None
+    return (
+        db.query(Transaction)
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.transaction_type.ilike("sale"))
+        .filter(
+            or_(
+                Transaction.payload["orderNumber"].as_string() == order_number,
+                Transaction.payload["order_number"].as_string() == order_number,
+            )
+        )
+        .order_by(Transaction.created_at.desc())
+        .first()
+    )
+
+
+def _point_movements_for_sale_on_customer(
+    db: Session,
+    *,
+    customer_id: UUID,
+    sale_transaction_uuid: UUID,
+) -> list[PointMovement]:
+    return (
+        db.query(PointMovement)
+        .filter(PointMovement.customer_id == customer_id)
+        .filter(PointMovement.source_transaction_id == sale_transaction_uuid)
+        .order_by(PointMovement.created_at.asc())
+        .all()
+    )
+
+
+def _execute_point_transfer(
+    db: Session,
+    *,
+    brand: str,
+    wrong: Customer,
+    target: Customer,
+    amount: int,
+    order_number: str | None,
+    sale_tx: Transaction,
+    earn_expires_at: date | None,
+    note: str,
+    ingest_profile_id: str | None,
+    billing_email: str | None,
+    commit: bool,
+    mode: str,
+) -> bool:
+    if amount <= 0:
+        print(f"Refusing transfer: amount must be positive (got {amount}).")
+        return False
+    if wrong.id == target.id:
+        print("Refusing transfer: source and target customer are the same.")
+        return False
+
+    wrong_before = int(get_status_points_balance(db, wrong.id) or 0)
+    target_before = int(get_status_points_balance(db, target.id) or 0)
+
+    now = datetime.utcnow()
+    corr_tx_id = f"alias_point_correction_{brand}_{order_number or sale_tx.transaction_id}"
+
+    wrong = db.query(Customer).filter(Customer.id == wrong.id).with_for_update().first()
+    target = db.query(Customer).filter(Customer.id == target.id).with_for_update().first()
+    if not wrong or not target:
+        print("Customer introuvable.")
+        return False
+
+    corr_tx = Transaction(
+        transaction_id=corr_tx_id,
+        brand=brand,
+        profile_id=target.profile_id,
+        transaction_type=CORRECTION_TX_TYPE,
+        source="ADMIN_SCRIPT",
+        payload={
+            "orderNumber": order_number,
+            "note": note,
+            "mode": mode,
+            "sourceSaleTransactionId": str(sale_tx.id),
+            "sourceSaleEventId": sale_tx.transaction_id,
+            "fromCustomerId": str(wrong.id),
+            "toCustomerId": str(target.id),
+            "pointsTransferred": amount,
+            "ingestProfileId": ingest_profile_id,
+            "billingEmail": billing_email,
+        },
+        status="PROCESSED",
+        processed_at=now,
+    )
+    db.add(corr_tx)
+    db.flush()
+
+    db.add(
+        PointMovement(
+            customer_id=wrong.id,
+            points=-amount,
+            type="ADJUST",
+            source_transaction_id=corr_tx.id,
+            expires_at=None,
+        )
+    )
+    db.add(
+        PointMovement(
+            customer_id=target.id,
+            points=amount,
+            type="ADJUST",
+            source_transaction_id=corr_tx.id,
+            expires_at=earn_expires_at,
+        )
+    )
+    db.flush()
+
+    wrong.status_points = int(get_status_points_balance(db, wrong.id) or 0)
+    target.status_points = int(get_status_points_balance(db, target.id) or 0)
+
+    update_customer_status(
+        db,
+        wrong,
+        reason="ALIAS_POINT_CORRECTION",
+        source_transaction_id=corr_tx.id,
+        sync_unomi=False,
+    )
+    update_customer_status(
+        db,
+        target,
+        reason="ALIAS_POINT_CORRECTION",
+        source_transaction_id=corr_tx.id,
+        sync_unomi=False,
+    )
+    db.flush()
+
+    wrong_after = wrong.status_points
+    target_after = target.status_points
+
+    print(
+        f"{'Applied' if commit else 'Would apply'} {mode} transfer order={order_number!r}:\n"
+        f"  sale_tx={sale_tx.transaction_id} ({sale_tx.id})\n"
+        f"  source {wrong.profile_id} ({wrong.email}) id={wrong.id}\n"
+        f"    balance: {wrong_before} → {wrong_after} ({-amount})\n"
+        f"  target {target.profile_id} ({target.email}) id={target.id}\n"
+        f"    balance: {target_before} → {target_after} (+{amount})\n"
+        f"  note: {note}"
+    )
+
+    if commit:
+        sync_wrong = sync_customer_profile_to_unomi(
+            db, customer=wrong, reason="alias_point_correction", transport_override="profiles"
+        )
+        sync_target = sync_customer_profile_to_unomi(
+            db, customer=target, reason="alias_point_correction", transport_override="profiles"
+        )
+        print(f"  Unomi sync source ({wrong.profile_id}): {json.dumps(sync_wrong, default=str)}")
+        print(f"  Unomi sync target ({target.profile_id}): {json.dumps(sync_target, default=str)}")
+
+    return True
+
+
+def force_transfer_points(
+    db: Session,
+    *,
+    brand: str,
+    from_customer_id: UUID,
+    to_customer_id: UUID,
+    order_number: str | None,
+    sale_transaction_id: str | None = None,
+    commit: bool,
+) -> bool:
+    """Transfer points tied to a sale transaction, ignoring current profile/email resolution."""
+    sale_tx = _find_sale_transaction(
+        db,
+        brand=brand,
+        order_number=order_number,
+        sale_transaction_id=sale_transaction_id,
+    )
+    if not sale_tx:
+        print(f"Sale transaction not found for order={order_number!r}")
+        return False
+
+    order = _order_number(sale_tx.payload if isinstance(sale_tx.payload, dict) else {}) or order_number
+    if _correction_already_applied_for_sale(
+        db,
+        brand=brand,
+        order_number=order,
+        sale_transaction_uuid=sale_tx.id,
+    ):
+        print(
+            f"Refusing: correction already exists for order={order!r} "
+            f"or sale_tx={sale_tx.id}"
+        )
+        return False
+
+    wrong = db.query(Customer).filter(Customer.id == from_customer_id).first()
+    target = db.query(Customer).filter(Customer.id == to_customer_id).first()
+    if not wrong or not target:
+        print("from-customer or to-customer not found.")
+        return False
+    if wrong.brand != brand or target.brand != brand:
+        print(f"Both customers must belong to brand={brand!r}.")
+        return False
+
+    movements = _point_movements_for_sale_on_customer(
+        db, customer_id=from_customer_id, sale_transaction_uuid=sale_tx.id
+    )
+    net = sum(int(m.points or 0) for m in movements)
+    if net <= 0:
+        print(
+            f"No positive net points on source customer for sale {sale_tx.transaction_id} "
+            f"(net={net}, movements={len(movements)})."
+        )
+        return False
+
+    earn_expires_at = None
+    for m in reversed(movements):
+        if int(m.points or 0) > 0 and m.expires_at:
+            earn_expires_at = m.expires_at
+            break
+
+    payload = sale_tx.payload if isinstance(sale_tx.payload, dict) else {}
+    billing = _extract_email_from_payload(payload, brand=brand)
+    note = _correction_note(order_number=order)
+
+    print(f"\n=== FORCE TRANSFER {'(commit)' if commit else '(dry-run)'} ===")
+    print(f"Sale: {sale_tx.transaction_id} status={sale_tx.status} profile={sale_tx.profile_id}")
+    for m in movements:
+        print(
+            f"  point_movement {m.id}: type={m.type} points={m.points} "
+            f"expires_at={m.expires_at}"
+        )
+    print(f"Net transferable on source: {net}")
+
+    return _execute_point_transfer(
+        db,
+        brand=brand,
+        wrong=wrong,
+        target=target,
+        amount=net,
+        order_number=order,
+        sale_tx=sale_tx,
+        earn_expires_at=earn_expires_at,
+        note=note,
+        ingest_profile_id=sale_tx.profile_id,
+        billing_email=billing,
+        commit=commit,
+        mode="force_transfer",
+    )
+
+
 def _email_domain(email: str | None) -> str | None:
     if not email or "@" not in email:
         return None
@@ -312,7 +608,9 @@ def _build_misattributed_sale(
     points = _net_points_for_transaction(db, customer_id=by_profile.id, transaction_uuid=tx.id)
     if points <= 0:
         return None
-    already = _correction_already_applied(db, brand=tx.brand, order_number=order)
+    already = _correction_already_applied_for_sale(
+        db, brand=tx.brand, order_number=order, sale_transaction_uuid=tx.id
+    )
     return MisattributedSale(
         transaction_id=tx.transaction_id,
         transaction_uuid=tx.id,
@@ -761,6 +1059,7 @@ def _print_audit_report(
 
     print("\n[C] Ventes PROCESSED mais points sur le mauvais customer → correction ADJUST")
     print("    python scripts/repair_session_aliases.py --brand ... --fix-points --order-number ... [--commit]")
+    print("    Si nettoyage alias/email déjà fait: --force-transfer --from-customer ... --to-customer ...")
     if not misattributed:
         print("    (aucune)")
     for item in misattributed:
@@ -800,7 +1099,7 @@ def apply_point_transfer(
         print(
             f"Refusing order={item.order_number!r}: mauvais et bon customer identiques "
             f"({item.wrong_customer_id}). Probable masquage par email écrasé — "
-            f"restaurer customers.email canonique avant --fix-points."
+            f"usez --force-transfer ou restaurez customers.email avant --fix-points."
         )
         return False
 
@@ -808,109 +1107,37 @@ def apply_point_transfer(
         print(f"Skip order={item.order_number!r}: aucun point net sur le mauvais customer.")
         return True
 
-    note = item.correction_note or _correction_note(order_number=item.order_number)
-    amount = int(item.points_on_wrong_customer)
-    now = datetime.utcnow()
-    corr_tx_id = f"alias_point_correction_{brand}_{item.order_number or item.transaction_id}"
-
-    wrong = (
-        db.query(Customer)
-        .filter(Customer.id == item.wrong_customer_id)
-        .with_for_update()
-        .first()
-    )
-    target = (
-        db.query(Customer)
-        .filter(Customer.id == item.target_customer_id)
-        .with_for_update()
-        .first()
-    )
+    wrong = db.query(Customer).filter(Customer.id == item.wrong_customer_id).first()
+    target = db.query(Customer).filter(Customer.id == item.target_customer_id).first()
     if not wrong or not target:
         print(f"Customer introuvable pour order={item.order_number!r}")
         return False
 
-    corr_tx = Transaction(
-        transaction_id=corr_tx_id,
+    sale_tx = (
+        db.query(Transaction)
+        .filter(Transaction.id == item.transaction_uuid)
+        .first()
+    )
+    if not sale_tx:
+        print(f"Sale transaction {item.transaction_uuid} introuvable.")
+        return False
+
+    note = item.correction_note or _correction_note(order_number=item.order_number)
+    return _execute_point_transfer(
+        db,
         brand=brand,
-        profile_id=target.profile_id,
-        transaction_type=CORRECTION_TX_TYPE,
-        source="ADMIN_SCRIPT",
-        payload={
-            "orderNumber": item.order_number,
-            "note": note,
-            "sourceSaleTransactionId": str(item.transaction_uuid),
-            "sourceSaleEventId": item.transaction_id,
-            "fromCustomerId": str(wrong.id),
-            "toCustomerId": str(target.id),
-            "pointsTransferred": amount,
-            "ingestProfileId": item.ingest_profile_id,
-            "billingEmail": item.billing_email,
-        },
-        status="PROCESSED",
-        processed_at=now,
+        wrong=wrong,
+        target=target,
+        amount=int(item.points_on_wrong_customer),
+        order_number=item.order_number,
+        sale_tx=sale_tx,
+        earn_expires_at=item.earn_expires_at,
+        note=note,
+        ingest_profile_id=item.ingest_profile_id,
+        billing_email=item.billing_email,
+        commit=commit,
+        mode="fix_points",
     )
-    db.add(corr_tx)
-    db.flush()
-
-    db.add(
-        PointMovement(
-            customer_id=wrong.id,
-            points=-amount,
-            type="ADJUST",
-            source_transaction_id=corr_tx.id,
-            expires_at=None,
-        )
-    )
-    db.add(
-        PointMovement(
-            customer_id=target.id,
-            points=amount,
-            type="ADJUST",
-            source_transaction_id=corr_tx.id,
-            expires_at=item.earn_expires_at,
-        )
-    )
-    db.flush()
-
-    wrong.status_points = int(get_status_points_balance(db, wrong.id) or 0)
-    target.status_points = int(get_status_points_balance(db, target.id) or 0)
-
-    update_customer_status(
-        db,
-        wrong,
-        reason="ALIAS_POINT_CORRECTION",
-        source_transaction_id=corr_tx.id,
-        sync_unomi=False,
-    )
-    update_customer_status(
-        db,
-        target,
-        reason="ALIAS_POINT_CORRECTION",
-        source_transaction_id=corr_tx.id,
-        sync_unomi=False,
-    )
-    db.flush()
-
-    print(
-        f"{'Applied' if commit else 'Would apply'} transfer order={item.order_number!r}: "
-        f"-{amount} on {wrong.profile_id} ({wrong.email}) → "
-        f"+{amount} on {target.profile_id} ({target.email})\n"
-        f"  note: {note}\n"
-        f"  wrong balance after: {wrong.status_points}\n"
-        f"  target balance after: {target.status_points}"
-    )
-
-    if commit:
-        sync_wrong = sync_customer_profile_to_unomi(
-            db, customer=wrong, reason="alias_point_correction", transport_override="profiles"
-        )
-        sync_target = sync_customer_profile_to_unomi(
-            db, customer=target, reason="alias_point_correction", transport_override="profiles"
-        )
-        print(f"  Unomi sync wrong: {json.dumps(sync_wrong, default=str)}")
-        print(f"  Unomi sync target: {json.dumps(sync_target, default=str)}")
-
-    return True
 
 
 def delete_suspicious_aliases(
@@ -955,6 +1182,26 @@ def main() -> int:
         help="Apply ADJUST point transfers for category [C] sales",
     )
     parser.add_argument(
+        "--force-transfer",
+        action="store_true",
+        help="Explicit point transfer by customer UUID + order (ignores mismatch detection)",
+    )
+    parser.add_argument(
+        "--from-customer",
+        dest="from_customer",
+        help="Source customer UUID (with --force-transfer)",
+    )
+    parser.add_argument(
+        "--to-customer",
+        dest="to_customer",
+        help="Target customer UUID (with --force-transfer)",
+    )
+    parser.add_argument(
+        "--sale-transaction-id",
+        dest="sale_transaction_id",
+        help="Sale transaction UUID or event_id (optional with --force-transfer)",
+    )
+    parser.add_argument(
         "--delete-aliases",
         action="store_true",
         help="Delete category [A] suspicious session aliases",
@@ -986,6 +1233,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.force_transfer:
+        if not args.from_customer or not args.to_customer:
+            parser.error("--force-transfer requires --from-customer and --to-customer")
+        if not args.order_number and not args.sale_transaction_id:
+            parser.error("--force-transfer requires --order-number or --sale-transaction-id")
+
     disposable_domains = DEFAULT_DISPOSABLE_DOMAINS | frozenset(
         (d or "").strip().lower() for d in (args.extra_disposable_domain or []) if d
     )
@@ -1001,6 +1254,38 @@ def main() -> int:
                 json_out=args.json_out,
             )
             return 0
+
+        if args.force_transfer:
+            try:
+                from_id = UUID(args.from_customer)
+                to_id = UUID(args.to_customer)
+            except ValueError:
+                print("Invalid UUID for --from-customer or --to-customer")
+                return 1
+
+            ok = force_transfer_points(
+                db,
+                brand=args.brand,
+                from_customer_id=from_id,
+                to_customer_id=to_id,
+                order_number=args.order_number,
+                sale_transaction_id=args.sale_transaction_id,
+                commit=args.commit,
+            )
+            if args.commit:
+                if ok:
+                    db.commit()
+                    print("\nCommitted.")
+                else:
+                    db.rollback()
+                    print("\nRolled back (transfer refused or failed).")
+                    exit_code = 1
+            else:
+                db.rollback()
+                print("\nRolled back (pass --commit to persist).")
+                if not ok:
+                    exit_code = 1
+            return exit_code
 
         suspicious = audit_suspicious_session_aliases(db, brand=args.brand)
         reprocess, misattributed = audit_sale_transactions(

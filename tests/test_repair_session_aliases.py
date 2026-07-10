@@ -185,3 +185,83 @@ def test_audit_masked_alias_ingest_detected_with_include_masked(monkeypatch):
     assert len(robust) == 1
     assert robust[0].detection == "masked_alias_ingest"
     assert robust[0].email_overwrite_masked is True
+
+
+def test_force_transfer_refuses_when_correction_exists(monkeypatch):
+    db = MagicMock()
+    sale_uuid = uuid.uuid4()
+    monkeypatch.setattr(
+        repair,
+        "_find_sale_transaction",
+        lambda *a, **k: SimpleNamespace(
+            id=sale_uuid,
+            transaction_id="sale-7026",
+            status="PROCESSED",
+            profile_id="alias",
+            payload={"orderNumber": "7026"},
+        ),
+    )
+    monkeypatch.setattr(repair, "_correction_already_applied_for_sale", lambda *a, **k: True)
+
+    ok = repair.force_transfer_points(
+        db,
+        brand="batira",
+        from_customer_id=uuid.uuid4(),
+        to_customer_id=uuid.uuid4(),
+        order_number="7026",
+        commit=False,
+    )
+    assert ok is False
+
+
+def test_force_transfer_uses_net_points_on_source(monkeypatch):
+    db = MagicMock()
+    from_id = uuid.uuid4()
+    to_id = uuid.uuid4()
+    sale_uuid = uuid.uuid4()
+    wrong = SimpleNamespace(id=from_id, brand="batira", profile_id="6b8555e2", email="test@gmail.com")
+    target = SimpleNamespace(id=to_id, brand="batira", profile_id="87a759c2", email="test17@gmail.com")
+    sale_tx = SimpleNamespace(
+        id=sale_uuid,
+        transaction_id="sale-7026",
+        status="PROCESSED",
+        profile_id="87a759c2",
+        payload={"orderNumber": "7026", "billing_email": "test17@gmail.com"},
+    )
+    movement = SimpleNamespace(
+        id=uuid.uuid4(),
+        points=15000,
+        type="EARN",
+        expires_at=date(2027, 7, 9),
+    )
+
+    customer_query = MagicMock()
+    customer_query.filter.return_value = customer_query
+    customer_query.first.side_effect = [wrong, target]
+
+    monkeypatch.setattr(repair, "_find_sale_transaction", lambda *a, **k: sale_tx)
+    monkeypatch.setattr(repair, "_correction_already_applied_for_sale", lambda *a, **k: False)
+    monkeypatch.setattr(repair, "_point_movements_for_sale_on_customer", lambda *a, **k: [movement])
+    monkeypatch.setattr(db, "query", lambda *a, **k: customer_query)
+
+    captured = {}
+
+    def fake_execute(*args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(repair, "_execute_point_transfer", fake_execute)
+
+    ok = repair.force_transfer_points(
+        db,
+        brand="batira",
+        from_customer_id=from_id,
+        to_customer_id=to_id,
+        order_number="7026",
+        commit=False,
+    )
+    assert ok is True
+    assert captured["amount"] == 15000
+    assert captured["mode"] == "force_transfer"
+    assert captured["wrong"] is wrong
+    assert captured["target"] is target
