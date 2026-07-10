@@ -12,6 +12,10 @@ Usage:
 
   # Delete suspicious session aliases listed in audit category A
   python scripts/repair_session_aliases.py --brand batira --delete-aliases --commit
+
+  # Deep analysis: domain triage [C], root-cause buckets [B], masked-email cases (read-only)
+  python scripts/repair_session_aliases.py --brand batira --analyze
+  python scripts/repair_session_aliases.py --brand batira --analyze --json-out audit_analysis.json
 """
 
 from __future__ import annotations
@@ -41,6 +45,25 @@ from app.services.wallet_service import get_status_points_balance
 
 REPROCESS_STATUSES = frozenset({"PROCESSED_ERRORS", "FAILED", "BLOCKED"})
 CORRECTION_TX_TYPE = "ADMIN_ALIAS_POINT_CORRECTION"
+
+# Domains flagged as disposable / abuse — extend via --extra-disposable-domain.
+DEFAULT_DISPOSABLE_DOMAINS = frozenset(
+    {
+        "hacknapp.com",
+        "poisonword.com",
+        "soppat.com",
+        "bmoar.com",
+        "4heats.com",
+        "canvect.com",
+        "mypethealh.com",
+        "tempmail.com",
+        "guerrillamail.com",
+        "mailinator.com",
+        "yopmail.com",
+    }
+)
+
+TEST_EMAIL_LOCAL_PREFIXES = ("test", "demo", "fake", "spam", "abuse")
 
 
 @dataclass
@@ -84,6 +107,22 @@ class MisattributedSale:
     earn_expires_at: date | None
     already_corrected: bool
     correction_note: str | None = None
+    detection: str = "profile_email_mismatch"
+    ingest_is_alias: bool = False
+    email_overwrite_masked: bool = False
+
+
+@dataclass
+class CategoryBInvestigation:
+    transaction_id: str
+    order_number: str | None
+    status: str
+    error_code: str | None
+    profile_id: str
+    billing_email: str | None
+    root_cause: str
+    detail: str
+    recoverable_now: bool
 
 
 def _order_number(payload: dict | None) -> str | None:
@@ -147,6 +186,49 @@ def _correction_already_applied(db: Session, *, brand: str, order_number: str | 
         .first()
     )
     return existing is not None
+
+
+def _email_domain(email: str | None) -> str | None:
+    if not email or "@" not in email:
+        return None
+    return email.strip().lower().split("@", 1)[1]
+
+
+def _classify_billing_email(
+    email: str | None,
+    *,
+    disposable_domains: frozenset[str],
+) -> str:
+    """Return: disposable | test_pattern | likely_real | missing."""
+    if not email:
+        return "missing"
+    domain = _email_domain(email)
+    local = email.strip().lower().split("@", 1)[0]
+    if domain and domain in disposable_domains:
+        return "disposable"
+    if local.startswith(TEST_EMAIL_LOCAL_PREFIXES):
+        return "test_pattern"
+    if domain in {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "live.com", "icloud.com"}:
+        return "likely_real"
+    if domain and "." in domain:
+        return "likely_real"
+    return "missing"
+
+
+def _is_alias_profile_for_customer(
+    db: Session, *, brand: str, customer_id: UUID, profile_id: str
+) -> bool:
+    profile_id = (profile_id or "").strip()
+    if not profile_id:
+        return False
+    row = (
+        db.query(CustomerUnomiProfileAlias.id)
+        .filter(CustomerUnomiProfileAlias.brand == brand)
+        .filter(CustomerUnomiProfileAlias.customer_id == customer_id)
+        .filter(CustomerUnomiProfileAlias.profile_id == profile_id)
+        .first()
+    )
+    return row is not None
 
 
 def _correction_note(*, order_number: str | None, audit_date: date | None = None) -> str:
@@ -214,11 +296,54 @@ def audit_suspicious_session_aliases(db: Session, *, brand: str) -> list[Suspici
     return suspicious
 
 
+def _build_misattributed_sale(
+    db: Session,
+    *,
+    tx: Transaction,
+    by_profile: Customer,
+    by_email: Customer | None,
+    billing: str | None,
+    order: str | None,
+    audit_day: date,
+    detection: str,
+    ingest_is_alias: bool,
+    email_overwrite_masked: bool,
+) -> MisattributedSale | None:
+    points = _net_points_for_transaction(db, customer_id=by_profile.id, transaction_uuid=tx.id)
+    if points <= 0:
+        return None
+    already = _correction_already_applied(db, brand=tx.brand, order_number=order)
+    return MisattributedSale(
+        transaction_id=tx.transaction_id,
+        transaction_uuid=tx.id,
+        order_number=order,
+        status=tx.status,
+        ingest_profile_id=tx.profile_id,
+        billing_email=billing,
+        wrong_customer_id=by_profile.id,
+        wrong_customer_email=(by_profile.email or "").strip().lower() or None,
+        wrong_customer_master=by_profile.profile_id,
+        target_customer_id=by_email.id if by_email else None,
+        target_customer_email=(by_email.email or "").strip().lower() if by_email else billing,
+        target_customer_master=by_email.profile_id if by_email else None,
+        points_on_wrong_customer=points,
+        earn_expires_at=_earn_expires_at_for_transaction(
+            db, customer_id=by_profile.id, transaction_uuid=tx.id
+        ),
+        already_corrected=already,
+        correction_note=_correction_note(order_number=order, audit_date=audit_day),
+        detection=detection,
+        ingest_is_alias=ingest_is_alias,
+        email_overwrite_masked=email_overwrite_masked,
+    )
+
+
 def audit_sale_transactions(
     db: Session,
     *,
     brand: str,
     order_number: str | None = None,
+    include_masked: bool = False,
 ) -> tuple[list[ReprocessCandidate], list[MisattributedSale]]:
     """Categories B (reprocess) and C (PROCESSED mis-attribution needing ADJUST)."""
     q = (
@@ -265,38 +390,340 @@ def audit_sale_transactions(
         if not by_profile or not billing:
             continue
 
-        if by_email and by_email.id == by_profile.id:
+        ingest_is_alias = _is_alias_profile_for_customer(
+            db, brand=brand, customer_id=by_profile.id, profile_id=tx.profile_id
+        )
+        same_customer = bool(by_email and by_email.id == by_profile.id)
+
+        if same_customer and not include_masked:
             continue
 
-        points = _net_points_for_transaction(db, customer_id=by_profile.id, transaction_uuid=tx.id)
-        if points <= 0:
+        if same_customer and include_masked:
+            # Email overwrite masks mismatch: billing matches corrupted customers.email.
+            if not ingest_is_alias:
+                continue
+            item = _build_misattributed_sale(
+                db,
+                tx=tx,
+                by_profile=by_profile,
+                by_email=by_email,
+                billing=billing,
+                order=order,
+                audit_day=audit_day,
+                detection="masked_alias_ingest",
+                ingest_is_alias=True,
+                email_overwrite_masked=True,
+            )
+            if item:
+                misattributed.append(item)
             continue
 
-        already = _correction_already_applied(db, brand=brand, order_number=order)
-        misattributed.append(
-            MisattributedSale(
+        item = _build_misattributed_sale(
+            db,
+            tx=tx,
+            by_profile=by_profile,
+            by_email=by_email,
+            billing=billing,
+            order=order,
+            audit_day=audit_day,
+            detection="profile_email_mismatch",
+            ingest_is_alias=ingest_is_alias,
+            email_overwrite_masked=False,
+        )
+        if item:
+            misattributed.append(item)
+
+    return reprocess, misattributed
+
+
+def investigate_category_b(
+    db: Session,
+    *,
+    brand: str,
+) -> list[CategoryBInvestigation]:
+    """Classify BLOCKED/FAILED/PROCESSED_ERRORS sales (category B) by likely root cause."""
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.brand == brand)
+        .filter(Transaction.transaction_type.ilike("sale"))
+        .filter(Transaction.status.in_(REPROCESS_STATUSES))
+        .order_by(Transaction.created_at.desc())
+        .all()
+    )
+    out: list[CategoryBInvestigation] = []
+
+    for tx in rows:
+        payload = tx.payload if isinstance(tx.payload, dict) else {}
+        billing = _extract_email_from_payload(payload, brand=brand)
+        order = _order_number(payload)
+        by_profile = get_customer(db, brand, tx.profile_id)
+        by_email = _customer_by_email(db, brand=brand, email=billing)
+
+        if tx.error_code == "WRONG_INGESTION_ROUTE":
+            root, detail = "wrong_route", "Not a sale-ingest issue (profile event on /transactions)."
+            recoverable = False
+        elif not billing:
+            root, detail = "no_billing_email", "Sale payload has no billing_email/email — cannot auto-create customer."
+            recoverable = False
+        elif by_profile and by_email and by_profile.id != by_email.id:
+            root, detail = (
+                "profile_email_split",
+                "Profile resolves to one customer, billing email to another (alias/session bug).",
+            )
+            recoverable = True
+        elif by_profile and billing:
+            profile_email = (by_profile.email or "").strip().lower()
+            if profile_email and profile_email != billing:
+                root, detail = (
+                    "profile_email_mismatch_rejected",
+                    "resolve_customer_for_transaction rejects when owner email != billing (post-fix behaviour).",
+                )
+                recoverable = bool(by_email)
+            else:
+                root, detail = "other_blocked", tx.error_message or "See error_message in DB."
+                recoverable = tx.error_code == "CUSTOMER_NOT_FOUND"
+        elif not by_profile and not by_email:
+            root, detail = (
+                "customer_absent",
+                "No customer for profileId or billing email at ingest time.",
+            )
+            recoverable = True
+        elif not by_profile and by_email:
+            root, detail = (
+                "profile_unknown_email_known",
+                "Billing email matches a customer but ingest profileId is unknown.",
+            )
+            recoverable = True
+        else:
+            root, detail = "other", tx.error_message or "Unclassified."
+            recoverable = tx.error_code in {"CUSTOMER_NOT_FOUND", None}
+
+        if tx.error_code == "CUSTOMER_NOT_FOUND" and root == "other":
+            if not billing:
+                root, detail = "no_billing_email", detail
+            elif by_profile and (by_profile.email or "").strip().lower() != billing:
+                root, detail = "profile_email_mismatch_rejected", detail
+
+        out.append(
+            CategoryBInvestigation(
                 transaction_id=tx.transaction_id,
-                transaction_uuid=tx.id,
                 order_number=order,
                 status=tx.status,
-                ingest_profile_id=tx.profile_id,
+                error_code=tx.error_code,
+                profile_id=tx.profile_id,
                 billing_email=billing,
-                wrong_customer_id=by_profile.id,
-                wrong_customer_email=(by_profile.email or "").strip().lower() or None,
-                wrong_customer_master=by_profile.profile_id,
-                target_customer_id=by_email.id if by_email else None,
-                target_customer_email=(by_email.email or "").strip().lower() if by_email else billing,
-                target_customer_master=by_email.profile_id if by_email else None,
-                points_on_wrong_customer=points,
-                earn_expires_at=_earn_expires_at_for_transaction(
-                    db, customer_id=by_profile.id, transaction_uuid=tx.id
-                ),
-                already_corrected=already,
-                correction_note=_correction_note(order_number=order, audit_date=audit_day),
+                root_cause=root,
+                detail=detail,
+                recoverable_now=recoverable,
             )
         )
 
-    return reprocess, misattributed
+    return out
+
+
+def _summarize_category_c_by_domain(
+    items: list[MisattributedSale],
+    *,
+    disposable_domains: frozenset[str],
+) -> dict:
+    by_domain: dict[str, dict] = {}
+    by_class: dict[str, dict] = {
+        "disposable": {"orders": 0, "points": 0, "emails": set()},
+        "test_pattern": {"orders": 0, "points": 0, "emails": set()},
+        "likely_real": {"orders": 0, "points": 0, "emails": set()},
+        "missing": {"orders": 0, "points": 0, "emails": set()},
+    }
+
+    for item in items:
+        email = item.billing_email or item.target_customer_email or ""
+        cls = _classify_billing_email(email, disposable_domains=disposable_domains)
+        domain = _email_domain(email) or "(no-domain)"
+        pts = int(item.points_on_wrong_customer or 0)
+
+        bucket = by_domain.setdefault(
+            domain,
+            {
+                "domain": domain,
+                "classification": cls,
+                "orders": 0,
+                "points": 0,
+                "top_emails": {},
+                "sample_orders": [],
+            },
+        )
+        bucket["orders"] += 1
+        bucket["points"] += pts
+        bucket["top_emails"][email] = bucket["top_emails"].get(email, 0) + pts
+        if item.order_number and len(bucket["sample_orders"]) < 5:
+            bucket["sample_orders"].append(item.order_number)
+
+        by_class[cls]["orders"] += 1
+        by_class[cls]["points"] += pts
+        if email:
+            by_class[cls]["emails"].add(email)
+
+    domain_rows = sorted(by_domain.values(), key=lambda r: r["points"], reverse=True)
+    for row in domain_rows:
+        row["top_emails"] = sorted(
+            [{"email": e, "points": p} for e, p in row["top_emails"].items()],
+            key=lambda x: x["points"],
+            reverse=True,
+        )[:5]
+
+    return {
+        "by_classification": {
+            k: {
+                "orders": v["orders"],
+                "points": v["points"],
+                "unique_emails": len(v["emails"]),
+            }
+            for k, v in by_class.items()
+        },
+        "by_domain": domain_rows,
+        "totals": {
+            "orders": len(items),
+            "points": sum(int(i.points_on_wrong_customer or 0) for i in items),
+        },
+        "likely_real_totals": {
+            "orders": by_class["likely_real"]["orders"],
+            "points": by_class["likely_real"]["points"],
+        },
+        "exclude_disposable_and_test": {
+            "orders": by_class["likely_real"]["orders"] + by_class["missing"]["orders"],
+            "points": by_class["likely_real"]["points"] + by_class["missing"]["points"],
+        },
+    }
+
+
+def _print_analyze_report(
+    *,
+    brand: str,
+    naive_c: list[MisattributedSale],
+    robust_c: list[MisattributedSale],
+    masked_only: list[MisattributedSale],
+    category_b: list[CategoryBInvestigation],
+    domain_summary: dict,
+    order_probe: str | None,
+) -> None:
+    print(f"\n{'=' * 72}")
+    print(f"ANALYSE APPROFONDIE — brand={brand} — {datetime.utcnow().isoformat()}Z")
+    print(f"{'=' * 72}")
+
+    print("\n[C] Résumé par classification email (billing_email du payload — source de vérité)")
+    for cls, stats in domain_summary["by_classification"].items():
+        print(f"  {cls:14} orders={stats['orders']:4}  points={stats['points']:8}  emails={stats['unique_emails']}")
+
+    print(
+        f"\n  TOTAL [C] naive (script actuel):     "
+        f"orders={len(naive_c)}  points={sum(i.points_on_wrong_customer for i in naive_c)}"
+    )
+    print(
+        f"  TOTAL [C] robust (+ alias masqués):  "
+        f"orders={len(robust_c)}  points={sum(i.points_on_wrong_customer for i in robust_c)}"
+    )
+    print(
+        f"  Cas masqués par email écrasé:        "
+        f"orders={len(masked_only)}  points={sum(i.points_on_wrong_customer for i in masked_only)}"
+    )
+    print(
+        f"\n  Points « vrais clients » (hors jetable + test_pattern): "
+        f"orders={domain_summary['exclude_disposable_and_test']['orders']}  "
+        f"points={domain_summary['exclude_disposable_and_test']['points']}"
+    )
+
+    print("\n[C] Top domaines par volume de points (robust)")
+    for row in domain_summary["by_domain"][:20]:
+        print(
+            f"  {row['domain']:28} [{row['classification']:12}] "
+            f"orders={row['orders']:3} points={row['points']:7}  "
+            f"samples={', '.join(row['sample_orders'][:3])}"
+        )
+        for te in row["top_emails"][:2]:
+            print(f"      {te['email']}: {te['points']} pts")
+
+    print("\n[B] CUSTOMER_NOT_FOUND / erreurs — causes racines")
+    buckets: dict[str, list[CategoryBInvestigation]] = {}
+    for item in category_b:
+        buckets.setdefault(item.root_cause, []).append(item)
+
+    for cause, rows in sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True):
+        print(f"  {cause}: {len(rows)}")
+        for sample in rows[:3]:
+            print(
+                f"    order={sample.order_number!r} status={sample.status} "
+                f"error={sample.error_code!r} billing={sample.billing_email!r}"
+            )
+
+    if order_probe:
+        print(f"\n[PROBE] Commande {order_probe}")
+        in_naive = [i for i in naive_c if i.order_number == order_probe]
+        in_robust = [i for i in robust_c if i.order_number == order_probe]
+        print(f"  Dans [C] naive: {bool(in_naive)}")
+        print(f"  Dans [C] robust: {bool(in_robust)}")
+        if in_robust:
+            r = in_robust[0]
+            print(
+                f"  detection={r.detection} masked={r.email_overwrite_masked} "
+                f"alias_ingest={r.ingest_is_alias}\n"
+                f"  wrong={r.wrong_customer_email} target={r.target_customer_email} "
+                f"points={r.points_on_wrong_customer}"
+            )
+        if in_naive and not in_robust:
+            print("  → présent en naive seulement")
+        if in_robust and not in_naive:
+            print("  → DÉTECTÉ UNIQUEMENT en mode robust (email écrasé masque le mismatch)")
+        if not in_naive and not in_robust:
+            print("  → absent des deux: pas PROCESSED+points, ou pas de mismatch détectable")
+
+
+def run_analyze(
+    db: Session,
+    *,
+    brand: str,
+    disposable_domains: frozenset[str],
+    order_probe: str | None,
+    json_out: str | None,
+) -> dict:
+    _, naive_c = audit_sale_transactions(db, brand=brand, include_masked=False)
+    _, robust_c = audit_sale_transactions(db, brand=brand, include_masked=True)
+    naive_ids = {i.transaction_uuid for i in naive_c}
+    masked_only = [i for i in robust_c if i.transaction_uuid not in naive_ids]
+    category_b = investigate_category_b(db, brand=brand)
+    domain_summary = _summarize_category_c_by_domain(robust_c, disposable_domains=disposable_domains)
+
+    _print_analyze_report(
+        brand=brand,
+        naive_c=naive_c,
+        robust_c=robust_c,
+        masked_only=masked_only,
+        category_b=category_b,
+        domain_summary=domain_summary,
+        order_probe=order_probe,
+    )
+
+    payload = {
+        "brand": brand,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "category_c_naive": len(naive_c),
+        "category_c_robust": len(robust_c),
+        "category_c_masked_only": len(masked_only),
+        "domain_summary": domain_summary,
+        "category_b_buckets": {
+            cause: len([x for x in category_b if x.root_cause == cause])
+            for cause in sorted({x.root_cause for x in category_b})
+        },
+        "masked_orders": [
+            {"order": i.order_number, "billing": i.billing_email, "points": i.points_on_wrong_customer}
+            for i in masked_only
+        ],
+    }
+
+    if json_out:
+        with open(json_out, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        print(f"\nJSON écrit: {json_out}")
+
+    return payload
 
 
 def _print_audit_report(
@@ -366,6 +793,14 @@ def apply_point_transfer(
         print(
             f"Refusing order={item.order_number!r}: customer cible absent pour "
             f"{item.target_customer_email!r}. Créez-le via upsert avant --fix-points."
+        )
+        return False
+
+    if item.target_customer_id == item.wrong_customer_id:
+        print(
+            f"Refusing order={item.order_number!r}: mauvais et bon customer identiques "
+            f"({item.wrong_customer_id}). Probable masquage par email écrasé — "
+            f"restaurer customers.email canonique avant --fix-points."
         )
         return False
 
@@ -529,10 +964,44 @@ def main() -> int:
         action="store_true",
         help="Persist changes (default: dry-run / rollback)",
     )
+    parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Read-only deep analysis: domain triage [C], root-cause [B], masked cases",
+    )
+    parser.add_argument(
+        "--json-out",
+        help="Write --analyze results to JSON file",
+    )
+    parser.add_argument(
+        "--probe-order",
+        default="7026",
+        help="Order number to probe in --analyze (default: 7026)",
+    )
+    parser.add_argument(
+        "--extra-disposable-domain",
+        action="append",
+        default=[],
+        help="Additional disposable email domain(s) for --analyze triage",
+    )
     args = parser.parse_args()
+
+    disposable_domains = DEFAULT_DISPOSABLE_DOMAINS | frozenset(
+        (d or "").strip().lower() for d in (args.extra_disposable_domain or []) if d
+    )
 
     exit_code = 0
     with SessionLocal() as db:
+        if args.analyze:
+            run_analyze(
+                db,
+                brand=args.brand,
+                disposable_domains=disposable_domains,
+                order_probe=args.probe_order,
+                json_out=args.json_out,
+            )
+            return 0
+
         suspicious = audit_suspicious_session_aliases(db, brand=args.brand)
         reprocess, misattributed = audit_sale_transactions(
             db, brand=args.brand, order_number=args.order_number

@@ -63,6 +63,7 @@ def test_audit_misattributed_requires_positive_net_points(monkeypatch):
     )
     tx = SimpleNamespace(
         id=tx_uuid,
+        brand="batira",
         transaction_id="sale-7026",
         profile_id="alias-on-wrong",
         status="PROCESSED",
@@ -80,6 +81,7 @@ def test_audit_misattributed_requires_positive_net_points(monkeypatch):
     monkeypatch.setattr(repair, "_net_points_for_transaction", lambda *a, **k: 2)
     monkeypatch.setattr(repair, "_earn_expires_at_for_transaction", lambda *a, **k: date(2027, 1, 1))
     monkeypatch.setattr(repair, "_correction_already_applied", lambda *a, **k: False)
+    monkeypatch.setattr(repair, "_is_alias_profile_for_customer", lambda *a, **k: True)
 
     reprocess, mis = repair.audit_sale_transactions(db, brand="batira", order_number="7026")
     assert reprocess == []
@@ -98,6 +100,7 @@ def test_audit_skips_processed_when_profile_and_email_agree(monkeypatch):
     )
     tx = SimpleNamespace(
         id=uuid.uuid4(),
+        brand="batira",
         transaction_id="sale-1",
         profile_id="master",
         status="PROCESSED",
@@ -116,3 +119,69 @@ def test_audit_skips_processed_when_profile_and_email_agree(monkeypatch):
     reprocess, mis = repair.audit_sale_transactions(db, brand="batira")
     assert reprocess == []
     assert mis == []
+
+
+def test_classify_disposable_domain():
+    cls = repair._classify_billing_email(
+        "nanaco7131@hacknapp.com",
+        disposable_domains=repair.DEFAULT_DISPOSABLE_DOMAINS,
+    )
+    assert cls == "disposable"
+
+
+def test_classify_test_pattern():
+    cls = repair._classify_billing_email(
+        "test17@gmail.com",
+        disposable_domains=repair.DEFAULT_DISPOSABLE_DOMAINS,
+    )
+    assert cls == "test_pattern"
+
+
+def test_classify_likely_real():
+    cls = repair._classify_billing_email(
+        "client@entreprise.fr",
+        disposable_domains=repair.DEFAULT_DISPOSABLE_DOMAINS,
+    )
+    assert cls == "likely_real"
+
+
+def test_audit_masked_alias_ingest_detected_with_include_masked(monkeypatch):
+    """Email overwrite masks mismatch: same customer id, but alias ingest flags robust [C]."""
+    db = MagicMock()
+    customer_id = uuid.uuid4()
+    tx_uuid = uuid.uuid4()
+    customer = SimpleNamespace(
+        id=customer_id,
+        email="test17@gmail.com",
+        profile_id="master-wrong",
+    )
+    tx = SimpleNamespace(
+        id=tx_uuid,
+        brand="batira",
+        transaction_id="sale-7026",
+        profile_id="alias-session",
+        status="PROCESSED",
+        payload={"orderNumber": "7026", "billing_email": "test17@gmail.com"},
+    )
+
+    tx_query = MagicMock()
+    tx_query.filter.return_value = tx_query
+    tx_query.order_by.return_value = tx_query
+    tx_query.all.return_value = [tx]
+    db.query.return_value = tx_query
+
+    monkeypatch.setattr(repair, "get_customer", lambda _db, _brand, _pid: customer)
+    monkeypatch.setattr(repair, "_customer_by_email", lambda _db, *, brand, email: customer)
+    monkeypatch.setattr(repair, "_is_alias_profile_for_customer", lambda *a, **k: True)
+    monkeypatch.setattr(repair, "_net_points_for_transaction", lambda *a, **k: 2)
+    monkeypatch.setattr(repair, "_earn_expires_at_for_transaction", lambda *a, **k: date(2027, 1, 1))
+    monkeypatch.setattr(repair, "_correction_already_applied", lambda *a, **k: False)
+
+    _, naive = repair.audit_sale_transactions(db, brand="batira", order_number="7026")
+    _, robust = repair.audit_sale_transactions(
+        db, brand="batira", order_number="7026", include_masked=True
+    )
+    assert naive == []
+    assert len(robust) == 1
+    assert robust[0].detection == "masked_alias_ingest"
+    assert robust[0].email_overwrite_masked is True
