@@ -466,13 +466,34 @@ from app.services.birthdate_targeting import parse_customer_birthdate_storage
 def apply_customer_identity(
     customer: Customer,
     payload: dict | None,
+    *,
+    caller: str = "unknown",
 ) -> None:
-    """Update loyalty identity fields on an existing customer row."""
+    """Update loyalty identity fields on an existing customer row.
+
+    Email is never silently replaced when the customer already has a different one.
+    """
     if not payload:
         return
 
     if payload.get("email"):
-        customer.email = str(payload["email"]).strip()
+        incoming = str(payload["email"]).strip()
+        existing = (customer.email or "").strip()
+        if existing and existing.lower() != incoming.lower():
+            logger.warning(
+                "identity email change blocked: customer_id=%s brand=%s master_profile_id=%s "
+                "existing_email=%s incoming_email=%s caller=%s",
+                customer.id,
+                customer.brand,
+                customer.profile_id,
+                existing,
+                incoming,
+                caller,
+            )
+        elif not existing:
+            customer.email = incoming
+        elif existing != incoming:
+            customer.email = incoming
 
     if payload.get("gender"):
         customer.gender = _normalize_gender(payload["gender"])
@@ -533,11 +554,11 @@ def resolve_customer_for_upsert(
                 corroborating_email=norm_email,
                 caller="resolve_customer_for_upsert",
             )
-        apply_customer_identity(by_email, identity_payload)
+        apply_customer_identity(by_email, identity_payload, caller="resolve_customer_for_upsert")
         return by_email, False
 
     if by_profile:
-        apply_customer_identity(by_profile, identity_payload)
+        apply_customer_identity(by_profile, identity_payload, caller="resolve_customer_for_upsert")
         return by_profile, False
 
     customer = get_or_create_customer(
@@ -570,6 +591,6 @@ def get_or_create_customer(
         db.flush()
 
     # --- Mise à jour des attributs métier depuis le payload ---
-    apply_customer_identity(customer, payload)
+    apply_customer_identity(customer, payload, caller="get_or_create_customer")
 
     return customer

@@ -98,6 +98,44 @@ def test_register_unomi_profile_alias_noop_when_same_id():
     db.query.assert_not_called()
 
 
+def test_apply_customer_identity_blocks_email_overwrite():
+    from app.services.contact_service import apply_customer_identity
+
+    customer = SimpleNamespace(
+        id="cust-1",
+        brand="batira",
+        profile_id="master-a",
+        email="test@gmail.com",
+    )
+
+    apply_customer_identity(
+        customer,
+        {"email": "test17@gmail.com"},
+        caller="test",
+    )
+
+    assert customer.email == "test@gmail.com"
+
+
+def test_apply_customer_identity_sets_email_when_empty():
+    from app.services.contact_service import apply_customer_identity
+
+    customer = SimpleNamespace(
+        id="cust-1",
+        brand="batira",
+        profile_id="master-a",
+        email=None,
+    )
+
+    apply_customer_identity(
+        customer,
+        {"email": "test17@gmail.com"},
+        caller="test",
+    )
+
+    assert customer.email == "test17@gmail.com"
+
+
 @patch("app.services.contact_service.apply_customer_identity")
 @patch("app.services.contact_service.register_unomi_profile_alias")
 @patch("app.services.contact_service.get_customer")
@@ -142,7 +180,7 @@ def test_resolve_customer_for_upsert_email_wins_over_profile_master(
     assert customer is by_email
     assert is_new is False
     mock_register.assert_called_once()
-    mock_apply_identity.assert_called_once_with(by_email, {"email": "test15@gmail.com"})
+    mock_apply_identity.assert_called_once_with(by_email, {"email": "test15@gmail.com"}, caller="resolve_customer_for_upsert")
 
 
 @patch("app.services.contact_service.get_or_create_customer")
