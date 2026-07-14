@@ -45,6 +45,9 @@ class CustomerOut(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+    # Present when requested CDP profileId differs from loyalty master (GET with email).
+    reconciliation: Optional[Dict[str, Any]] = None
+
     class Config:
         from_attributes = True
 

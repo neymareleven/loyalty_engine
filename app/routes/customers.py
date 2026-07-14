@@ -43,10 +43,47 @@ from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
 from app.services.loyalty_status_service import update_customer_status
+from app.services.profile_reconciliation_service import reconcile_profile_view
 from app.services.wallet_service import get_status_points_balance
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])
+
+
+def _resolve_customer_for_view(
+    db: Session,
+    *,
+    brand: str,
+    profile_id: str,
+    email: str | None = None,
+    sync_unomi: bool = True,
+) -> tuple[Customer, dict | None]:
+    """Resolve customer for profile detail views; reconcile CDP vs loyalty profileIds."""
+    customer, alias_registered = resolve_customer_for_lookup(
+        db,
+        brand=brand,
+        profile_id=profile_id,
+        email=email,
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    reconciliation = reconcile_profile_view(
+        db,
+        brand=brand,
+        requested_profile_id=profile_id,
+        email=email,
+        customer=customer,
+        alias_registered=alias_registered,
+        sync_unomi=sync_unomi,
+    )
+
+    if alias_registered:
+        db.commit()
+        db.refresh(customer)
+
+    recon_dict = reconciliation.to_api_dict() if reconciliation else None
+    return customer, recon_dict
 
 
 def _require_customer(
@@ -124,12 +161,20 @@ def get_customer(
     brand: str,
     profile_id: str,
     email: str | None = None,
+    sync_unomi: bool = True,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
-    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
-    return serialize_customer_out(db, customer=customer, brand=brand)
+    customer, reconciliation = _resolve_customer_for_view(
+        db,
+        brand=brand,
+        profile_id=profile_id,
+        email=email,
+        sync_unomi=sync_unomi,
+    )
+    extra = {"reconciliation": reconciliation} if reconciliation else None
+    return serialize_customer_out(db, customer=customer, brand=brand, extra=extra)
 
 
 @router.post("/upsert", response_model=CustomerUpsertOut)
@@ -492,11 +537,18 @@ def get_customer_loyalty(
     brand: str,
     profile_id: str,
     email: str | None = None,
+    sync_unomi: bool = True,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
-    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
+    customer, reconciliation = _resolve_customer_for_view(
+        db,
+        brand=brand,
+        profile_id=profile_id,
+        email=email,
+        sync_unomi=sync_unomi,
+    )
 
     tiers = (
         db.query(LoyaltyTier)
@@ -565,6 +617,7 @@ def get_customer_loyalty(
     return {
         "brand": brand,
         "profileId": customer.profile_id,
+        "reconciliation": reconciliation,
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": sp,
         "pointsBalance": get_status_points_balance(db, customer.id),

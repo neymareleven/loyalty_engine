@@ -544,9 +544,11 @@ def build_unomi_profile_payload(
     extra_properties: dict[str, Any] | None = None,
     existing_profile: dict[str, Any] | None = None,
     sync_mode: str | None = None,
+    item_id: str | None = None,
 ) -> dict[str, Any]:
     mode = (sync_mode or unomi_profile_sync_mode()).strip().lower()
     set_merge_id = _should_set_merge_identifier()
+    profile_id = (item_id or customer.profile_id or "").strip()
 
     segments = []
     scores: dict[str, Any] = {}
@@ -563,7 +565,7 @@ def build_unomi_profile_payload(
         properties = build_minimal_loyalty_unomi_properties(
             db,
             customer=customer,
-            profile_id=customer.profile_id,
+            profile_id=profile_id,
             include_points_balance=include_points_balance,
         )
         scope_email = None
@@ -586,7 +588,7 @@ def build_unomi_profile_payload(
             customer=customer,
             loyalty_program_properties=loyalty_program,
             extra_properties=extra_properties,
-            profile_id=customer.profile_id,
+            profile_id=profile_id,
         )
         scope_email = properties.get("scopeEmail")
         if isinstance(scope_email, str):
@@ -595,7 +597,7 @@ def build_unomi_profile_payload(
             scope_email = None
 
     body: dict[str, Any] = {
-        "itemId": customer.profile_id,
+        "itemId": profile_id,
         "itemType": "profile",
         "properties": properties,
         "systemProperties": merge_unomi_system_properties(
@@ -719,47 +721,54 @@ def sync_customer_profile_to_unomi(
     reason: str = "update",
     extra_properties: dict[str, Any] | None = None,
     transport_override: str | None = None,
+    target_profile_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Push loyalty customer state to Unomi (best-effort unless UNOMI_PROFILE_SYNC_STRICT=true).
 
     transport_override: force ``profiles`` (save only, no eventcollector) or ``eventcollector``.
     Used after Unomi-initiated upsert to avoid contactInfoSubmitted → loyalty_profile loops.
+    target_profile_id: push to this Unomi itemId (e.g. CDP profile being viewed) instead of master.
     """
     if should_skip_unomi_profile_push():
         return {"skipped": True, "reason": "sync_source_unomi"}
+
+    profile_id = (target_profile_id or customer.profile_id or "").strip()
 
     if not unomi_profile_sync_enabled_for_brand(brand=customer.brand):
         return {
             "synced": False,
             "skipped": True,
             "reason": "profile_sync_disabled",
-            "profileId": customer.profile_id,
+            "profileId": profile_id or customer.profile_id,
         }
+
+    if not profile_id:
+        return {"synced": False, "skipped": True, "reason": "missing_profile_id"}
 
     cfg = resolve_unomi_profile_connection(brand=customer.brand)
     if not cfg:
         logger.warning(
             "unomi profile sync skipped (not configured) brand=%s profile_id=%s reason=%s",
             customer.brand,
-            customer.profile_id,
+            profile_id,
             reason,
         )
         return {
             "synced": False,
             "skipped": True,
             "reason": "profile_sync_not_configured",
-            "profileId": customer.profile_id,
+            "profileId": profile_id,
         }
 
     client = UnomiClient(cfg)
     existing_profile = None
     try:
-        existing_profile = client.get_profile(customer.profile_id)
+        existing_profile = client.get_profile(profile_id)
     except UnomiClientError as e:
         logger.debug(
             "unomi get_profile before sync brand=%s profile_id=%s: %s",
             customer.brand,
-            customer.profile_id,
+            profile_id,
             e,
         )
 
@@ -771,6 +780,7 @@ def sync_customer_profile_to_unomi(
         extra_properties=extra_properties,
         existing_profile=existing_profile,
         sync_mode=sync_mode,
+        item_id=profile_id,
     )
     if sync_mode == "minimal" and _env_bool("UNOMI_PROFILE_SYNC_SKIP_UNCHANGED", default=True):
         if _loyalty_sync_delta_unchanged(
@@ -780,25 +790,23 @@ def sync_customer_profile_to_unomi(
             logger.debug(
                 "unomi profile sync skipped (unchanged) brand=%s profile_id=%s reason=%s",
                 customer.brand,
-                customer.profile_id,
+                profile_id,
                 reason,
             )
             return {
                 "synced": False,
                 "skipped": True,
                 "reason": "unchanged",
-                "profileId": customer.profile_id,
+                "profileId": profile_id,
             }
 
     transport = (transport_override or unomi_profile_sync_transport() or "profiles").strip().lower()
     try:
         if transport == "eventcollector":
-            # Unomi eventcollector alone may assign a random profile UUID.
-            # Ensure stable itemId (= loyalty profile_id) then fire contactInfoSubmitted for CDP rules.
             client.save_profile(body)
             _push_profile_via_eventcollector(
                 client,
-                profile_id=customer.profile_id,
+                profile_id=profile_id,
                 scope=cfg.scope,
                 properties=body.get("properties") or {},
                 brand=customer.brand,
@@ -808,14 +816,14 @@ def sync_customer_profile_to_unomi(
         logger.info(
             "unomi profile sync ok brand=%s profile_id=%s reason=%s transport=%s mode=%s",
             customer.brand,
-            customer.profile_id,
+            profile_id,
             reason,
             transport,
             sync_mode,
         )
         return {
             "synced": True,
-            "profileId": customer.profile_id,
+            "profileId": profile_id,
             "reason": reason,
             "transport": transport,
             "mode": sync_mode,
@@ -824,7 +832,7 @@ def sync_customer_profile_to_unomi(
         logger.warning(
             "unomi profile sync failed brand=%s profile_id=%s reason=%s transport=%s error=%s body=%s",
             customer.brand,
-            customer.profile_id,
+            profile_id,
             reason,
             transport,
             e,
@@ -832,7 +840,7 @@ def sync_customer_profile_to_unomi(
         )
         if _strict_sync_errors():
             raise
-        return {"synced": False, "profileId": customer.profile_id, "error": str(e)}
+        return {"synced": False, "profileId": profile_id, "error": str(e)}
 
 
 def delete_profile_from_unomi(*, brand: str, profile_id: str) -> dict[str, Any] | None:
