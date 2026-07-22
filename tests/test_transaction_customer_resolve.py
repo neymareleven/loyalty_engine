@@ -58,6 +58,7 @@ def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_custom
         brand="batira",
         profile_id="new-unomi-profile-id",
         payload={"email": "new@gmail.com", "orderNumber": "7001"},
+        transaction_type="sale",
     )
 
     assert out is merged_customer
@@ -90,6 +91,7 @@ def test_resolve_transaction_rejects_when_trusted_email_contradicts_profile_owne
         brand="batira",
         profile_id="87a759c2-session",
         payload={"email": "test17@gmail.com", "orderNumber": "7026"},
+        transaction_type="sale",
     )
 
     assert out is None
@@ -105,6 +107,7 @@ def test_retry_ignored_reprocesses_when_customer_now_exists(mock_process):
         error_message="Customer not enrolled",
         brand="batira",
         profile_id="p1",
+        transaction_type="sale",
         payload={"billing_email": "x@y.com"},
         processed_at=None,
     )
@@ -128,6 +131,7 @@ def test_retry_blocked_legacy_reprocesses_when_customer_now_exists(mock_process)
         error_message="Customer not found",
         brand="batira",
         profile_id="p1",
+        transaction_type="sale",
         payload={"billing_email": "x@y.com"},
         processed_at=None,
     )

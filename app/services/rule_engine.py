@@ -776,6 +776,7 @@ def process_transaction_rules(db: Session, transaction):
         brand=transaction.brand,
         profile_id=transaction.profile_id,
         payload=transaction.payload if isinstance(transaction.payload, dict) else None,
+        transaction_type=transaction.transaction_type,
     )
     if not customer:
         raise ValueError("Customer not found. Use /customers/upsert before sending business events.")

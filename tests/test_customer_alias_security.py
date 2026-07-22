@@ -185,6 +185,7 @@ def test_transaction_rejects_profile_owner_with_different_email(mock_get_custome
         brand="batira",
         profile_id="87a759c2-session",
         payload={"email": "test17@gmail.com", "orderNumber": "7026"},
+        transaction_type="sale",
     )
 
     assert out is None
@@ -204,14 +205,15 @@ def test_resolve_transaction_does_not_auto_create_unknown_customer(mock_get_cust
         db,
         brand="batira",
         profile_id="new-unomi-profile-id",
-        payload={"billing_email": "new@gmail.com", "orderNumber": "7001"},
+        payload={"email": "new@gmail.com", "orderNumber": "7001"},
+        transaction_type="sale",
     )
 
     assert out is None
 
 
 @patch("app.services.contact_service.get_customer")
-def test_resolve_transaction_by_profile_id_when_no_trusted_email(mock_get_customer):
+def test_sale_resolves_by_profile_id_without_email_in_payload(mock_get_customer):
     db = MagicMock()
     customer = SimpleNamespace(
         id="cust-1",
@@ -225,7 +227,30 @@ def test_resolve_transaction_by_profile_id_when_no_trusted_email(mock_get_custom
         db,
         brand="batira",
         profile_id="master-profile",
-        payload={"billing_email": "someone-else@example.com", "orderNumber": "1"},
+        payload={"orderNumber": "1"},
+        transaction_type="sale",
+    )
+
+    assert out is customer
+
+
+@patch("app.services.contact_service.get_customer")
+def test_non_sale_ignores_contradictory_email_in_payload(mock_get_customer):
+    db = MagicMock()
+    customer = SimpleNamespace(
+        id="cust-1",
+        brand="batira",
+        profile_id="master-profile",
+        email="user@example.com",
+    )
+    mock_get_customer.return_value = customer
+
+    out = resolve_customer_for_transaction(
+        db,
+        brand="batira",
+        profile_id="master-profile",
+        payload={"email": "other@example.com"},
+        transaction_type="PURCHASE",
     )
 
     assert out is customer

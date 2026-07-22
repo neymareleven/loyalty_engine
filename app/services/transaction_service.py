@@ -135,6 +135,7 @@ def _retry_ignored_unregistered_customer(db: Session, transaction: Transaction) 
         brand=transaction.brand,
         profile_id=transaction.profile_id,
         payload=transaction.payload if isinstance(transaction.payload, dict) else None,
+        transaction_type=transaction.transaction_type,
     )
     if not customer:
         return transaction

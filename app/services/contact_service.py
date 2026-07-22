@@ -396,29 +396,35 @@ def resolve_customer_for_transaction(
     brand: str,
     profile_id: str,
     payload: dict | None,
+    transaction_type: str | None = None,
 ) -> Customer | None:
     """
     Match an enrolled customer for business transactions (brand-scoped).
 
-    Resolution order:
-    1. ``profileId`` (master or alias) + ``brand``
-    2. If trusted ``email`` / ``scopeEmail`` is present, it must match the customer's email
-       (never ``billing_email`` — checkout field, not identity).
-    3. If ``profileId`` is unknown but trusted ``email`` matches an existing customer for this
-       ``brand``, link the incoming profileId as an alias (same as upsert).
+    **All transaction types:** ``profileId`` (master or alias) + ``brand`` is sufficient when
+    the profile resolves to an enrolled customer.
 
-    Email alone never overrides a profileId that resolves to a different enrolled customer.
+    **Sales only** (``transaction_type == sale``):
+    - If trusted ``email`` / ``scopeEmail`` is present, it must match the customer's email.
+    - If ``profileId`` is unknown but trusted email matches, register an alias (session drift).
+
+    Non-sale events often omit email in the payload — email is never required for them and
+    payload email fields are ignored (no false rejections from stale CDP properties).
+    ``billing_email`` is never used for identity.
     """
     profile_id = (profile_id or "").strip()
     brand = (brand or "").strip()
     if not brand or not profile_id:
         return None
 
-    email = _extract_trusted_identity_email_from_payload(payload, brand=brand)
+    is_sale = (transaction_type or "").strip().lower() == "sale"
+    email = (
+        _extract_trusted_identity_email_from_payload(payload, brand=brand) if is_sale else None
+    )
     by_profile = get_customer(db, brand, profile_id)
 
     if by_profile:
-        if email:
+        if is_sale and email:
             profile_email = _customer_email(by_profile)
             if profile_email and profile_email != email:
                 logger.warning(
@@ -433,7 +439,7 @@ def resolve_customer_for_transaction(
                 return None
         return by_profile
 
-    if not email:
+    if not is_sale or not email:
         return None
 
     by_email = (
