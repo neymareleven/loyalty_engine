@@ -415,7 +415,9 @@ def get_brand_kpis(
         db.query(func.count(Transaction.id))
         .filter(Transaction.brand == brand)
         .filter(Transaction.created_at >= window_from)
-        .filter(Transaction.error_code == "CUSTOMER_NOT_FOUND")
+        .filter(
+            Transaction.error_code.in_(["CUSTOMER_NOT_FOUND", "CUSTOMER_NOT_REGISTERED"])
+        )
         .scalar()
         or 0
     )

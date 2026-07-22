@@ -14,6 +14,30 @@ from app.services.payload_schema_service import enrich_payload_schema_on_ingest,
 from app.services.rule_engine import process_transaction_rules
 from app.services.sale_payload_service import normalize_sale_payload
 
+_UNREGISTERED_CUSTOMER_ERROR_CODE = "CUSTOMER_NOT_REGISTERED"
+_UNREGISTERED_CUSTOMER_MESSAGE = (
+    "Customer not enrolled in loyalty program (ignored; register via /customers/upsert)."
+)
+
+
+def _is_unregistered_customer_transaction(transaction: Transaction) -> bool:
+    """True when ingest was skipped because the loyalty customer does not exist yet."""
+    code = transaction.error_code
+    status = (transaction.status or "").upper()
+    if code == _UNREGISTERED_CUSTOMER_ERROR_CODE and status == "IGNORED":
+        return True
+    # Legacy rows before IGNORED status was introduced.
+    if code == "CUSTOMER_NOT_FOUND" and status == "BLOCKED":
+        return True
+    return False
+
+
+def _ignore_unregistered_customer(transaction: Transaction) -> None:
+    transaction.status = "IGNORED"
+    transaction.error_code = _UNREGISTERED_CUSTOMER_ERROR_CODE
+    transaction.error_message = _UNREGISTERED_CUSTOMER_MESSAGE
+    transaction.processed_at = datetime.utcnow()
+
 
 def _infer_json_schema_from_payload(value: Any, *, _depth: int = 0, _max_depth: int = 6) -> dict | None:
     return infer_json_schema_from_payload(value, _depth=_depth, _max_depth=_max_depth)
@@ -101,9 +125,9 @@ def _maybe_normalize_business_payload(*, transaction_type: str, payload: dict | 
     return payload
 
 
-def _retry_blocked_customer_not_found(db: Session, transaction: Transaction) -> Transaction:
-    """Re-process sale if customer was created after a BLOCKED ingest (idempotency + race)."""
-    if transaction.status != "BLOCKED" or transaction.error_code != "CUSTOMER_NOT_FOUND":
+def _retry_ignored_unregistered_customer(db: Session, transaction: Transaction) -> Transaction:
+    """Re-process if customer registered after an ignored ingest (idempotency + race)."""
+    if not _is_unregistered_customer_transaction(transaction):
         return transaction
 
     customer = resolve_customer_for_transaction(
@@ -128,17 +152,19 @@ def _retry_blocked_customer_not_found(db: Session, transaction: Transaction) -> 
     except Exception as e:
         db.rollback()
         msg = str(e)
-        if "Customer not found" in msg:
-            transaction.status = "BLOCKED"
-            transaction.error_code = "CUSTOMER_NOT_FOUND"
-            transaction.error_message = msg
+        if "Customer not found" in msg or "not enrolled" in msg.lower():
+            _ignore_unregistered_customer(transaction)
         else:
             transaction.status = "FAILED"
             transaction.error_message = msg
-        transaction.processed_at = datetime.utcnow()
+            transaction.processed_at = datetime.utcnow()
         db.commit()
 
     return transaction
+
+
+# Backward-compatible alias for tests/scripts.
+_retry_blocked_customer_not_found = _retry_ignored_unregistered_customer
 
 
 def create_transaction(db: Session, event_data):
@@ -157,7 +183,7 @@ def create_transaction(db: Session, event_data):
     )
 
     if existing:
-        return _retry_blocked_customer_not_found(db, existing)
+        return _retry_ignored_unregistered_customer(db, existing)
 
     blocked_customer_profile_event = (event_data.eventType or "").upper() in {
         "CUSTOMER_PROFILE",
@@ -244,26 +270,29 @@ def create_transaction(db: Session, event_data):
             profile_id=transaction.profile_id,
             payload=transaction.payload if isinstance(transaction.payload, dict) else None,
         )
-        if customer:
-            customer.last_activity_at = datetime.utcnow()
+        if not customer:
+            _ignore_unregistered_customer(transaction)
+            db.commit()
+            return transaction
+
+        customer.last_activity_at = datetime.utcnow()
+        db.commit()
+
+        # If tiers are configured after some customers were created, they may still be
+        # marked as UNCONFIGURED. Refresh their tier assignment opportunistically on
+        # any external ingestion, even when no rules matched.
+        if customer.loyalty_status in (None, "UNCONFIGURED"):
+            update_customer_status(
+                db,
+                customer,
+                reason="AUTO_TIER_REFRESH",
+                source_transaction_id=transaction.id,
+                depth=0,
+                refresh_window=True,
+                emit_events=False,
+            )
             db.commit()
 
-            # If tiers are configured after some customers were created, they may still be
-            # marked as UNCONFIGURED. Refresh their tier assignment opportunistically on
-            # any external ingestion, even when no rules matched.
-            if (customer.loyalty_status in (None, "UNCONFIGURED")):
-                update_customer_status(
-                    db,
-                    customer,
-                    reason="AUTO_TIER_REFRESH",
-                    source_transaction_id=transaction.id,
-                    depth=0,
-                    refresh_window=True,
-                    emit_events=False,
-                )
-                db.commit()
-
-    # ⚠️ lancer le moteur seulement si PENDING
     if transaction.status == "PENDING":
         try:
             process_transaction_rules(db, transaction)
@@ -272,14 +301,12 @@ def create_transaction(db: Session, event_data):
         except Exception as e:
             db.rollback()
             msg = str(e)
-            if "Customer not found" in msg:
-                transaction.status = "BLOCKED"
-                transaction.error_code = "CUSTOMER_NOT_FOUND"
-                transaction.error_message = msg
+            if "Customer not found" in msg or "not enrolled" in msg.lower():
+                _ignore_unregistered_customer(transaction)
             else:
                 transaction.status = "FAILED"
                 transaction.error_message = msg
-            transaction.processed_at = datetime.utcnow()
+                transaction.processed_at = datetime.utcnow()
             db.commit()
 
     return transaction

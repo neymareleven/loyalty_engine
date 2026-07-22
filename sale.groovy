@@ -5,6 +5,7 @@ import org.apache.unomi.groovy.actions.GroovyActionDispatcher
 import org.osgi.framework.FrameworkUtil
 import org.apache.http.impl.client.CloseableHttpClient
 import org.apache.http.impl.client.HttpClientBuilder
+import org.apache.http.client.config.RequestConfig
 import org.apache.http.client.methods.HttpPost
 import org.apache.http.entity.StringEntity
 import org.apache.http.util.EntityUtils
@@ -174,7 +175,14 @@ def execute() {
 
     def postSale = {
         String jsonPayload = JsonOutput.toJson(payload)
-        CloseableHttpClient httpClient = HttpClientBuilder.create().build()
+        RequestConfig requestConfig = RequestConfig.custom()
+            .setConnectTimeout(15000)
+            .setConnectionRequestTimeout(15000)
+            .setSocketTimeout(120000)
+            .build()
+        CloseableHttpClient httpClient = HttpClientBuilder.create()
+            .setDefaultRequestConfig(requestConfig)
+            .build()
         try {
             HttpPost req = new HttpPost(endpoint)
             req.setEntity(new StringEntity(jsonPayload, ContentType.APPLICATION_JSON))

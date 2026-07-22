@@ -326,7 +326,13 @@ def test_maybe_sync_after_transaction_calls_sync_for_sale(mock_sync):
         result = maybe_sync_customer_to_unomi_after_transaction(db, customer=customer, transaction=tx)
 
     assert result["synced"] is True
-    mock_sync.assert_called_once()
+    mock_sync.assert_called_once_with(
+        db,
+        customer=customer,
+        reason="transaction_processed",
+        transport_override="profiles",
+        raise_on_error=False,
+    )
 
 
 @patch("app.services.unomi_profile_service.sync_customer_profile_to_unomi")

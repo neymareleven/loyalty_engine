@@ -5,9 +5,13 @@ from unittest.mock import MagicMock, patch
 
 from app.services.contact_service import (
     _extract_email_from_payload,
+    _extract_trusted_identity_email_from_payload,
     resolve_customer_for_transaction,
 )
-from app.services.transaction_service import _retry_blocked_customer_not_found
+from app.services.transaction_service import (
+    _ignore_unregistered_customer,
+    _retry_ignored_unregistered_customer,
+)
 
 
 def test_extract_email_from_billing_and_scope():
@@ -15,6 +19,20 @@ def test_extract_email_from_billing_and_scope():
     assert (
         _extract_email_from_payload({"scopeEmail": "batira-new@gmail.com"}, brand="batira")
         == "new@gmail.com"
+    )
+
+
+def test_trusted_identity_email_ignores_billing():
+    assert _extract_trusted_identity_email_from_payload({"billing_email": "A@B.com"}, brand="batira") is None
+    assert (
+        _extract_trusted_identity_email_from_payload({"email": "user@example.com"}, brand="batira")
+        == "user@example.com"
+    )
+    assert (
+        _extract_trusted_identity_email_from_payload(
+            {"scopeEmail": "batira-user@example.com"}, brand="batira"
+        )
+        == "user@example.com"
     )
 
 
@@ -39,7 +57,7 @@ def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_custom
         db,
         brand="batira",
         profile_id="new-unomi-profile-id",
-        payload={"billing_email": "new@gmail.com", "orderNumber": "7001"},
+        payload={"email": "new@gmail.com", "orderNumber": "7001"},
     )
 
     assert out is merged_customer
@@ -49,14 +67,10 @@ def test_resolve_links_customer_by_email_when_profile_id_changed(mock_get_custom
 
 @patch("app.services.contact_service.register_unomi_profile_alias")
 @patch("app.services.contact_service.get_customer")
-def test_resolve_transaction_email_wins_over_different_profile_master(mock_get_customer, mock_register):
+def test_resolve_transaction_rejects_when_trusted_email_contradicts_profile_owner(
+    mock_get_customer, mock_register
+):
     db = MagicMock()
-    master = SimpleNamespace(
-        id="cust-master",
-        brand="batira",
-        profile_id="6b8555e2-master",
-        email="test17@gmail.com",
-    )
     orphan = SimpleNamespace(
         id="cust-orphan",
         brand="batira",
@@ -71,24 +85,42 @@ def test_resolve_transaction_email_wins_over_different_profile_master(mock_get_c
 
     mock_get_customer.side_effect = get_customer_side_effect
 
-    email_query = MagicMock()
-    email_query.filter.return_value = email_query
-    email_query.first.return_value = master
-    db.query.return_value = email_query
-
     out = resolve_customer_for_transaction(
         db,
         brand="batira",
         profile_id="87a759c2-session",
-        payload={"billing_email": "test17@gmail.com", "orderNumber": "7026"},
+        payload={"email": "test17@gmail.com", "orderNumber": "7026"},
     )
 
-    assert out is master
-    mock_register.assert_called_once()
+    assert out is None
+    mock_register.assert_not_called()
 
 
 @patch("app.services.transaction_service.process_transaction_rules")
-def test_retry_blocked_reprocesses_when_customer_now_exists(mock_process):
+def test_retry_ignored_reprocesses_when_customer_now_exists(mock_process):
+    db = MagicMock()
+    tx = SimpleNamespace(
+        status="IGNORED",
+        error_code="CUSTOMER_NOT_REGISTERED",
+        error_message="Customer not enrolled",
+        brand="batira",
+        profile_id="p1",
+        payload={"billing_email": "x@y.com"},
+        processed_at=None,
+    )
+
+    with patch(
+        "app.services.transaction_service.resolve_customer_for_transaction",
+        return_value=SimpleNamespace(id="cust-1"),
+    ):
+        result = _retry_ignored_unregistered_customer(db, tx)
+
+    assert result.status == "PENDING"
+    mock_process.assert_called_once()
+
+
+@patch("app.services.transaction_service.process_transaction_rules")
+def test_retry_blocked_legacy_reprocesses_when_customer_now_exists(mock_process):
     db = MagicMock()
     tx = SimpleNamespace(
         status="BLOCKED",
@@ -98,14 +130,21 @@ def test_retry_blocked_reprocesses_when_customer_now_exists(mock_process):
         profile_id="p1",
         payload={"billing_email": "x@y.com"},
         processed_at=None,
-        error_code_set=None,
     )
 
     with patch(
         "app.services.transaction_service.resolve_customer_for_transaction",
         return_value=SimpleNamespace(id="cust-1"),
     ):
-        result = _retry_blocked_customer_not_found(db, tx)
+        result = _retry_ignored_unregistered_customer(db, tx)
 
     assert result.status == "PENDING"
     mock_process.assert_called_once()
+
+
+def test_ignore_unregistered_customer_sets_status():
+    tx = SimpleNamespace(status="PENDING", error_code=None, error_message=None, processed_at=None)
+    _ignore_unregistered_customer(tx)
+    assert tx.status == "IGNORED"
+    assert tx.error_code == "CUSTOMER_NOT_REGISTERED"
+    assert tx.processed_at is not None

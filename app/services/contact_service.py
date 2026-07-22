@@ -273,7 +273,6 @@ def customer_transaction_filters(db: Session, *, brand: str, customer: Customer)
         clauses.extend(
             [
                 func.lower(Transaction.payload["email"].as_string()) == email,
-                func.lower(Transaction.payload["billing_email"].as_string()) == email,
                 func.lower(Transaction.payload["scopeEmail"].as_string()) == scope_email,
             ]
         )
@@ -357,20 +356,37 @@ def resolve_customer_for_lookup(
     return None, False
 
 
-def _extract_email_from_payload(payload: dict | None, *, brand: str) -> str | None:
-    """WooCommerce / Unomi sale payloads — billing_email, email, scopeEmail."""
+def _extract_trusted_identity_email_from_payload(payload: dict | None, *, brand: str) -> str | None:
+    """Identity email for transaction matching — not billing/checkout fields.
+
+    Uses only loyalty-trusted keys: ``email`` and brand-scoped ``scopeEmail``.
+    ``billing_email`` and similar checkout fields are intentionally ignored.
+    """
     if not isinstance(payload, dict):
         return None
-    for key in ("billing_email", "email", "recipientEmail", "billingEmail"):
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip() and "@" in val:
-            return val.strip().lower()
+    val = payload.get("email")
+    if isinstance(val, str) and val.strip() and "@" in val:
+        return val.strip().lower()
     scope = payload.get("scopeEmail")
     if isinstance(scope, str) and scope.strip():
         prefix = f"{brand}-".lower()
         raw = scope.strip()
         if raw.lower().startswith(prefix) and "@" in raw:
             return raw[len(prefix) :].strip().lower()
+    return None
+
+
+def _extract_email_from_payload(payload: dict | None, *, brand: str) -> str | None:
+    """Broad email extraction (repair scripts / diagnostics). Includes billing fields."""
+    if not isinstance(payload, dict):
+        return None
+    trusted = _extract_trusted_identity_email_from_payload(payload, brand=brand)
+    if trusted:
+        return trusted
+    for key in ("billing_email", "recipientEmail", "billingEmail"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip() and "@" in val:
+            return val.strip().lower()
     return None
 
 
@@ -382,38 +398,24 @@ def resolve_customer_for_transaction(
     payload: dict | None,
 ) -> Customer | None:
     """
-    Match customer for sale/business events.
+    Match an enrolled customer for business transactions (brand-scoped).
 
-    Email wins over profileId (same as upsert): Unomi sale.groovy may send the newest
-    CDP profileId while Loyalty keeps the oldest master. Points always attach to the
-    email-matched customer; incoming profileId is registered as alias when safe.
+    Resolution order:
+    1. ``profileId`` (master or alias) + ``brand``
+    2. If trusted ``email`` / ``scopeEmail`` is present, it must match the customer's email
+       (never ``billing_email`` — checkout field, not identity).
+    3. If ``profileId`` is unknown but trusted ``email`` matches an existing customer for this
+       ``brand``, link the incoming profileId as an alias (same as upsert).
+
+    Email alone never overrides a profileId that resolves to a different enrolled customer.
     """
     profile_id = (profile_id or "").strip()
-    email = _extract_email_from_payload(payload, brand=brand)
+    brand = (brand or "").strip()
+    if not brand or not profile_id:
+        return None
 
-    by_email = None
-    if email:
-        by_email = (
-            db.query(Customer)
-            .filter(Customer.brand == brand)
-            .filter(func.lower(Customer.email) == email)
-            .first()
-        )
-
+    email = _extract_trusted_identity_email_from_payload(payload, brand=brand)
     by_profile = get_customer(db, brand, profile_id)
-
-    if by_email:
-        if by_email.profile_id != profile_id:
-            register_unomi_profile_alias(
-                db,
-                brand=brand,
-                customer=by_email,
-                incoming_profile_id=profile_id,
-                source="session",
-                corroborating_email=email,
-                caller="resolve_customer_for_transaction",
-            )
-        return by_email
 
     if by_profile:
         if email:
@@ -431,15 +433,29 @@ def resolve_customer_for_transaction(
                 return None
         return by_profile
 
-    if email:
-        return get_or_create_customer(
-            db,
-            brand,
-            profile_id,
-            payload={"email": email},
-        )
+    if not email:
+        return None
 
-    return None
+    by_email = (
+        db.query(Customer)
+        .filter(Customer.brand == brand)
+        .filter(func.lower(Customer.email) == email)
+        .first()
+    )
+    if not by_email:
+        return None
+
+    if by_email.profile_id != profile_id:
+        register_unomi_profile_alias(
+            db,
+            brand=brand,
+            customer=by_email,
+            incoming_profile_id=profile_id,
+            source="session",
+            corroborating_email=email,
+            caller="resolve_customer_for_transaction",
+        )
+    return by_email
 
 
 def _normalize_gender(value: str) -> str:

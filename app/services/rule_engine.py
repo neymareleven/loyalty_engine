@@ -770,7 +770,7 @@ def process_transaction_rules(db: Session, transaction):
     Exécute les règles applicables à une transaction PENDING
     """
 
-    # Match by profileId; for Unomi sales also fall back to billing email / auto-create.
+    # Match existing loyalty customers only (no auto-registration on ingest).
     customer = resolve_customer_for_transaction(
         db,
         brand=transaction.brand,
@@ -890,7 +890,15 @@ def process_transaction_rules(db: Session, transaction):
     if transaction.status == "PROCESSED":
         from app.services.unomi_profile_service import maybe_sync_customer_to_unomi_after_transaction
 
-        maybe_sync_customer_to_unomi_after_transaction(db, customer=customer, transaction=transaction)
+        try:
+            maybe_sync_customer_to_unomi_after_transaction(db, customer=customer, transaction=transaction)
+        except Exception as e:
+            logger.warning(
+                "post-transaction Unomi sync failed (transaction kept PROCESSED) brand=%s tx=%s: %s",
+                transaction.brand,
+                transaction.id,
+                e,
+            )
 
     if not had_rule_failures and (transaction.transaction_type or "").lower() == "sale" and points_earned_total <= 0:
         if had_matching_rule and not transaction.error_code:

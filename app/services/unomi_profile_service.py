@@ -126,6 +126,7 @@ def maybe_sync_customer_to_unomi_after_transaction(
         customer=customer,
         reason="transaction_processed",
         transport_override=transport_override,
+        raise_on_error=False,
     )
 
 
@@ -722,6 +723,7 @@ def sync_customer_profile_to_unomi(
     extra_properties: dict[str, Any] | None = None,
     transport_override: str | None = None,
     target_profile_id: str | None = None,
+    raise_on_error: bool | None = None,
 ) -> dict[str, Any] | None:
     """Push loyalty customer state to Unomi (best-effort unless UNOMI_PROFILE_SYNC_STRICT=true).
 
@@ -760,17 +762,21 @@ def sync_customer_profile_to_unomi(
             "profileId": profile_id,
         }
 
+    strict_errors = _strict_sync_errors() if raise_on_error is None else raise_on_error
+
     client = UnomiClient(cfg)
     existing_profile = None
-    try:
-        existing_profile = client.get_profile(profile_id)
-    except UnomiClientError as e:
-        logger.debug(
-            "unomi get_profile before sync brand=%s profile_id=%s: %s",
-            customer.brand,
-            profile_id,
-            e,
-        )
+    # After a sale, loyalty fields almost always change — skip ES read to halve latency/timeouts.
+    if reason != "transaction_processed":
+        try:
+            existing_profile = client.get_profile(profile_id)
+        except UnomiClientError as e:
+            logger.debug(
+                "unomi get_profile before sync brand=%s profile_id=%s: %s",
+                customer.brand,
+                profile_id,
+                e,
+            )
 
     sync_mode = unomi_profile_sync_mode(reason=reason)
     body = build_unomi_profile_payload(
@@ -838,7 +844,7 @@ def sync_customer_profile_to_unomi(
             e,
             (e.body or "")[:500],
         )
-        if _strict_sync_errors():
+        if strict_errors:
             raise
         return {"synced": False, "profileId": profile_id, "error": str(e)}
 

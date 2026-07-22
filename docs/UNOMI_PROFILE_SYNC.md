@@ -12,7 +12,9 @@ Indépendant du mode de segmentation (`INTERNAL` / `UNOMI`). Dès que `UNOMI_BAS
 | `UNOMI_PROFILE_SYNC` | `false` | Mettre `true` pour réactiver le push fidélité → Unomi |
 | `UNOMI_PROFILE_SYNC_DISABLED` | — | Liste de marques exclues (`batira,qilinsa`) |
 | `UNOMI_PROFILE_SYNC_BRANDS` | — | Opt-in (sinon toutes les marques avec credentials) |
-| `UNOMI_PROFILE_SYNC_STRICT` | `false` | Si `true`, une erreur Unomi fait échouer l’opération loyalty |
+| `UNOMI_PROFILE_SYNC_STRICT` | `false` | Si `true`, une erreur Unomi fait échouer l’opération loyalty (upsert, admin, etc.) — **pas** les ventes déjà traitées |
+| `UNOMI_HTTP_TIMEOUT_SEC` | `30` | Timeout lecture HTTP vers Unomi |
+| `UNOMI_HTTP_RETRIES` | `2` | Nouvelles tentatives sur timeout réseau (backoff court) |
 | `UNOMI_PROFILE_SYNC_MODE` | `minimal` | `minimal` = push **uniquement** champs fidélité (ne réécrit pas `scopeEmail` / `mergeIdentifier`). `full` = comportement legacy |
 | `UNOMI_PROFILE_SYNC_SET_MERGE_IDENTIFIER` | `false` | Ne pas alimenter `systemProperties.mergeIdentifier` (la règle Unomi `mergeProfilesOnEmail` le gère déjà) |
 | `UNOMI_PROFILE_SYNC_SKIP_UNCHANGED` | `true` | Skip push si `statusPoints` / `loyaltyStatus` inchangés sur Unomi |

@@ -4,12 +4,38 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from app.services.unomi_settings_service import UnomiConnectionConfig
+
+
+def _default_timeout_sec() -> float:
+    raw = (os.getenv("UNOMI_HTTP_TIMEOUT_SEC") or "30").strip()
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 30.0
+
+
+def _default_retries() -> int:
+    raw = (os.getenv("UNOMI_HTTP_RETRIES") or "2").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 2
+
+
+def _is_transient_url_error(e: URLError) -> bool:
+    msg = str(e).lower()
+    reason = getattr(e, "reason", None)
+    if reason is not None:
+        msg = f"{msg} {reason}".lower()
+    return "timed out" in msg or "timeout" in msg or "temporary failure" in msg
 
 
 class UnomiClientError(Exception):
@@ -20,9 +46,16 @@ class UnomiClientError(Exception):
 
 
 class UnomiClient:
-    def __init__(self, config: UnomiConnectionConfig, *, timeout_sec: float = 30.0):
+    def __init__(
+        self,
+        config: UnomiConnectionConfig,
+        *,
+        timeout_sec: float | None = None,
+        max_retries: int | None = None,
+    ):
         self._config = config
-        self._timeout = timeout_sec
+        self._timeout = timeout_sec if timeout_sec is not None else _default_timeout_sec()
+        self._max_retries = max_retries if max_retries is not None else _default_retries()
         self._api_root = f"{config.base_url}/cxs"
 
     def _auth_header(self) -> str:
@@ -55,25 +88,38 @@ class UnomiClient:
             headers["Content-Type"] = "application/json"
 
         req = Request(url, data=data, headers=headers, method=method.upper())
-        try:
-            with urlopen(req, timeout=self._timeout) as resp:
-                raw = resp.read().decode("utf-8")
-                if not raw.strip():
-                    return None
-                return json.loads(raw)
-        except HTTPError as e:
-            body = ""
+        last_url_error: URLError | None = None
+        attempts = 1 + self._max_retries
+        for attempt in range(attempts):
             try:
-                body = e.read().decode("utf-8")
-            except Exception:
-                pass
+                with urlopen(req, timeout=self._timeout) as resp:
+                    raw = resp.read().decode("utf-8")
+                    if not raw.strip():
+                        return None
+                    return json.loads(raw)
+            except HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8")
+                except Exception:
+                    pass
+                raise UnomiClientError(
+                    f"Unomi HTTP {e.code} for {method} {path}",
+                    status_code=e.code,
+                    body=body,
+                ) from e
+            except URLError as e:
+                last_url_error = e
+                if attempt + 1 < attempts and _is_transient_url_error(e):
+                    time.sleep(min(0.25 * (2**attempt), 2.0))
+                    continue
+                raise UnomiClientError(f"Unomi connection failed for {method} {path}: {e}") from e
+
+        if last_url_error is not None:
             raise UnomiClientError(
-                f"Unomi HTTP {e.code} for {method} {path}",
-                status_code=e.code,
-                body=body,
-            ) from e
-        except URLError as e:
-            raise UnomiClientError(f"Unomi connection failed for {method} {path}: {e}") from e
+                f"Unomi connection failed for {method} {path}: {last_url_error}"
+            ) from last_url_error
+        return None
 
     def list_segment_metadata(self, *, offset: int = 0, size: int = 200) -> list[dict]:
         items = self.request("GET", "/segments/", query=f"offset={offset}&size={size}")
