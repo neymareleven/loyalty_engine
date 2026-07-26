@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -17,6 +20,31 @@ from app.services.segment_condition_unomi import (
 )
 from app.services.unomi_client import UnomiClient, UnomiClientError
 from app.services.unomi_settings_service import UnomiConnectionConfig, resolve_unomi_connection
+
+
+def _list_sync_timeout_sec() -> float:
+    raw = (os.getenv("UNOMI_SEGMENT_LIST_SYNC_TIMEOUT_SEC") or "20").strip()
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 20.0
+
+
+def _list_sync_max_pages() -> int:
+    raw = (os.getenv("UNOMI_SEGMENT_LIST_SYNC_MAX_PAGES") or "50").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 50
+
+
+@dataclass
+class UnomiSegmentSyncResult:
+    segments: list[Segment]
+    status: str  # ok | partial | metadata_only
+    fetched_definitions: int
+    total_in_scope: int
+    detail: str | None = None
 
 
 def _slug_segment_id(brand: str, name: str) -> str:
@@ -158,9 +186,15 @@ def _manual_profile_ids_from_unomi_condition(condition: dict[str, Any] | None) -
     return sorted({x for x in out if x})
 
 
-def _fetch_unomi_segment_definition(cfg: UnomiConnectionConfig, unomi_id: str) -> dict[str, Any] | None:
+def _fetch_unomi_segment_definition(
+    cfg: UnomiConnectionConfig,
+    unomi_id: str,
+    *,
+    timeout_sec: float | None = None,
+) -> dict[str, Any] | None:
     """Thread-safe: one client per fetch (UnomiClient is stateless)."""
-    client = UnomiClient(cfg)
+    per_call_timeout = timeout_sec if timeout_sec is not None else min(_list_sync_timeout_sec(), 15.0)
+    client = UnomiClient(cfg, timeout_sec=per_call_timeout)
     try:
         full = client.get_segment(unomi_id)
     except UnomiClientError:
@@ -168,107 +202,66 @@ def _fetch_unomi_segment_definition(cfg: UnomiConnectionConfig, unomi_id: str) -
     return full if isinstance(full, dict) else None
 
 
-def sync_unomi_scope_segments_to_registry(
+def _metadata_fields(metadata: dict[str, Any], *, unomi_id: str) -> tuple[str, str | None, bool]:
+    name = str(metadata.get("name") or unomi_id).strip() or unomi_id
+    description = str(metadata.get("description") or "").strip() or None
+    active_raw = metadata.get("enabled", True)
+    active = bool(active_raw) if active_raw is not None else True
+    return name, description, active
+
+
+def _upsert_segment_from_unomi(
     db: Session,
     *,
     brand: str,
-    keep_orphans: bool = True,
-    max_workers: int = 8,
-) -> list[Segment]:
-    """Sync local segment registry from Unomi scope (source of truth in UNOMI mode)."""
-    client = get_unomi_client(db, brand=brand)
-    cfg = resolve_unomi_connection(brand=brand)
-    if not client or not cfg:
-        raise ValueError("Unomi is not configured for this brand")
-
-    target_scope = (cfg.scope or brand).strip()
-    local_by_unomi_id = {
-        (seg.unomi_segment_id or "").strip(): seg
-        for seg in db.query(Segment).filter(Segment.brand == brand).filter(Segment.provider == "UNOMI").all()
-        if (seg.unomi_segment_id or "").strip()
-    }
-
-    scoped_meta: list[tuple[str, dict[str, Any]]] = []
-    offset = 0
-    size = 200
-    while True:
-        page = client.list_segment_metadata(offset=offset, size=size)
-        if not page:
-            break
-        for item in page:
-            if not isinstance(item, dict):
-                continue
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else item
-            if not isinstance(metadata, dict):
-                continue
-            unomi_id = str(metadata.get("id") or item.get("id") or "").strip()
-            if not unomi_id:
-                continue
-            scope = str(metadata.get("scope") or "").strip()
-            if scope != target_scope:
-                continue
-            scoped_meta.append((unomi_id, metadata))
-        if len(page) < size:
-            break
-        offset += size
-
-    full_by_id: dict[str, dict[str, Any]] = {}
-    workers = max(1, min(max_workers, len(scoped_meta) or 1))
-    if scoped_meta:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_fetch_unomi_segment_definition, cfg, unomi_id): unomi_id
-                for unomi_id, _ in scoped_meta
-            }
-            for fut in as_completed(futures):
-                unomi_id = futures[fut]
-                full = fut.result()
-                if full:
-                    full_by_id[unomi_id] = full
-
-    synced_ids: set[str] = set()
-    synced_rows: list[Segment] = []
-
-    for unomi_id, metadata in scoped_meta:
-        full = full_by_id.get(unomi_id)
-        if not full:
-            continue
+    target_scope: str,
+    unomi_id: str,
+    metadata: dict[str, Any],
+    full: dict[str, Any] | None,
+    local_by_unomi_id: dict[str, Segment],
+) -> Segment:
+    full_meta = None
+    condition = None
+    if full:
         full_meta = full.get("metadata") if isinstance(full.get("metadata"), dict) else metadata
         condition = full.get("condition") if isinstance(full.get("condition"), dict) else None
+    else:
+        full_meta = metadata
 
-        name = str((full_meta or {}).get("name") or metadata.get("name") or unomi_id).strip() or unomi_id
-        description = str((full_meta or {}).get("description") or metadata.get("description") or "").strip() or None
-        active_raw = (full_meta or {}).get("enabled", metadata.get("enabled", True))
-        active = bool(active_raw) if active_raw is not None else True
+    name, description, active = _metadata_fields(full_meta or metadata, unomi_id=unomi_id)
 
-        existing = local_by_unomi_id.get(unomi_id)
-        manual_ids = _manual_profile_ids_from_unomi_condition(condition)
-        is_manual = manual_ids is not None
-        loyalty_conditions = None
-        if not is_manual and condition:
+    existing = local_by_unomi_id.get(unomi_id)
+    manual_ids = _manual_profile_ids_from_unomi_condition(condition) if condition else None
+    is_manual = manual_ids is not None
+    loyalty_conditions = None
+    if condition and not is_manual:
+        try:
             loyalty_conditions = unomi_condition_to_loyalty_ast(condition)
+        except Exception:
+            loyalty_conditions = None
 
-        if existing is None:
-            existing = Segment(
-                brand=brand,
-                name=name,
-                description=description,
-                is_dynamic=not is_manual,
-                conditions=loyalty_conditions,
-                active=active,
-                provider="UNOMI",
-                unomi_segment_id=unomi_id,
-                unomi_scope=scope,
-                manual_profile_ids=manual_ids or None,
-                unomi_condition=condition,
-            )
-            db.add(existing)
-            local_by_unomi_id[unomi_id] = existing
-        else:
-            existing.name = name
-            existing.description = description
-            existing.unomi_scope = scope
-            existing.active = active
+    if existing is None:
+        existing = Segment(
+            brand=brand,
+            name=name,
+            description=description,
+            is_dynamic=not is_manual if condition else True,
+            conditions=loyalty_conditions,
+            active=active,
+            provider="UNOMI",
+            unomi_segment_id=unomi_id,
+            unomi_scope=target_scope,
+            manual_profile_ids=manual_ids or None,
+            unomi_condition=condition,
+        )
+        db.add(existing)
+        local_by_unomi_id[unomi_id] = existing
+    else:
+        existing.name = name
+        existing.description = description
+        existing.unomi_scope = target_scope
+        existing.active = active
+        if condition is not None:
             existing.unomi_condition = condition
             if is_manual:
                 existing.is_dynamic = False
@@ -280,6 +273,111 @@ def sync_unomi_scope_segments_to_registry(
                 if existing.conditions is None and loyalty_conditions is not None:
                     existing.conditions = loyalty_conditions
 
+    return existing
+
+
+def sync_unomi_scope_segments_to_registry(
+    db: Session,
+    *,
+    brand: str,
+    keep_orphans: bool = True,
+    max_workers: int = 8,
+    fetch_definitions: bool = True,
+    timeout_sec: float | None = None,
+    max_pages: int | None = None,
+) -> UnomiSegmentSyncResult:
+    """Sync local segment registry from Unomi scope (source of truth in UNOMI mode)."""
+    client = get_unomi_client(db, brand=brand)
+    cfg = resolve_unomi_connection(brand=brand)
+    if not client or not cfg:
+        raise ValueError("Unomi is not configured for this brand")
+
+    budget = timeout_sec if timeout_sec is not None else _list_sync_timeout_sec()
+    page_limit = max_pages if max_pages is not None else _list_sync_max_pages()
+    started = time.monotonic()
+
+    target_scope = (cfg.scope or brand).strip()
+    local_by_unomi_id = {
+        (seg.unomi_segment_id or "").strip(): seg
+        for seg in db.query(Segment).filter(Segment.brand == brand).filter(Segment.provider == "UNOMI").all()
+        if (seg.unomi_segment_id or "").strip()
+    }
+
+    scoped_meta: list[tuple[str, dict[str, Any]]] = []
+    offset = 0
+    size = 200
+    pages = 0
+    while pages < page_limit:
+        if time.monotonic() - started >= budget:
+            break
+        page = client.list_segment_metadata(offset=offset, size=size)
+        pages += 1
+        if not page:
+            break
+        for item in page:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else item
+            if not isinstance(metadata, dict):
+                continue
+            unomi_id = str(metadata.get("id") or item.get("id") or "").strip()
+            if not unomi_id:
+                continue
+            item_scope = str(metadata.get("scope") or "").strip()
+            if item_scope != target_scope:
+                continue
+            scoped_meta.append((unomi_id, metadata))
+        if len(page) < size:
+            break
+        offset += size
+
+    full_by_id: dict[str, dict[str, Any]] = {}
+    fetched = 0
+    timed_out = pages >= page_limit or (time.monotonic() - started >= budget)
+
+    if fetch_definitions and scoped_meta and time.monotonic() - started < budget:
+        workers = max(1, min(max_workers, len(scoped_meta)))
+        per_fetch_timeout = max(2.0, min(10.0, budget / max(len(scoped_meta), 1)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _fetch_unomi_segment_definition,
+                    cfg,
+                    unomi_id,
+                    timeout_sec=per_fetch_timeout,
+                ): unomi_id
+                for unomi_id, _ in scoped_meta
+            }
+            remaining = max(0.0, budget - (time.monotonic() - started))
+            done, pending = wait(set(futures.keys()), timeout=remaining)
+            for fut in pending:
+                fut.cancel()
+            for fut in done:
+                unomi_id = futures[fut]
+                try:
+                    full = fut.result()
+                except Exception:
+                    full = None
+                if full:
+                    full_by_id[unomi_id] = full
+                    fetched += 1
+            if pending:
+                timed_out = True
+
+    synced_ids: set[str] = set()
+    synced_rows: list[Segment] = []
+
+    for unomi_id, metadata in scoped_meta:
+        full = full_by_id.get(unomi_id)
+        existing = _upsert_segment_from_unomi(
+            db,
+            brand=brand,
+            target_scope=target_scope,
+            unomi_id=unomi_id,
+            metadata=metadata,
+            full=full,
+            local_by_unomi_id=local_by_unomi_id,
+        )
         synced_ids.add(unomi_id)
         synced_rows.append(existing)
 
@@ -289,7 +387,24 @@ def sync_unomi_scope_segments_to_registry(
                 db.delete(seg)
 
     db.flush()
-    return sorted(synced_rows, key=lambda s: (s.name or "").lower())
+
+    if not fetch_definitions:
+        status = "metadata_only"
+        detail = "Definitions fetch disabled"
+    elif timed_out or fetched < len(scoped_meta):
+        status = "partial"
+        detail = f"Fetched {fetched}/{len(scoped_meta)} segment definitions within {budget:.0f}s budget"
+    else:
+        status = "ok"
+        detail = None
+
+    return UnomiSegmentSyncResult(
+        segments=sorted(synced_rows, key=lambda s: (s.name or "").lower()),
+        status=status,
+        fetched_definitions=fetched,
+        total_in_scope=len(scoped_meta),
+        detail=detail,
+    )
 
 
 def sync_manual_list_segment_to_unomi(db: Session, *, seg: Segment) -> dict[str, Any]:

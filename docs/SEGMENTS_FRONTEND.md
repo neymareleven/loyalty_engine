@@ -96,7 +96,7 @@ Chargement rapide sans CDP :
 GET /admin/segments?sync_unomi=false
 ```
 
-Après sync : `X-Unomi-Sync: ok`. CDP injoignable : **200** + liste locale + `X-Unomi-Sync: failed` + `X-Unomi-Sync-Detail`.
+Après sync : `X-Unomi-Sync: ok` (toutes les définitions récupérées) ou `partial` (métadonnées + définitions disponibles dans le budget ~20s). CDP injoignable : **200** + liste locale + `X-Unomi-Sync: failed` + `X-Unomi-Sync-Detail`.
 
 Chaque ligne `SegmentOut` expose :
 

@@ -415,9 +415,11 @@ def list_segments(
         should_sync = sync_unomi and offset == 0
         if should_sync:
             try:
-                sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
+                sync_result = sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
                 db.commit()
-                response.headers["X-Unomi-Sync"] = "ok"
+                response.headers["X-Unomi-Sync"] = sync_result.status
+                if sync_result.detail:
+                    response.headers["X-Unomi-Sync-Detail"] = sync_result.detail[:500]
             except ValueError as e:
                 db.rollback()
                 raise HTTPException(status_code=400, detail=str(e))
