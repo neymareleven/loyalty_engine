@@ -206,7 +206,8 @@ def get_segments_ui_catalog():
             "queryParams": {
                 "limit": "Page size (default 20, max 500)",
                 "offset": "Pagination offset (default 0)",
-                "sync_unomi": "UNOMI: sync CDP when offset=0 (default true)",
+                "sync_unomi": "UNOMI: sync CDP metadata when offset=0 (default false)",
+                "sync_definitions": "With sync_unomi: also fetch full CDP definitions (slow; default false)",
                 "active": "Optional filter active=true|false",
                 "q": "Search name or description",
                 "is_dynamic": "Optional true=dynamic, false=static",
@@ -403,10 +404,17 @@ def list_segments(
     limit: int = Query(20, ge=1, le=500),
     offset: int = Query(0, ge=0),
     sync_unomi: bool = Query(
-        True,
+        False,
         description=(
-            "UNOMI mode: sync segment definitions from the CDP before listing (default true). "
-            "Sync runs on the first page only (offset=0)."
+            "UNOMI mode: sync segment metadata from the CDP before listing (default false). "
+            "Sync runs on the first page only (offset=0). Fast metadata sync; use sync_definitions=true for full defs."
+        ),
+    ),
+    sync_definitions: bool = Query(
+        False,
+        description=(
+            "With sync_unomi: fetch full segment definitions from the CDP (slower). "
+            "Default false — list view only needs metadata (name, id, enabled)."
         ),
     ),
     db: Session = Depends(get_db),
@@ -415,7 +423,12 @@ def list_segments(
         should_sync = sync_unomi and offset == 0
         if should_sync:
             try:
-                sync_result = sync_unomi_scope_segments_to_registry(db, brand=active_brand, keep_orphans=True)
+                sync_result = sync_unomi_scope_segments_to_registry(
+                    db,
+                    brand=active_brand,
+                    keep_orphans=True,
+                    fetch_definitions=sync_definitions,
+                )
                 db.commit()
                 response.headers["X-Unomi-Sync"] = sync_result.status
                 if sync_result.detail:

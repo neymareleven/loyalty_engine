@@ -71,7 +71,8 @@ Réponse :
 |-----------|-------------|
 | `limit` | Taille de page (défaut `20`, max `500`) |
 | `offset` | Décalage (défaut `0`) |
-| `sync_unomi` | Synchro CDP si `offset=0` (défaut `true`) ; pages suivantes : `X-Unomi-Sync: skipped-pagination` |
+| `sync_unomi` | Synchro métadonnées CDP si `offset=0` (défaut `false`) ; pages suivantes : `X-Unomi-Sync: skipped-pagination` |
+| `sync_definitions` | Avec `sync_unomi=true` : récupère aussi les définitions complètes (lent ; défaut `false`) |
 | `active` | `true` \| `false` |
 | `q` | Recherche nom / description |
 | `is_dynamic` | `true` \| `false` |
