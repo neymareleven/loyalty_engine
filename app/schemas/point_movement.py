@@ -17,6 +17,8 @@ class PointMovementOut(BaseModel):
 
     created_at: Optional[datetime] = None
     expires_at: Optional[date] = None
+    isExpired: bool = False
+    status: str = "active"
 
     class Config:
         from_attributes = True

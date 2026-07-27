@@ -44,7 +44,7 @@ from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
 from app.services.loyalty_status_service import update_customer_status
 from app.services.profile_reconciliation_service import reconcile_profile_view
-from app.services.wallet_service import get_status_points_balance
+from app.services.wallet_service import get_status_points_balance, resolve_points_expires_at, serialize_point_movement_out
 
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -318,14 +318,17 @@ def list_point_movements(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    return (
-        db.query(PointMovement)
-        .filter(PointMovement.customer_id == customer.id)
-        .order_by(PointMovement.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    return [
+        serialize_point_movement_out(row)
+        for row in (
+            db.query(PointMovement)
+            .filter(PointMovement.customer_id == customer.id)
+            .order_by(PointMovement.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+    ]
 
 
 @router.get("/{brand}/{profile_id}/rewards", response_model=list[CustomerRewardOut])
@@ -621,7 +624,7 @@ def get_customer_loyalty(
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": sp,
         "pointsBalance": get_status_points_balance(db, customer.id),
-        "pointsExpiresAt": customer.points_expires_at,
+        "pointsExpiresAt": resolve_points_expires_at(db, customer.id),
         "lastActivityAt": customer.last_activity_at,
         "lastChange": last_change,
         "currentTier": (

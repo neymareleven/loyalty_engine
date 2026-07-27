@@ -10,7 +10,8 @@ from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import update_customer_status
-from app.services.wallet_service import get_status_points_balance
+from app.models.point_movement import PointMovement
+from app.services.wallet_service import get_status_points_balance, sync_customer_points_expires_at
 
 
 def initialize_validity_windows_for_existing_customers(db: Session, *, brand: str) -> dict[str, int]:
@@ -127,9 +128,22 @@ def expire_points(db: Session, *, brand: str) -> int:
     for c in customers:
         before = int(c.status_points or 0)
         balance = max(0, int(get_status_points_balance(db, c.id) or 0))
+        expired_points = max(0, before - balance)
+        if expired_points > 0:
+            db.add(
+                PointMovement(
+                    customer_id=c.id,
+                    points=-expired_points,
+                    type="EXPIRE",
+                    source_transaction_id=None,
+                    expires_at=None,
+                )
+            )
         if balance != before:
             c.status_points = balance
             c.status_points_reset_at = now
+
+        sync_customer_points_expires_at(db, c)
 
         update_customer_status(
             db,

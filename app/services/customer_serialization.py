@@ -6,7 +6,7 @@ from app.models.customer import Customer
 from app.models.loyalty_tier import LoyaltyTier
 from app.schemas.customer import CustomerOut
 from app.services.birthdate_targeting import format_customer_birthdate_wire
-from app.services.wallet_service import get_status_points_balance
+from app.services.wallet_service import get_status_points_balance, resolve_points_expires_at
 
 
 def _format_birthdate(customer: Customer) -> str | None:
@@ -41,6 +41,7 @@ def serialize_customer_out(
     data["loyalty_status_name"] = tier_name
     if include_points_balance:
         data["points_balance"] = get_status_points_balance(db, customer.id)
+    data["points_expires_at"] = resolve_points_expires_at(db, customer.id)
     if extra:
         data.update(extra)
     return data

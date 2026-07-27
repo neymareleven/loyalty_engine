@@ -1,10 +1,11 @@
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from sqlalchemy.orm import Session
 
 from app.models.point_movement import PointMovement
 from app.models.customer import Customer
 from app.services.loyalty_status_service import update_customer_status
 from app.services.loyalty_settings_service import get_loyalty_settings
+from app.services.wallet_service import sync_customer_points_expires_at
 
 
 # ============================================================
@@ -46,12 +47,7 @@ def earn_points(
 
     customer.status_points = (customer.status_points or 0) + points
 
-    # Keep a best-effort customer-level expiration marker in sync with the most recent earned points.
-    # Source of truth remains PointMovement.expires_at, but APIs/UI often display Customer.points_expires_at.
-    if expires_at is not None:
-        expires_at_dt = datetime.utcnow() + timedelta(days=int(points_days))
-        if customer.points_expires_at is None or customer.points_expires_at < expires_at_dt:
-            customer.points_expires_at = expires_at_dt
+    sync_customer_points_expires_at(db, customer)
 
     # 🔹 recalcul statut
     try:
@@ -121,6 +117,8 @@ def burn_points(
         source_transaction_id=source_transaction_id,
         depth=depth,
     )
+
+    sync_customer_points_expires_at(db, customer)
 
     db.flush()
 

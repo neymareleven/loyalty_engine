@@ -21,7 +21,7 @@ from app.services.unomi_settings_service import (
     unomi_profile_sync_event_type,
     unomi_profile_sync_transport,
 )
-from app.services.wallet_service import get_status_points_balance
+from app.services.wallet_service import get_status_points_balance, resolve_points_expires_at
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +403,7 @@ def build_loyalty_program_unomi_properties(
         "lastActivityAt": _iso_or_none(customer.last_activity_at),
         "loyaltyStatusAssignedAt": _iso_or_none(customer.loyalty_status_assigned_at),
         "loyaltyStatusExpiresAt": _iso_or_none(customer.loyalty_status_expires_at),
-        "pointsExpiresAt": _iso_or_none(customer.points_expires_at),
+        "pointsExpiresAt": _iso_or_none(resolve_points_expires_at(db, customer.id)),
         "statusPointsResetAt": _iso_or_none(customer.status_points_reset_at),
         "loyaltyCreatedAt": _iso_or_none(customer.created_at),
         "loyaltyUpdatedAt": _iso_or_none(customer.updated_at),
