@@ -26,4 +26,7 @@ class Rule(Base):
 
     active = Column(Boolean, default=True)
 
+    valid_from = Column(TIMESTAMP, nullable=True)
+    valid_until = Column(TIMESTAMP, nullable=True)
+
     created_at = Column(TIMESTAMP, server_default=func.now())

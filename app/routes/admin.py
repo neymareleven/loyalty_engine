@@ -1324,6 +1324,18 @@ def get_rules_ui_catalog():
                 },
                 "priority": {"widget": "number", "min": 0},
                 "active": {"widget": "switch"},
+                "valid_from": {
+                    "widget": "datetime",
+                    "label": "Début d'exécution",
+                    "optional": True,
+                    "help": "La règle ne s'applique pas avant cette date (UTC). Laisser vide = pas de limite.",
+                },
+                "valid_until": {
+                    "widget": "datetime",
+                    "label": "Fin d'exécution",
+                    "optional": True,
+                    "help": "La règle ne s'applique plus après cette date (UTC). Laisser vide = pas de limite.",
+                },
                 "conditions": {
                     "widget": "rule_condition_builder",
                     "catalog": {"endpoint": "/admin/rule-conditions", "method": "GET"},
@@ -1341,7 +1353,17 @@ def get_rules_ui_catalog():
                     "active": True,
                     "conditions": {"and": [{"field": "payload.amount", "operator": "gte", "value": 100}]},
                     "actions": [{"type": "earn_points", "points": 10}],
-                }
+                },
+                {
+                    "name": "Promo été : double points",
+                    "transaction_type": "sale",
+                    "priority": 0,
+                    "active": True,
+                    "valid_from": "2026-06-01T00:00:00Z",
+                    "valid_until": "2026-08-31T23:59:59Z",
+                    "conditions": {"and": []},
+                    "actions": [{"type": "earn_points", "points": 100}],
+                },
             ],
         },
         "update": {
@@ -1349,6 +1371,18 @@ def get_rules_ui_catalog():
             "uiHints": {
                 "priority": {"widget": "number", "min": 0},
                 "active": {"widget": "switch"},
+                "valid_from": {
+                    "widget": "datetime",
+                    "label": "Début d'exécution",
+                    "optional": True,
+                    "help": "La règle ne s'applique pas avant cette date (UTC). Laisser vide = pas de limite.",
+                },
+                "valid_until": {
+                    "widget": "datetime",
+                    "label": "Fin d'exécution",
+                    "optional": True,
+                    "help": "La règle ne s'applique plus après cette date (UTC). Laisser vide = pas de limite.",
+                },
                 "conditions": {
                     "widget": "rule_condition_builder",
                     "catalog": {"endpoint": "/admin/rule-conditions", "method": "GET"},

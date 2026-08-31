@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.services.payload_normalization_service import normalize_transaction_payload
 from app.services.payload_schema_service import (
     enrich_payload_schema_on_ingest,
     get_transaction_type_rule_hints,
@@ -80,11 +81,17 @@ def test_manual_map_normalizes_to_json_schema():
 
 
 def test_enrich_schema_from_empty_on_first_ingest():
-    payload = {"orderTotal": "12000", "productNames": ["sku-a"]}
+    from app.services.payload_normalization_service import normalize_transaction_payload
+
+    payload = normalize_transaction_payload(
+        {"orderTotal": "12000", "productNames": ["sku-a"]},
+        transaction_type="sale",
+    )
     merged = enrich_payload_schema_on_ingest(None, payload)
     assert merged is not None
     props = merged["properties"]
     assert "orderTotal" in props
+    assert props["orderTotal"]["type"] == "integer"
     assert "productNames" in props
 
 
@@ -96,12 +103,17 @@ def test_enrich_schema_merges_new_fields_on_subsequent_ingest():
             "brand": {"type": "string"},
         },
     }
-    payload = {"orderTotal": "5000", "productQuantities": [2, 1]}
+    payload = normalize_transaction_payload(
+        {"orderTotal": 5000, "productQuantities": [2, 1]},
+        transaction_type="sale",
+    )
     merged = enrich_payload_schema_on_ingest(existing, payload)
     props = merged["properties"]
     assert "orderTotal" in props
+    assert props["orderTotal"]["type"] == "integer"
     assert "brand" in props
     assert "productQuantities" in props
+    assert props["productQuantities"]["items"]["type"] == "integer"
 
 
 def test_enrich_schema_heals_corrupted_root_as_fields():

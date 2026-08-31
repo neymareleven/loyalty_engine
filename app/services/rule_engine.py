@@ -19,6 +19,7 @@ from app.services.contact_service import resolve_customer_for_transaction
 from app.services.loyalty_service import earn_points, burn_points
 from app.services.reward_service import issue_reward
 from app.services.coupon_service import issue_coupon, use_coupon
+from app.services.rule_validity_service import rule_validity_status, transaction_evaluation_time
 
 
 logger = logging.getLogger(__name__)
@@ -819,9 +820,25 @@ def process_transaction_rules(db: Session, transaction):
     had_rule_failures = False
     points_earned_total = 0
     had_matching_rule = False
+    evaluation_at = transaction_evaluation_time(transaction)
     for rule in rules:
 
         try:
+            is_valid, skip_reason, validity_details = rule_validity_status(rule, evaluation_at=evaluation_at)
+            if not is_valid:
+                execution = TransactionRuleExecution(
+                    transaction_id=transaction.id,
+                    rule_id=rule.id,
+                    result="SKIPPED",
+                    details={
+                        "matched": False,
+                        "reason": skip_reason,
+                        "validity": validity_details,
+                    },
+                )
+                db.add(execution)
+                continue
+
             seg_ids = getattr(rule, "segment_ids", None)
             if seg_ids:
                 seg_ids = [s for s in seg_ids if s is not None]

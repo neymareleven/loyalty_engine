@@ -10,9 +10,9 @@ from app.models.customer import Customer
 from app.models.event_type import TransactionType
 from app.models.transaction import Transaction
 from app.services.loyalty_status_service import update_customer_status
+from app.services.payload_normalization_service import normalize_transaction_payload
 from app.services.payload_schema_service import enrich_payload_schema_on_ingest, infer_json_schema_from_payload
 from app.services.rule_engine import process_transaction_rules
-from app.services.sale_payload_service import normalize_sale_payload
 
 _UNREGISTERED_CUSTOMER_ERROR_CODE = "CUSTOMER_NOT_REGISTERED"
 _UNREGISTERED_CUSTOMER_MESSAGE = (
@@ -120,9 +120,7 @@ def create_internal_transaction(
 
 
 def _maybe_normalize_business_payload(*, transaction_type: str, payload: dict | None) -> dict | None:
-    if (transaction_type or "").lower() == "sale":
-        return normalize_sale_payload(payload)
-    return payload
+    return normalize_transaction_payload(payload, transaction_type=transaction_type)
 
 
 def _retry_ignored_unregistered_customer(db: Session, transaction: Transaction) -> Transaction:

@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class RuleCreate(BaseModel):
@@ -20,6 +20,14 @@ class RuleCreate(BaseModel):
     actions: Optional[list[Dict[str, Any]]] = None
 
     active: bool = True
+    valid_from: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _check_validity_window(self):
+        if self.valid_from and self.valid_until and self.valid_from > self.valid_until:
+            raise ValueError("valid_from must be before or equal to valid_until")
+        return self
 
 
 class RuleUpdate(BaseModel):
@@ -36,6 +44,8 @@ class RuleUpdate(BaseModel):
     actions: Optional[list[Dict[str, Any]]] = None
 
     active: Optional[bool] = None
+    valid_from: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
 
 
 class RuleOut(BaseModel):
@@ -53,6 +63,8 @@ class RuleOut(BaseModel):
     actions: Optional[list[Dict[str, Any]]] = None
 
     active: bool
+    valid_from: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
     created_at: Optional[datetime] = None
 
     class Config:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.payload_normalization_service import semantic_schema_for_field
+
 _RESERVED_JSON_SCHEMA_KEYS = frozenset({"type", "properties", "items", "required", "additionalProperties", "anyOf", "oneOf", "allOf"})
 
 _TYPE_ALIASES = {
@@ -171,33 +173,108 @@ def _safe_normalize_payload_schema(schema: Any) -> dict[str, Any] | None:
         return None
 
 
-def infer_json_schema_from_payload(value: Any, *, _depth: int = 0, _max_depth: int = 6) -> dict | None:
+def _schema_type_rank(schema: dict | None) -> int:
+    """Higher rank = more specific / preferred when healing legacy string types."""
+    if not isinstance(schema, dict):
+        return 0
+    if "anyOf" in schema:
+        return 1
+    t = _normalize_field_type(schema)
+    return {
+        "boolean": 4,
+        "integer": 3,
+        "number": 3,
+        "array": 2,
+        "object": 2,
+        "string": 1,
+        "null": 0,
+    }.get(t, 1)
+
+
+def _apply_semantic_schema(name: str, schema: dict | None) -> dict | None:
+    semantic = semantic_schema_for_field(name)
+    if not semantic:
+        return schema
+    if not isinstance(schema, dict) or not schema:
+        return dict(semantic)
+    current_rank = _schema_type_rank(schema)
+    target_rank = _schema_type_rank(semantic)
+    if current_rank < target_rank:
+        return dict(semantic)
+    if current_rank == target_rank and isinstance(schema, dict):
+        merged = dict(schema)
+        for key, val in semantic.items():
+            if key not in merged or merged.get(key) in (None, "", {}):
+                merged[key] = val
+        return merged
+    return schema
+
+
+def heal_payload_schema(schema: dict | None) -> dict | None:
+    """Correct field types in stored schema using business field semantics."""
+    if schema is None:
+        return None
+    normalized = _safe_normalize_payload_schema(schema)
+    if not normalized or not is_canonical_json_schema(normalized):
+        return schema
+    props = dict(normalized.get("properties") or {})
+    if not isinstance(props, dict):
+        return normalized
+    changed = False
+    healed_props: dict[str, Any] = {}
+    for name, spec in props.items():
+        if not isinstance(name, str):
+            continue
+        healed = _apply_semantic_schema(name, spec if isinstance(spec, dict) else {"type": "string"})
+        healed_props[name] = healed
+        if healed != spec:
+            changed = True
+    if not changed:
+        return normalized
+    return {**normalized, "properties": healed_props}
+
+
+def _merge_property_schemas(name: str, existing: dict | None, new: dict | None) -> dict | None:
+    merged = merge_json_schemas(existing, new)
+    return _apply_semantic_schema(name, merged)
+
+
+def infer_json_schema_from_payload(value: Any, *, _depth: int = 0, _max_depth: int = 6, _field_name: str | None = None) -> dict | None:
     if _depth >= _max_depth:
         return {}
     if value is None:
-        return {"type": "null"}
-    if isinstance(value, bool):
-        return {"type": "boolean"}
-    if isinstance(value, int) and not isinstance(value, bool):
-        return {"type": "integer"}
-    if isinstance(value, float):
-        return {"type": "number"}
-    if isinstance(value, str):
-        return {"type": "string"}
-    if isinstance(value, dict):
+        inferred = {"type": "null"}
+    elif isinstance(value, bool):
+        inferred = {"type": "boolean"}
+    elif isinstance(value, int) and not isinstance(value, bool):
+        inferred = {"type": "integer"}
+    elif isinstance(value, float):
+        inferred = {"type": "number"}
+    elif isinstance(value, str):
+        inferred = {"type": "string"}
+    elif isinstance(value, dict):
         props: dict[str, Any] = {}
         for k, v in value.items():
             if not isinstance(k, str):
                 continue
-            props[k] = infer_json_schema_from_payload(v, _depth=_depth + 1, _max_depth=_max_depth) or {}
+            child = infer_json_schema_from_payload(v, _depth=_depth + 1, _max_depth=_max_depth, _field_name=k) or {}
+            props[k] = _apply_semantic_schema(k, child) or child
         return {"type": "object", "properties": props}
-    if isinstance(value, list):
+    elif isinstance(value, list):
         items_schema: dict[str, Any] | None = None
         for item in value[:50]:
-            s = infer_json_schema_from_payload(item, _depth=_depth + 1, _max_depth=_max_depth) or {}
+            s = infer_json_schema_from_payload(item, _depth=_depth + 1, _max_depth=_max_depth, _field_name=_field_name) or {}
             items_schema = merge_json_schemas(items_schema, s)
-        return {"type": "array", "items": items_schema or {}}
-    return {}
+        inferred = {"type": "array", "items": items_schema or {}}
+        if _field_name:
+            return _apply_semantic_schema(_field_name, inferred) or inferred
+        return inferred
+    else:
+        inferred = {}
+
+    if _field_name:
+        return _apply_semantic_schema(_field_name, inferred) or inferred
+    return inferred
 
 
 def merge_json_schemas(a: dict | None, b: dict | None) -> dict | None:
@@ -210,6 +287,12 @@ def merge_json_schemas(a: dict | None, b: dict | None) -> dict | None:
     a_type = a.get("type")
     b_type = b.get("type")
     if a_type and b_type and a_type != b_type:
+        a_rank = _schema_type_rank(a)
+        b_rank = _schema_type_rank(b)
+        if b_rank > a_rank:
+            return b
+        if a_rank > b_rank:
+            return a
         return {"anyOf": [a, b]}
     out = dict(a)
     if out.get("type") == "object":
@@ -218,9 +301,9 @@ def merge_json_schemas(a: dict | None, b: dict | None) -> dict | None:
         if isinstance(b_props, dict):
             for k, v in b_props.items():
                 if k in out_props:
-                    out_props[k] = merge_json_schemas(out_props.get(k), v) or out_props[k]
+                    out_props[k] = _merge_property_schemas(k, out_props.get(k), v) or out_props[k]
                 else:
-                    out_props[k] = v
+                    out_props[k] = _apply_semantic_schema(k, v) or v
         out["properties"] = out_props
         return out
     if out.get("type") == "array":
@@ -230,16 +313,17 @@ def merge_json_schemas(a: dict | None, b: dict | None) -> dict | None:
 
 
 def enrich_payload_schema_on_ingest(existing: dict | None, payload: dict | None) -> dict | None:
-    """Merge inferred payload shape into stored schema; heal corrupted schemas."""
+    """Merge inferred payload shape into stored schema; heal corrupted or mistyped fields."""
     inferred = infer_json_schema_from_payload(payload) if payload is not None else None
     if not inferred:
-        return existing
+        return heal_payload_schema(existing)
     if existing is None or is_mistaken_json_schema_root_as_fields(existing):
-        return inferred
+        return heal_payload_schema(inferred)
     normalized = _safe_normalize_payload_schema(existing)
     if normalized is None:
-        return inferred
-    return merge_json_schemas(normalized, inferred)
+        return heal_payload_schema(inferred)
+    merged = merge_json_schemas(normalized, inferred)
+    return heal_payload_schema(merged)
 
 
 def payload_schema_format(schema: Any) -> str | None:

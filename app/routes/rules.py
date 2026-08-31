@@ -12,6 +12,7 @@ from app.models.rule import Rule
 from app.models.segment import Segment
 from app.schemas.rule import RuleCreate, RuleOut, RuleUpdate, RuleReorderRequest
 from app.deps.brand import get_active_brand
+from app.services.rule_validity_service import validate_rule_validity_window
 
 
 router = APIRouter(prefix="/rules", tags=["rules"])
@@ -151,6 +152,11 @@ def create_rule(
 
     _validate_rule_actions(payload.actions)
 
+    validate_rule_validity_window(
+        valid_from=payload.valid_from,
+        valid_until=payload.valid_until,
+    )
+
     seg_ids = payload.segment_ids or []
     _validate_segments_exist(db, brand=active_brand, segment_ids=seg_ids)
 
@@ -167,6 +173,8 @@ def create_rule(
         conditions=payload.conditions,
         actions=payload.actions,
         active=payload.active,
+        valid_from=payload.valid_from,
+        valid_until=payload.valid_until,
     )
     db.add(rule)
     try:
@@ -302,6 +310,13 @@ def update_rule(
 
     if "actions" in data:
         _validate_rule_actions(data.get("actions"))
+
+    next_valid_from = data["valid_from"] if "valid_from" in data else rule.valid_from
+    next_valid_until = data["valid_until"] if "valid_until" in data else rule.valid_until
+    try:
+        validate_rule_validity_window(valid_from=next_valid_from, valid_until=next_valid_until)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if "priority" in data:
         raise HTTPException(
