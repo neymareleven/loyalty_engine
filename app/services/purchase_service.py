@@ -65,6 +65,9 @@ def _parse_amount_value(raw: Any) -> int | None:
 def extract_purchase_amount(payload: dict | None) -> int:
     if not isinstance(payload, dict):
         return 0
+    from app.services.sale_payload_service import normalize_sale_payload
+
+    payload = normalize_sale_payload(payload) or payload
     bags: list[dict] = [payload]
     for nest in _NESTED_PAYLOAD_KEYS:
         inner = payload.get(nest)
@@ -73,6 +76,15 @@ def extract_purchase_amount(payload: dict | None) -> int:
     for bag in bags:
         for key in _AMOUNT_FIELD_CANDIDATES:
             parsed = _parse_amount_value(bag.get(key))
+            if parsed is not None:
+                return parsed
+        for key, raw in bag.items():
+            kl = str(key or "").strip().lower().replace("-", "_")
+            if kl.endswith("raw"):
+                continue
+            if not (kl.endswith("total") or kl.endswith("amount")):
+                continue
+            parsed = _parse_amount_value(raw)
             if parsed is not None:
                 return parsed
     return 0
@@ -161,25 +173,48 @@ def is_purchase_transaction_type(transaction_type: str | None) -> bool:
     return str(transaction_type or "").strip().lower() in _PURCHASE_TRANSACTION_TYPES
 
 
+def _processed_sale_query(db: Session, customer):
+    """Sales shown on the customer file (profile + aliases + email), PROCESSED*."""
+    from app.services.contact_service import customer_transaction_filters
+
+    return (
+        db.query(Transaction)
+        .filter(Transaction.brand == customer.brand)
+        .filter(customer_transaction_filters(db, brand=customer.brand, customer=customer))
+        .filter(func.lower(Transaction.transaction_type) == "sale")
+        .filter(func.upper(Transaction.status).like("PROCESSED%"))
+    )
+
+
+def _customer_for_sale_transaction(db: Session, tx) -> Any:
+    from app.services.contact_service import _extract_email_from_payload, get_customer
+
+    brand = getattr(tx, "brand", None)
+    customer = get_customer(db, brand, getattr(tx, "profile_id", None) or "")
+    if customer:
+        return customer
+    payload = tx.payload if isinstance(tx.payload, dict) else {}
+    email = _extract_email_from_payload(payload, brand=brand)
+    if not email:
+        return None
+    from app.models.customer import Customer
+
+    return (
+        db.query(Customer)
+        .filter(Customer.brand == brand)
+        .filter(func.lower(Customer.email) == email)
+        .first()
+    )
+
+
 def customer_has_prior_processed_sale(
     db: Session,
     customer,
     *,
     excluding_transaction_id=None,
 ) -> bool:
-    """True if the customer already has another PROCESSED sale (any profile alias)."""
-    from app.services.contact_service import list_customer_unomi_profile_ids
-
-    profile_ids = list_customer_unomi_profile_ids(db, customer)
-    if not profile_ids:
-        return False
-    q = (
-        db.query(Transaction.id)
-        .filter(Transaction.brand == customer.brand)
-        .filter(Transaction.profile_id.in_(profile_ids))
-        .filter(func.lower(Transaction.transaction_type) == "sale")
-        .filter(func.upper(Transaction.status).like("PROCESSED%"))
-    )
+    """True if the customer already has another PROCESSED sale (any profile alias / email)."""
+    q = _processed_sale_query(db, customer)
     if excluding_transaction_id is not None:
         q = q.filter(Transaction.id != excluding_transaction_id)
     return q.first() is not None
@@ -293,8 +328,6 @@ def backfill_purchase_movements_from_sales(
     Idempotent. Does not apply first-purchase bypass and does not emit palier events.
     Expiry is computed from the sale date + purchase_validity_days.
     """
-    from app.services.contact_service import get_customer
-
     batch_size = max(1, min(int(batch_size or 500), 5000))
     settings = get_loyalty_settings(db, brand=brand)
     validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
@@ -326,11 +359,11 @@ def backfill_purchase_movements_from_sales(
 
     for tx in sales:
         last_id = tx.id
-        profile_id = (tx.profile_id or "").strip()
-        customer = customer_cache.get(profile_id) if profile_id else None
-        if profile_id and profile_id not in customer_cache:
-            customer = get_customer(db, brand, profile_id)
-            customer_cache[profile_id] = customer
+        cache_key = str(tx.profile_id or "")
+        customer = customer_cache.get(cache_key) if cache_key in customer_cache else None
+        if cache_key not in customer_cache:
+            customer = _customer_for_sale_transaction(db, tx)
+            customer_cache[cache_key] = customer
         if customer is None:
             skipped += 1
             continue
@@ -371,18 +404,12 @@ def backfill_purchase_movements_from_sales(
 
 
 def backfill_customer_purchase_movements_from_sales(db: Session, customer) -> int:
-    """Backfill missing sale lots for one customer (master profile_id + aliases)."""
-    from app.services.contact_service import list_customer_unomi_profile_ids
-
-    profile_ids = list_customer_unomi_profile_ids(db, customer)
-    if not profile_ids:
-        return 0
-
+    """Backfill missing sale lots for one customer (same scope as the purchase history UI)."""
     settings = get_loyalty_settings(db, brand=customer.brand)
     validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
 
     sales = (
-        db.query(Transaction)
+        _processed_sale_query(db, customer)
         .outerjoin(
             PurchaseMovement,
             and_(
@@ -390,10 +417,6 @@ def backfill_customer_purchase_movements_from_sales(db: Session, customer) -> in
                 PurchaseMovement.type == "EARN",
             ),
         )
-        .filter(Transaction.brand == customer.brand)
-        .filter(Transaction.profile_id.in_(profile_ids))
-        .filter(func.lower(Transaction.transaction_type) == "sale")
-        .filter(func.upper(Transaction.status).like("PROCESSED%"))
         .filter(PurchaseMovement.id.is_(None))
         .all()
     )

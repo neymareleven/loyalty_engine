@@ -43,6 +43,7 @@ def test_extract_purchase_amount_prefers_order_total():
     assert extract_purchase_amount({"total": "6 300 CFA"}) == 6300
     assert extract_purchase_amount({"properties": {"orderTotal": 1200}}) == 1200
     assert extract_purchase_amount({"amount": 99}) == 99
+    assert extract_purchase_amount({"orderTotal": "1 312 500 CFA"}) == 1312500
     assert extract_purchase_amount({}) == 0
     assert extract_purchase_amount(None) == 0
 

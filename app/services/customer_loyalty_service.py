@@ -14,7 +14,6 @@ from app.services.contact_service import get_customer
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import update_customer_status
 from app.services.purchase_service import (
-    QUALIFICATION_PURCHASES,
     apply_purchase_delta,
     get_purchase_balances,
     get_qualification_mode,
@@ -116,18 +115,18 @@ def set_customer_loyalty_tier(
     db.add(tx)
     db.flush()
 
-    if mode != QUALIFICATION_PURCHASES and delta != 0:
-        pm_type = "EARN" if delta > 0 else "DEDUCT"
-        expires_at = None
-        if delta > 0:
-            settings = get_loyalty_settings(db, brand=customer.brand)
-            points_days = getattr(settings, "points_validity_days", None) if settings else None
-            expires_at = (date.today() + timedelta(days=int(points_days))) if points_days is not None else None
+    # Top up every counter to the assigned palier's minima so the fiche matches the status.
+    # Never deduct real sales/points history.
+    points_topup = max(0, int(delta))
+    if points_topup:
+        settings = get_loyalty_settings(db, brand=customer.brand)
+        points_days = getattr(settings, "points_validity_days", None) if settings else None
+        expires_at = (date.today() + timedelta(days=int(points_days))) if points_days is not None else None
         db.add(
             PointMovement(
                 customer_id=customer.id,
-                points=int(delta),
-                type=pm_type,
+                points=int(points_topup),
+                type="EARN",
                 source_transaction_id=tx.id,
                 expires_at=expires_at,
             )
@@ -135,15 +134,16 @@ def set_customer_loyalty_tier(
         db.flush()
         customer.status_points = int(get_status_points_balance(db, customer.id) or 0)
 
-    if mode == QUALIFICATION_PURCHASES and (count_delta != 0 or amount_delta != 0):
-        movement_type = "EARN" if (count_delta > 0 or amount_delta > 0) else "DEDUCT"
+    count_topup = max(0, int(count_delta))
+    amount_topup = max(0, int(amount_delta))
+    if count_topup or amount_topup:
         apply_purchase_delta(
             db,
             customer=customer,
-            quantity_delta=count_delta,
-            amount_delta=amount_delta,
+            quantity_delta=count_topup,
+            amount_delta=amount_topup,
             source_transaction_id=tx.id,
-            movement_type=movement_type,
+            movement_type="EARN",
         )
 
     update_customer_status(
