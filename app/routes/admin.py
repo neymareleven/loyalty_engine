@@ -81,6 +81,15 @@ def admin_schema_health(db: Session = Depends(get_db)):
         "brand_loyalty_settings.segmentation_mode": (
             "SELECT segmentation_mode FROM brand_loyalty_settings LIMIT 1"
         ),
+        "brand_loyalty_settings.qualification_mode": (
+            "SELECT qualification_mode FROM brand_loyalty_settings LIMIT 1"
+        ),
+        "brand_loyalty_settings.first_purchase_bypass_enabled": (
+            "SELECT first_purchase_bypass_enabled FROM brand_loyalty_settings LIMIT 1"
+        ),
+        "loyalty_tiers.min_purchase_count": "SELECT min_purchase_count FROM loyalty_tiers LIMIT 1",
+        "customers.purchase_count": "SELECT purchase_count FROM customers LIMIT 1",
+        "purchase_movements": "SELECT id FROM purchase_movements LIMIT 1",
     }
     missing: list[str] = []
     errors: dict[str, str] = {}
@@ -109,11 +118,9 @@ def get_loyalty_settings(
 ):
     obj = get_or_create_loyalty_settings(db, brand=brand)
     db.commit()
-    return {
-        "brand": obj.brand,
-        "points_validity_days": obj.points_validity_days,
-        "loyalty_status_validity_days": obj.loyalty_status_validity_days,
-    }
+    from app.services.loyalty_settings_service import serialize_loyalty_settings
+
+    return serialize_loyalty_settings(obj)
 
 
 @router.get("/ui-options/coupon-types")
@@ -262,8 +269,16 @@ def update_loyalty_settings(
 
     prev_points_days = obj.points_validity_days
     prev_status_days = obj.loyalty_status_validity_days
+    prev_purchase_days = getattr(obj, "purchase_validity_days", None)
+    from app.services.purchase_service import normalize_qualification_mode
+
+    prev_qualification_mode = normalize_qualification_mode(getattr(obj, "qualification_mode", None))
 
     data = payload.model_dump(exclude_unset=True)
+
+    if "qualification_mode" in data and data["qualification_mode"] is not None:
+        obj.qualification_mode = normalize_qualification_mode(data["qualification_mode"])
+
     if "points_validity_days" in data and data["points_validity_days"] is not None:
         try:
             v = int(data["points_validity_days"])
@@ -286,19 +301,64 @@ def update_loyalty_settings(
     elif "loyalty_status_validity_days" in data and data["loyalty_status_validity_days"] is None:
         obj.loyalty_status_validity_days = None
 
+    if "purchase_validity_days" in data and data["purchase_validity_days"] is not None:
+        try:
+            v = int(data["purchase_validity_days"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="purchase_validity_days must be an integer")
+        if v < 0:
+            raise HTTPException(status_code=400, detail="purchase_validity_days must be >= 0")
+        obj.purchase_validity_days = v
+    elif "purchase_validity_days" in data and data["purchase_validity_days"] is None:
+        obj.purchase_validity_days = None
+
+    if "first_purchase_bypass_enabled" in data and data["first_purchase_bypass_enabled"] is not None:
+        obj.first_purchase_bypass_enabled = bool(data["first_purchase_bypass_enabled"])
+
+    if "first_purchase_bypass_min_amount" in data:
+        if data["first_purchase_bypass_min_amount"] is None:
+            obj.first_purchase_bypass_min_amount = None
+        else:
+            try:
+                v = int(data["first_purchase_bypass_min_amount"])
+            except Exception:
+                raise HTTPException(
+                    status_code=400, detail="first_purchase_bypass_min_amount must be an integer"
+                )
+            if v < 1:
+                raise HTTPException(
+                    status_code=400, detail="first_purchase_bypass_min_amount must be >= 1"
+                )
+            obj.first_purchase_bypass_min_amount = v
+
+    if "first_purchase_bypass_tier_key" in data:
+        raw_key = data["first_purchase_bypass_tier_key"]
+        obj.first_purchase_bypass_tier_key = (str(raw_key).strip() if raw_key else None) or None
+
     should_backfill_points = obj.points_validity_days is not None and prev_points_days is None
     should_backfill_status = obj.loyalty_status_validity_days is not None and prev_status_days is None
+    should_backfill_purchases = obj.purchase_validity_days is not None and prev_purchase_days is None
 
-    if should_backfill_points or should_backfill_status:
+    if should_backfill_points or should_backfill_status or should_backfill_purchases:
         initialize_validity_windows_for_existing_customers(db, brand=brand)
+
+    if normalize_qualification_mode(getattr(obj, "qualification_mode", None)) != prev_qualification_mode:
+        from app.routes.loyalty_tiers import _enqueue_recompute_customers_job
+
+        _enqueue_recompute_customers_job(db, brand, apply_qualification_mode=True)
+
+    from app.services.loyalty_settings_service import (
+        first_purchase_bypass_config_error,
+        serialize_loyalty_settings,
+    )
+
+    bypass_error = first_purchase_bypass_config_error(db, brand=brand, settings=obj)
+    if bypass_error:
+        raise HTTPException(status_code=400, detail=bypass_error)
 
     db.commit()
     db.refresh(obj)
-    return {
-        "brand": obj.brand,
-        "points_validity_days": obj.points_validity_days,
-        "loyalty_status_validity_days": obj.loyalty_status_validity_days,
-    }
+    return serialize_loyalty_settings(obj)
 
 
 @router.get("/brand-kpis")

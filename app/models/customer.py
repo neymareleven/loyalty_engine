@@ -24,10 +24,13 @@ class Customer(Base):
     loyalty_status = Column(String(50), nullable=True)
 
     status_points = Column(Integer, nullable=False, default=0)
+    purchase_count = Column(Integer, nullable=False, default=0)
+    purchase_amount_total = Column(Integer, nullable=False, default=0)
     last_activity_at = Column(TIMESTAMP)
     status_points_reset_at = Column(TIMESTAMP)
 
     points_expires_at = Column(TIMESTAMP)
+    purchases_expires_at = Column(TIMESTAMP)
 
     loyalty_status_assigned_at = Column(TIMESTAMP)
     loyalty_status_expires_at = Column(TIMESTAMP)

@@ -20,6 +20,7 @@ from app.schemas.customer import (
 from app.schemas.customer_coupon import CustomerCouponOut, CustomerCouponStatusUpdate
 from app.schemas.customer_reward import CustomerRewardOut
 from app.schemas.point_movement import PointMovementOut
+from app.schemas.purchase_movement import PurchaseMovementOut
 from app.services.customer_upsert_service import customer_identity_payload, parse_customer_upsert_payload
 from app.services.contact_service import (
     customer_transaction_filters,
@@ -42,8 +43,14 @@ from app.services.entitlement_history_service import build_customer_entitlement_
 from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
-from app.services.loyalty_status_service import update_customer_status
+from app.services.loyalty_status_service import last_change_from_tier_event, update_customer_status
 from app.services.profile_reconciliation_service import reconcile_profile_view
+from app.services.purchase_service import (
+    get_purchase_balances,
+    get_qualification_mode,
+    resolve_purchases_expires_at,
+    serialize_purchase_movement_out,
+)
 from app.services.wallet_service import get_status_points_balance, resolve_points_expires_at, serialize_point_movement_out
 
 
@@ -331,6 +338,37 @@ def list_point_movements(
     ]
 
 
+@router.get("/{brand}/{profile_id}/purchase-movements", response_model=list[PurchaseMovementOut])
+def list_purchase_movements(
+    brand: str,
+    profile_id: str,
+    email: str | None = None,
+    active_brand: str = Depends(get_active_brand),
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
+
+    from app.models.purchase_movement import PurchaseMovement
+
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    return [
+        serialize_purchase_movement_out(row)
+        for row in (
+            db.query(PurchaseMovement)
+            .filter(PurchaseMovement.customer_id == customer.id)
+            .order_by(PurchaseMovement.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+    ]
+
+
 @router.get("/{brand}/{profile_id}/rewards", response_model=list[CustomerRewardOut])
 def list_customer_rewards(
     brand: str,
@@ -553,31 +591,62 @@ def get_customer_loyalty(
         sync_unomi=sync_unomi,
     )
 
+    qualification_mode = get_qualification_mode(db, brand=brand)
+    purchase_count, purchase_amount = get_purchase_balances(db, customer.id)
+
     tiers = (
         db.query(LoyaltyTier)
         .filter(LoyaltyTier.brand == brand)
         .filter(LoyaltyTier.active.is_(True))
-        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
+        .order_by(
+            LoyaltyTier.min_status_points.asc(),
+            LoyaltyTier.min_purchase_count.asc(),
+            LoyaltyTier.min_purchase_amount.asc(),
+            LoyaltyTier.created_at.asc(),
+        )
         .all()
     )
 
     current_key = customer.loyalty_status
     current_tier = next((t for t in tiers if t.key == current_key), None)
-    current_min = int(current_tier.min_status_points) if current_tier else None
+
+    def _tier_payload(t: LoyaltyTier) -> dict:
+        return {
+            "key": t.key,
+            "name": t.name,
+            "rank": int(t.rank),
+            "minStatusPoints": int(t.min_status_points),
+            "minPurchaseCount": int(getattr(t, "min_purchase_count", 0) or 0),
+            "minPurchaseAmount": int(getattr(t, "min_purchase_amount", 0) or 0),
+        }
 
     next_tier = None
-    if current_min is not None:
-        next_tier = next((t for t in tiers if int(t.min_status_points) > current_min), None)
-    elif tiers:
-        sp = int(customer.status_points or 0)
-        for t in tiers:
-            if int(t.min_status_points) > sp:
-                next_tier = t
-                break
-
+    purchases_to_next = None
+    amount_to_next = None
+    points_to_next = None
     sp = int(customer.status_points or 0)
-    next_min = int(next_tier.min_status_points) if next_tier else None
-    points_to_next = (max(0, next_min - sp) if next_min is not None else None)
+
+    if qualification_mode == "PURCHASES":
+        for t in tiers:
+            need_count = int(getattr(t, "min_purchase_count", 0) or 0)
+            need_amount = int(getattr(t, "min_purchase_amount", 0) or 0)
+            if need_count > purchase_count or need_amount > purchase_amount:
+                if current_tier is None or int(t.rank) > int(current_tier.rank):
+                    next_tier = t
+                    purchases_to_next = max(0, need_count - purchase_count)
+                    amount_to_next = max(0, need_amount - purchase_amount)
+                    break
+    else:
+        current_min = int(current_tier.min_status_points) if current_tier else None
+        if current_min is not None:
+            next_tier = next((t for t in tiers if int(t.min_status_points) > current_min), None)
+        elif tiers:
+            for t in tiers:
+                if int(t.min_status_points) > sp:
+                    next_tier = t
+                    break
+        next_min = int(next_tier.min_status_points) if next_tier else None
+        points_to_next = max(0, next_min - sp) if next_min is not None else None
 
     last_change = None
     if current_tier:
@@ -592,6 +661,8 @@ def get_customer_loyalty(
                         "TIER_UPGRADED",
                         "TIER_DOWNGRADED",
                         "TIER_RENEWED",
+                        "QUALIFICATION_MODE_CHANGED",
+                        "FIRST_PURCHASE_BYPASS",
                         "STATUS_RESET",
                         "ADMIN_SET_TIER",
                     ]
@@ -607,56 +678,28 @@ def get_customer_loyalty(
             .first()
         )
         if last_tier_event:
-            ttype = last_tier_event[0]
-            if ttype == "TIER_UPGRADED":
-                last_change = "upgrade"
-            elif ttype == "TIER_DOWNGRADED":
-                last_change = "downgrade"
-            elif ttype == "TIER_RENEWED":
-                last_change = "no_change"
-            elif ttype == "ADMIN_SET_TIER":
-                last_change = "admin_override"
+            last_change = last_change_from_tier_event(last_tier_event[0])
 
     return {
         "brand": brand,
         "profileId": customer.profile_id,
         "reconciliation": reconciliation,
+        "qualificationMode": qualification_mode,
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": sp,
         "pointsBalance": get_status_points_balance(db, customer.id),
         "pointsExpiresAt": resolve_points_expires_at(db, customer.id),
+        "purchaseCount": purchase_count,
+        "purchaseAmountTotal": purchase_amount,
+        "purchasesExpiresAt": resolve_purchases_expires_at(db, customer.id),
         "lastActivityAt": customer.last_activity_at,
         "lastChange": last_change,
-        "currentTier": (
-            {
-                "key": current_tier.key,
-                "name": current_tier.name,
-                "rank": int(current_tier.rank),
-                "minStatusPoints": int(current_tier.min_status_points),
-            }
-            if current_tier
-            else None
-        ),
-        "nextTier": (
-            {
-                "key": next_tier.key,
-                "name": next_tier.name,
-                "rank": int(next_tier.rank),
-                "minStatusPoints": int(next_tier.min_status_points),
-            }
-            if next_tier
-            else None
-        ),
+        "currentTier": _tier_payload(current_tier) if current_tier else None,
+        "nextTier": _tier_payload(next_tier) if next_tier else None,
         "pointsToNextTier": points_to_next,
-        "tiers": [
-            {
-                "key": t.key,
-                "name": t.name,
-                "rank": int(t.rank),
-                "minStatusPoints": int(t.min_status_points),
-            }
-            for t in tiers
-        ],
+        "purchasesToNextTier": purchases_to_next,
+        "amountToNextTier": amount_to_next,
+        "tiers": [_tier_payload(t) for t in tiers],
     }
 
 
@@ -681,6 +724,8 @@ def get_customer_loyalty_history(
         "TIER_UPGRADED",
         "TIER_DOWNGRADED",
         "TIER_RENEWED",
+        "QUALIFICATION_MODE_CHANGED",
+        "FIRST_PURCHASE_BYPASS",
         "STATUS_RESET",
         "ADMIN_SET_TIER",
     ]

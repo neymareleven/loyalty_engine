@@ -570,8 +570,15 @@ alembic upgrade head
    - `GET /rewards/{id}/delete-preview` puis `DELETE` (invalidation granulaire)
    - `GET /admin/rewards/ui-catalog` (workflow + politique delete)
  
+ - **Loyalty settings**: `GET/PATCH /admin/loyalty-settings`
+   - `qualification_mode` = `POINTS` | `PURCHASES`
+   - Bypass premier achat : `first_purchase_bypass_enabled`, `first_purchase_bypass_min_amount`, `first_purchase_bypass_tier_key`
+   - Validités : `points_validity_days`, `purchase_validity_days`, `loyalty_status_validity_days`
+
  - **Loyalty tiers**: `GET/POST/PATCH/DELETE /admin/loyalty-tiers`
+   - Seuils duals : `min_status_points` (POINTS) + `min_purchase_count` / `min_purchase_amount` (PURCHASES)
    - Used to compute the customer loyalty status and next tier information.
+   - Guide frontend : [`docs/LOYALTY_QUALIFICATION_FRONTEND.md`](docs/LOYALTY_QUALIFICATION_FRONTEND.md)
  
 
  - **Coupon types**: `GET/POST/PATCH/DELETE /admin/coupon-types`
@@ -671,6 +678,8 @@ alembic upgrade head
  ## Segmentation
 
  **Guide intégration frontend (INTERNAL + Unomi)** : [docs/SEGMENTS_FRONTEND.md](docs/SEGMENTS_FRONTEND.md) — détail Unomi statique (membres + suppression) : [section dédiée](docs/SEGMENTS_FRONTEND.md#unomi--segment-statique--membres-et-suppression)
+
+ **Guide frontend qualification paliers (POINTS / PURCHASES + bypass premier achat)** : [docs/LOYALTY_QUALIFICATION_FRONTEND.md](docs/LOYALTY_QUALIFICATION_FRONTEND.md)
 
  Segments are brand-scoped customer groups used for targeting:
 

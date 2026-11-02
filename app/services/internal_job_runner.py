@@ -17,7 +17,10 @@ from app.services.segment_membership_service import filter_customers_by_segment
 from app.models.transaction import Transaction
 from app.schemas.event import EventCreate
 from app.services.transaction_service import create_transaction
-from app.services.loyalty_status_service import update_customer_status
+from app.services.loyalty_status_service import (
+    QUALIFICATION_MODE_CHANGED_REASON,
+    update_customer_status,
+)
 
 
 @dataclass
@@ -142,6 +145,15 @@ def run_internal_job_once(
         expired = expire_points(db, brand=job.brand)
         return MaintenanceJobRunStats(expired=int(expired))
 
+    if job.job_key == "MAINT_EXPIRE_PURCHASES":
+        if not job.brand:
+            raise ValueError("MAINT_EXPIRE_PURCHASES requires job.brand")
+
+        from app.services.loyalty_validity_service import expire_purchases
+
+        expired = expire_purchases(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(expired))
+
     if job.job_key == "MAINT_EXPIRE_LOYALTY_STATUS":
         if not job.brand:
             raise ValueError("MAINT_EXPIRE_LOYALTY_STATUS requires job.brand")
@@ -156,6 +168,7 @@ def run_internal_job_once(
             raise ValueError("MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS requires job.brand")
 
         selector = job.selector or {}
+        apply_qualification_mode = bool(selector.get("apply_qualification_mode"))
         after_id_raw = selector.get("after_id")
         after_id: UUID | None = None
         if after_id_raw:
@@ -188,21 +201,28 @@ def run_internal_job_once(
             update_customer_status(
                 db,
                 c,
-                reason="AUTO_TIER_REFRESH",
+                reason=(
+                    QUALIFICATION_MODE_CHANGED_REASON
+                    if apply_qualification_mode
+                    else "AUTO_TIER_REFRESH"
+                ),
                 source_transaction_id=None,
                 depth=0,
                 refresh_window=True,
-                emit_events=False,
+                emit_events=bool(apply_qualification_mode),
+                allow_downgrade_before_expiry=bool(apply_qualification_mode),
             )
             if c.loyalty_status != before:
                 updated += 1
             last_id = c.id
 
         finished = len(customers) < batch_size
-        if finished:
-            job.selector = {"batch_size": batch_size}
-        else:
-            job.selector = {"after_id": str(last_id), "batch_size": batch_size}
+        next_selector = {"batch_size": batch_size}
+        if apply_qualification_mode and not finished:
+            next_selector["apply_qualification_mode"] = True
+        if not finished:
+            next_selector["after_id"] = str(last_id)
+        job.selector = next_selector
 
         db.flush()
         return CustomerRecomputeRunStats(processed=processed, updated=updated, finished=bool(finished))

@@ -33,7 +33,21 @@ def get_loyalty_tiers_ui_catalog():
             "brand": {"widget": "hidden"},
             "key": {"widget": "hidden"},
             "name": {"widget": "text"},
-            "min_status_points": {"widget": "number", "min": 0},
+            "min_status_points": {
+                "widget": "number",
+                "min": 0,
+                "label": "Seuil points (mode POINTS)",
+            },
+            "min_purchase_count": {
+                "widget": "number",
+                "min": 0,
+                "label": "Seuil nombre d'achats (mode PURCHASES)",
+            },
+            "min_purchase_amount": {
+                "widget": "number",
+                "min": 0,
+                "label": "Seuil montant total (mode PURCHASES)",
+            },
             "rank": {"widget": "hidden"},
             "active": {"widget": "switch"},
         },
@@ -41,11 +55,28 @@ def get_loyalty_tiers_ui_catalog():
             {
                 "name": "Silver",
                 "min_status_points": 100,
+                "min_purchase_count": 3,
+                "min_purchase_amount": 50000,
                 "active": True,
             }
         ],
         "notes": {
-            "baseTier": "Un tier Base (min_status_points=0) est créé automatiquement. Les autres tiers doivent avoir min_status_points > 0.",
+            "baseTier": (
+                "Un tier Base (min_status_points=0, min_purchase_count=0, min_purchase_amount=0) "
+                "est créé automatiquement."
+            ),
+            "qualificationMode": (
+                "GET/PATCH /admin/loyalty-settings → qualification_mode=POINTS|PURCHASES. "
+                "En mode POINTS, min_status_points est utilisé. "
+                "En mode PURCHASES, le client doit atteindre min_purchase_count ET min_purchase_amount."
+            ),
+            "firstPurchaseBypass": (
+                "GET/PATCH /admin/loyalty-settings → first_purchase_bypass_enabled, "
+                "first_purchase_bypass_min_amount, first_purchase_bypass_tier_key. "
+                "Si activé, le tout premier achat (transaction sale) d'un montant >= min_amount "
+                "accorde le palier cible s'il existe déjà, sans attendre les seuils du mode. "
+                "Un palier plus élevé déjà mérité par les seuils n'est pas abaissé."
+            ),
             "rank": "Calculé automatiquement côté serveur — ne pas envoyer rank=0 sauf pour le tier de base.",
         },
     }
@@ -95,7 +126,9 @@ def _recompute_customers(db: Session, brand: str) -> dict:
     return {"brand": brand, "customers": len(customers), "updated": updated}
 
 
-def _enqueue_recompute_customers_job(db: Session, brand: str) -> None:
+def _enqueue_recompute_customers_job(
+    db: Session, brand: str, *, apply_qualification_mode: bool = False
+) -> None:
     job = (
         db.query(InternalJob)
         .filter(InternalJob.job_key == "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS")
@@ -120,6 +153,8 @@ def _enqueue_recompute_customers_job(db: Session, brand: str) -> None:
     selector = dict(job.selector or {})
     selector.pop("after_id", None)
     selector.setdefault("batch_size", 500)
+    if apply_qualification_mode:
+        selector["apply_qualification_mode"] = True
     job.selector = selector
     job.active = True
     job.next_run_at = datetime.utcnow()
@@ -152,6 +187,18 @@ def _initial_rank_for_new_tier(*, db: Session, brand: str, min_status_points: in
     return max(int(existing_count), 1)
 
 
+def _as_non_negative_int(value, *, field: str) -> int:
+    if value is None:
+        raise HTTPException(status_code=400, detail=f"{field} is required")
+    try:
+        parsed = int(value)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{field} must be a whole number")
+    if parsed < 0:
+        raise HTTPException(status_code=400, detail=f"{field} must be 0 or more")
+    return parsed
+
+
 def _validate_tier_payload(
     *,
     db: Session,
@@ -161,20 +208,16 @@ def _validate_tier_payload(
     name: str,
     rank: int,
     min_status_points: int,
+    min_purchase_count: int = 0,
+    min_purchase_amount: int = 0,
     active: bool,
 ):
     if not (name and str(name).strip()):
         raise HTTPException(status_code=400, detail="Level name is required")
-    if min_status_points is None:
-        raise HTTPException(status_code=400, detail="Minimum status points is required")
 
-    try:
-        min_i = int(min_status_points)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Minimum status points must be a whole number")
-
-    if min_i < 0:
-        raise HTTPException(status_code=400, detail="Minimum status points must be 0 or more")
+    min_i = _as_non_negative_int(min_status_points, field="min_status_points")
+    min_count = _as_non_negative_int(min_purchase_count, field="min_purchase_count")
+    min_amount = _as_non_negative_int(min_purchase_amount, field="min_purchase_amount")
 
     dup_name_q = db.query(LoyaltyTier.id).filter(LoyaltyTier.brand == brand).filter(LoyaltyTier.name == name)
     if tier_id is not None:
@@ -199,13 +242,37 @@ def _validate_tier_payload(
     simulated = []
     for t in tiers:
         if tier_id is not None and t.id == tier_id:
-            simulated.append({"min": min_i, "key": key, "active": bool(active)})
+            simulated.append(
+                {
+                    "min": min_i,
+                    "count": min_count,
+                    "amount": min_amount,
+                    "key": key,
+                    "active": bool(active),
+                }
+            )
         else:
-            simulated.append({"min": int(t.min_status_points), "key": t.key, "active": bool(t.active)})
+            simulated.append(
+                {
+                    "min": int(t.min_status_points),
+                    "count": int(getattr(t, "min_purchase_count", 0) or 0),
+                    "amount": int(getattr(t, "min_purchase_amount", 0) or 0),
+                    "key": t.key,
+                    "active": bool(t.active),
+                }
+            )
     if tier_id is None:
-        simulated.append({"min": min_i, "key": key, "active": bool(active)})
+        simulated.append(
+            {
+                "min": min_i,
+                "count": min_count,
+                "amount": min_amount,
+                "key": key,
+                "active": bool(active),
+            }
+        )
 
-    simulated.sort(key=lambda x: x["min"])
+    simulated.sort(key=lambda x: (x["min"], x["count"], x["amount"]))
     for prev, cur in zip(simulated, simulated[1:]):
         if cur["min"] <= prev["min"]:
             raise HTTPException(
@@ -213,11 +280,17 @@ def _validate_tier_payload(
                 detail="Invalid levels configuration: minimum status points must be unique and strictly increasing",
             )
 
-    active_zero = any((t["active"] is True) and int(t["min"]) == 0 for t in simulated)
+    active_zero = any(
+        (t["active"] is True) and int(t["min"]) == 0 and int(t["count"]) == 0 and int(t["amount"]) == 0
+        for t in simulated
+    )
     if not active_zero:
         raise HTTPException(
             status_code=400,
-            detail="Invalid levels configuration: you must have at least one active level with min_status_points=0",
+            detail=(
+                "Invalid levels configuration: you must have at least one active base level "
+                "with min_status_points=0, min_purchase_count=0 and min_purchase_amount=0"
+            ),
         )
 
 
@@ -258,6 +331,8 @@ def create_loyalty_tier(
         i += 1
         key = f"{base}_{i}"
 
+    min_purchase_count = int(getattr(payload, "min_purchase_count", 0) or 0)
+    min_purchase_amount = int(getattr(payload, "min_purchase_amount", 0) or 0)
     _validate_tier_payload(
         db=db,
         brand=active_brand,
@@ -266,6 +341,8 @@ def create_loyalty_tier(
         name=payload.name,
         rank=0,
         min_status_points=payload.min_status_points,
+        min_purchase_count=min_purchase_count,
+        min_purchase_amount=min_purchase_amount,
         active=payload.active,
     )
 
@@ -274,6 +351,8 @@ def create_loyalty_tier(
         key=key,
         name=payload.name,
         min_status_points=payload.min_status_points,
+        min_purchase_count=min_purchase_count,
+        min_purchase_amount=min_purchase_amount,
         rank=_initial_rank_for_new_tier(
             db=db,
             brand=active_brand,
@@ -332,6 +411,8 @@ def update_loyalty_tier(
     final_key = data.get("key", obj.key)
     final_name = data.get("name", obj.name)
     final_min = data.get("min_status_points", obj.min_status_points)
+    final_count = data.get("min_purchase_count", getattr(obj, "min_purchase_count", 0) or 0)
+    final_amount = data.get("min_purchase_amount", getattr(obj, "min_purchase_amount", 0) or 0)
     final_active = data.get("active", obj.active)
     _validate_tier_payload(
         db=db,
@@ -341,6 +422,8 @@ def update_loyalty_tier(
         name=final_name,
         rank=0,
         min_status_points=final_min,
+        min_purchase_count=final_count,
+        min_purchase_amount=final_amount,
         active=final_active,
     )
 
@@ -371,12 +454,19 @@ def delete_loyalty_tier(
     if not obj or obj.brand != active_brand:
         raise HTTPException(status_code=404, detail="Tier not found")
 
-    if bool(obj.active) and int(obj.min_status_points) == 0:
+    is_base = (
+        int(obj.min_status_points) == 0
+        and int(getattr(obj, "min_purchase_count", 0) or 0) == 0
+        and int(getattr(obj, "min_purchase_amount", 0) or 0) == 0
+    )
+    if bool(obj.active) and is_base:
         remaining_active_zero = (
             db.query(func.count(LoyaltyTier.id))
             .filter(LoyaltyTier.brand == active_brand)
             .filter(LoyaltyTier.active.is_(True))
             .filter(LoyaltyTier.min_status_points == 0)
+            .filter(LoyaltyTier.min_purchase_count == 0)
+            .filter(LoyaltyTier.min_purchase_amount == 0)
             .filter(LoyaltyTier.id != obj.id)
             .scalar()
             or 0
@@ -384,7 +474,10 @@ def delete_loyalty_tier(
         if int(remaining_active_zero) <= 0:
             raise HTTPException(
                 status_code=400,
-                detail="You cannot delete the last active level with min_status_points=0",
+                detail=(
+                    "You cannot delete the last active base level "
+                    "(min_status_points=0, min_purchase_count=0, min_purchase_amount=0)"
+                ),
             )
 
     db.delete(obj)
@@ -466,6 +559,8 @@ def ensure_base_loyalty_tier(
         key=key,
         name=name,
         min_status_points=0,
+        min_purchase_count=0,
+        min_purchase_amount=0,
         rank=0,
         active=True,
     )

@@ -55,7 +55,7 @@ def get_next_points_expiry_date(db: Session, customer_id) -> date | None:
 def resolve_points_expires_at(db: Session, customer_id) -> datetime | None:
     """Display date for « Points valables jusqu'au » — null when nothing left to expire."""
     expiry_date = get_next_points_expiry_date(db, customer_id)
-    if expiry_date is None:
+    if not isinstance(expiry_date, date):
         return None
     return datetime.combine(expiry_date, time(23, 59, 59))
 

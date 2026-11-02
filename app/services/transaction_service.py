@@ -297,6 +297,21 @@ def create_transaction(db: Session, event_data):
             process_transaction_rules(db, transaction)
             transaction.processed_at = datetime.utcnow()
             db.commit()
+
+            # Purchase qualification: record +1 purchase / +amount after a successful sale process.
+            if str(transaction.status or "").upper().startswith("PROCESSED"):
+                customer = resolve_customer_for_transaction(
+                    db,
+                    brand=transaction.brand,
+                    profile_id=transaction.profile_id,
+                    payload=transaction.payload if isinstance(transaction.payload, dict) else None,
+                    transaction_type=transaction.transaction_type,
+                )
+                if customer:
+                    from app.services.purchase_service import record_purchase_from_transaction
+
+                    record_purchase_from_transaction(db, customer=customer, transaction=transaction)
+                    db.commit()
         except Exception as e:
             db.rollback()
             msg = str(e)

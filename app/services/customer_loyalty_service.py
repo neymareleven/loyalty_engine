@@ -13,6 +13,12 @@ from app.models.transaction import Transaction
 from app.services.contact_service import get_customer
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import update_customer_status
+from app.services.purchase_service import (
+    QUALIFICATION_PURCHASES,
+    apply_purchase_delta,
+    get_purchase_balances,
+    get_qualification_mode,
+)
 from app.services.wallet_service import get_status_points_balance
 
 
@@ -25,6 +31,10 @@ class LoyaltyTierOverrideResult:
     from_points_balance: int
     to_points_balance: int
     points_delta: int
+    from_purchase_count: int = 0
+    to_purchase_count: int = 0
+    from_purchase_amount: int = 0
+    to_purchase_amount: int = 0
 
 
 def _utcnow() -> datetime:
@@ -39,7 +49,7 @@ def set_customer_loyalty_tier(
     tier_key: str,
     reason: str | None = None,
 ) -> LoyaltyTierOverrideResult:
-    """Admin override: align status points to the target tier minimum and set loyalty_status."""
+    """Admin override: align counters to the target tier minimum and set loyalty_status."""
     tier_key = (tier_key or "").strip()
     if not tier_key:
         raise HTTPException(status_code=400, detail="tierKey is required")
@@ -67,10 +77,17 @@ def set_customer_loyalty_tier(
     if not tier:
         raise HTTPException(status_code=400, detail="Target loyalty tier not found")
 
+    mode = get_qualification_mode(db, brand=brand)
     from_tier_key = customer.loyalty_status
     target_points = int(tier.min_status_points or 0)
     current_balance = int(get_status_points_balance(db, customer.id) or 0)
     delta = int(target_points) - int(current_balance)
+
+    from_count, from_amount = get_purchase_balances(db, customer.id)
+    target_count = int(getattr(tier, "min_purchase_count", 0) or 0)
+    target_amount = int(getattr(tier, "min_purchase_amount", 0) or 0)
+    count_delta = int(target_count) - int(from_count)
+    amount_delta = int(target_amount) - int(from_amount)
 
     now = _utcnow()
     tx = Transaction(
@@ -83,9 +100,14 @@ def set_customer_loyalty_tier(
             "tierKey": tier_key,
             "fromStatus": from_tier_key,
             "toStatus": tier_key,
+            "qualificationMode": mode,
             "fromPointsBalance": int(current_balance),
             "toPointsBalance": int(target_points),
             "delta": int(delta),
+            "fromPurchaseCount": int(from_count),
+            "toPurchaseCount": int(target_count),
+            "fromPurchaseAmount": int(from_amount),
+            "toPurchaseAmount": int(target_amount),
             "reason": reason or "ADMIN_OVERRIDE",
         },
         status="PROCESSED",
@@ -94,7 +116,7 @@ def set_customer_loyalty_tier(
     db.add(tx)
     db.flush()
 
-    if delta != 0:
+    if mode != QUALIFICATION_PURCHASES and delta != 0:
         pm_type = "EARN" if delta > 0 else "DEDUCT"
         expires_at = None
         if delta > 0:
@@ -111,8 +133,18 @@ def set_customer_loyalty_tier(
             )
         )
         db.flush()
+        customer.status_points = int(get_status_points_balance(db, customer.id) or 0)
 
-    customer.status_points = int(get_status_points_balance(db, customer.id) or 0)
+    if mode == QUALIFICATION_PURCHASES and (count_delta != 0 or amount_delta != 0):
+        movement_type = "EARN" if (count_delta > 0 or amount_delta > 0) else "DEDUCT"
+        apply_purchase_delta(
+            db,
+            customer=customer,
+            quantity_delta=count_delta,
+            amount_delta=amount_delta,
+            source_transaction_id=tx.id,
+            movement_type=movement_type,
+        )
 
     update_customer_status(
         db,
@@ -136,12 +168,17 @@ def set_customer_loyalty_tier(
         transport_override="profiles",
     )
 
+    to_count, to_amount = get_purchase_balances(db, customer.id)
     return LoyaltyTierOverrideResult(
         customer=customer,
         transaction=tx,
         from_tier_key=from_tier_key,
         to_tier_key=tier_key,
         from_points_balance=int(current_balance),
-        to_points_balance=int(target_points),
+        to_points_balance=int(get_status_points_balance(db, customer.id) or 0),
         points_delta=int(delta),
+        from_purchase_count=int(from_count),
+        to_purchase_count=int(to_count),
+        from_purchase_amount=int(from_amount),
+        to_purchase_amount=int(to_amount),
     )

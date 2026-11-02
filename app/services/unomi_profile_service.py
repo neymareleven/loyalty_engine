@@ -21,6 +21,11 @@ from app.services.unomi_settings_service import (
     unomi_profile_sync_event_type,
     unomi_profile_sync_transport,
 )
+from app.services.purchase_service import (
+    get_purchase_balances,
+    get_qualification_mode,
+    resolve_purchases_expires_at,
+)
 from app.services.wallet_service import get_status_points_balance, resolve_points_expires_at
 
 logger = logging.getLogger(__name__)
@@ -33,6 +38,9 @@ _UNOMI_LOYALTY_MANAGED_KEYS = frozenset(
         "loyaltyStatus",
         "statusPoints",
         "loyaltyPointsBalance",
+        "loyaltyQualificationMode",
+        "loyaltyPurchaseCount",
+        "loyaltyPurchaseAmountTotal",
         "loyaltyCustomerStatus",
         "loyaltyTierName",
         "loyaltyEngineCustomerId",
@@ -41,6 +49,7 @@ _UNOMI_LOYALTY_MANAGED_KEYS = frozenset(
         "loyaltyStatusAssignedAt",
         "loyaltyStatusExpiresAt",
         "pointsExpiresAt",
+        "purchasesExpiresAt",
         "statusPointsResetAt",
         "loyaltyCreatedAt",
         "loyaltyUpdatedAt",
@@ -92,6 +101,8 @@ _INTERNAL_TRANSACTION_TYPES_NO_UNOMI_SYNC = frozenset(
         "TIER_UPGRADED",
         "TIER_DOWNGRADED",
         "TIER_RENEWED",
+        "QUALIFICATION_MODE_CHANGED",
+        "FIRST_PURCHASE_BYPASS",
         "ADMIN_SET_TIER",
     }
 )
@@ -378,9 +389,13 @@ def build_loyalty_program_unomi_properties(
         int(get_status_points_balance(db, customer.id) or 0) if include_points_balance else None
     )
 
+    purchase_count, purchase_amount = get_purchase_balances(db, customer.id)
     properties: dict[str, Any] = {
         "loyaltyStatus": customer.loyalty_status,
         "statusPoints": int(customer.status_points or 0),
+        "loyaltyQualificationMode": get_qualification_mode(db, brand=customer.brand),
+        "loyaltyPurchaseCount": purchase_count,
+        "loyaltyPurchaseAmountTotal": purchase_amount,
         "loyaltyCustomerStatus": customer.status,
         "loyaltyTierName": tier_name,
         "loyaltyEngineCustomerId": str(customer.id),
@@ -404,6 +419,7 @@ def build_loyalty_program_unomi_properties(
         "loyaltyStatusAssignedAt": _iso_or_none(customer.loyalty_status_assigned_at),
         "loyaltyStatusExpiresAt": _iso_or_none(customer.loyalty_status_expires_at),
         "pointsExpiresAt": _iso_or_none(resolve_points_expires_at(db, customer.id)),
+        "purchasesExpiresAt": _iso_or_none(resolve_purchases_expires_at(db, customer.id)),
         "statusPointsResetAt": _iso_or_none(customer.status_points_reset_at),
         "loyaltyCreatedAt": _iso_or_none(customer.created_at),
         "loyaltyUpdatedAt": _iso_or_none(customer.updated_at),

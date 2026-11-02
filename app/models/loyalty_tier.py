@@ -18,6 +18,8 @@ class LoyaltyTier(Base):
     name = Column(String(200), nullable=False)
 
     min_status_points = Column(Integer, nullable=False)
+    min_purchase_count = Column(Integer, nullable=False, default=0)
+    min_purchase_amount = Column(Integer, nullable=False, default=0)
     rank = Column(Integer, nullable=False)
 
     active = Column(Boolean, default=True)

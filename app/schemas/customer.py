@@ -38,6 +38,10 @@ class CustomerOut(BaseModel):
     status_points_reset_at: Optional[datetime] = None
     points_balance: Optional[int] = None
 
+    purchase_count: int = 0
+    purchase_amount_total: int = 0
+    purchases_expires_at: Optional[datetime] = None
+
     points_expires_at: Optional[datetime] = None
     loyalty_status_assigned_at: Optional[datetime] = None
     loyalty_status_expires_at: Optional[datetime] = None
