@@ -46,6 +46,7 @@ from app.services.customer_serialization import serialize_customer_out
 from app.services.loyalty_status_service import last_change_from_tier_event, update_customer_status
 from app.services.profile_reconciliation_service import reconcile_profile_view
 from app.services.purchase_service import (
+    backfill_customer_purchase_movements_from_sales,
     get_purchase_balances,
     get_qualification_mode,
     resolve_purchases_expires_at,
@@ -350,6 +351,8 @@ def list_purchase_movements(
 ):
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
+    backfill_customer_purchase_movements_from_sales(db, customer)
+    db.commit()
 
     from app.models.purchase_movement import PurchaseMovement
 
@@ -592,6 +595,18 @@ def get_customer_loyalty(
     )
 
     qualification_mode = get_qualification_mode(db, brand=brand)
+    if qualification_mode == "PURCHASES":
+        backfill_customer_purchase_movements_from_sales(db, customer)
+        update_customer_status(
+            db,
+            customer,
+            reason="PURCHASE_HISTORY_BACKFILL",
+            refresh_window=False,
+            emit_events=False,
+            allow_downgrade_before_expiry=True,
+        )
+        db.commit()
+        db.refresh(customer)
     purchase_count, purchase_amount = get_purchase_balances(db, customer.id)
 
     tiers = (

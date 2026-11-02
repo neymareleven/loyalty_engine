@@ -8,6 +8,7 @@ from uuid import UUID
 from croniter import croniter
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.customer import Customer
 from app.models.internal_job import InternalJob
@@ -167,8 +168,52 @@ def run_internal_job_once(
         if not job.brand:
             raise ValueError("MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS requires job.brand")
 
-        selector = job.selector or {}
+        selector = dict(job.selector or {})
         apply_qualification_mode = bool(selector.get("apply_qualification_mode"))
+        backfill_purchases = bool(selector.get("backfill_purchases"))
+        try:
+            batch_size = int(selector.get("batch_size") or 500)
+        except Exception:
+            batch_size = 500
+        batch_size = max(1, min(batch_size, 5000))
+
+        if backfill_purchases:
+            from app.services.purchase_service import backfill_purchase_movements_from_sales
+
+            backfill_after_raw = selector.get("backfill_after_id")
+            backfill_after_id: UUID | None = None
+            if backfill_after_raw:
+                try:
+                    backfill_after_id = UUID(str(backfill_after_raw))
+                except Exception:
+                    backfill_after_id = None
+            backfill_stats = backfill_purchase_movements_from_sales(
+                db,
+                brand=job.brand,
+                after_id=backfill_after_id,
+                batch_size=batch_size,
+            )
+            if not backfill_stats.get("finished"):
+                next_selector = {
+                    "batch_size": batch_size,
+                    "backfill_purchases": True,
+                    "apply_qualification_mode": True if apply_qualification_mode else False,
+                }
+                if backfill_stats.get("after_id"):
+                    next_selector["backfill_after_id"] = str(backfill_stats["after_id"])
+                if apply_qualification_mode:
+                    next_selector["apply_qualification_mode"] = True
+                job.selector = next_selector
+                flag_modified(job, "selector")
+                db.flush()
+                return CustomerRecomputeRunStats(
+                    processed=int(backfill_stats.get("scanned") or 0),
+                    updated=int(backfill_stats.get("created") or 0),
+                    finished=False,
+                )
+            selector.pop("backfill_purchases", None)
+            selector.pop("backfill_after_id", None)
+
         after_id_raw = selector.get("after_id")
         after_id: UUID | None = None
         if after_id_raw:
@@ -176,11 +221,6 @@ def run_internal_job_once(
                 after_id = UUID(str(after_id_raw))
             except Exception:
                 after_id = None
-        try:
-            batch_size = int(selector.get("batch_size") or 500)
-        except Exception:
-            batch_size = 500
-        batch_size = max(1, min(batch_size, 5000))
 
         q = (
             db.query(Customer)
@@ -223,6 +263,7 @@ def run_internal_job_once(
         if not finished:
             next_selector["after_id"] = str(last_id)
         job.selector = next_selector
+        flag_modified(job, "selector")
 
         db.flush()
         return CustomerRecomputeRunStats(processed=processed, updated=updated, finished=bool(finished))

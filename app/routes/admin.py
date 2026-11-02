@@ -270,7 +270,11 @@ def update_loyalty_settings(
     prev_points_days = obj.points_validity_days
     prev_status_days = obj.loyalty_status_validity_days
     prev_purchase_days = getattr(obj, "purchase_validity_days", None)
-    from app.services.purchase_service import normalize_qualification_mode
+    from app.services.purchase_service import (
+        QUALIFICATION_PURCHASES,
+        backfill_purchase_movements_from_sales,
+        normalize_qualification_mode,
+    )
 
     prev_qualification_mode = normalize_qualification_mode(getattr(obj, "qualification_mode", None))
 
@@ -342,11 +346,6 @@ def update_loyalty_settings(
     if should_backfill_points or should_backfill_status or should_backfill_purchases:
         initialize_validity_windows_for_existing_customers(db, brand=brand)
 
-    if normalize_qualification_mode(getattr(obj, "qualification_mode", None)) != prev_qualification_mode:
-        from app.routes.loyalty_tiers import _enqueue_recompute_customers_job
-
-        _enqueue_recompute_customers_job(db, brand, apply_qualification_mode=True)
-
     from app.services.loyalty_settings_service import (
         first_purchase_bypass_config_error,
         serialize_loyalty_settings,
@@ -355,6 +354,30 @@ def update_loyalty_settings(
     bypass_error = first_purchase_bypass_config_error(db, brand=brand, settings=obj)
     if bypass_error:
         raise HTTPException(status_code=400, detail=bypass_error)
+
+    new_mode = normalize_qualification_mode(getattr(obj, "qualification_mode", None))
+    mode_changed = new_mode != prev_qualification_mode
+    if mode_changed or new_mode == QUALIFICATION_PURCHASES:
+        from app.routes.loyalty_tiers import _enqueue_recompute_customers_job
+
+        more_sales = True
+        after_id = None
+        for _ in range(20):
+            stats = backfill_purchase_movements_from_sales(
+                db, brand=brand, after_id=after_id, batch_size=500
+            )
+            after_id = stats.get("after_id")
+            if stats.get("finished"):
+                more_sales = False
+                break
+
+        _enqueue_recompute_customers_job(
+            db,
+            brand,
+            apply_qualification_mode=True,
+            backfill_purchases=more_sales,
+            backfill_after_id=after_id if more_sales else None,
+        )
 
     db.commit()
     db.refresh(obj)

@@ -127,7 +127,12 @@ def _recompute_customers(db: Session, brand: str) -> dict:
 
 
 def _enqueue_recompute_customers_job(
-    db: Session, brand: str, *, apply_qualification_mode: bool = False
+    db: Session,
+    brand: str,
+    *,
+    apply_qualification_mode: bool = False,
+    backfill_purchases: bool = False,
+    backfill_after_id=None,
 ) -> None:
     job = (
         db.query(InternalJob)
@@ -150,12 +155,22 @@ def _enqueue_recompute_customers_job(
         db.add(job)
         db.flush()
 
+    from sqlalchemy.orm.attributes import flag_modified
+
     selector = dict(job.selector or {})
     selector.pop("after_id", None)
+    selector.pop("backfill_after_id", None)
     selector.setdefault("batch_size", 500)
     if apply_qualification_mode:
         selector["apply_qualification_mode"] = True
+    if backfill_purchases:
+        selector["backfill_purchases"] = True
+        if backfill_after_id:
+            selector["backfill_after_id"] = str(backfill_after_id)
+    else:
+        selector.pop("backfill_purchases", None)
     job.selector = selector
+    flag_modified(job, "selector")
     job.active = True
     job.next_run_at = datetime.utcnow()
     db.commit()

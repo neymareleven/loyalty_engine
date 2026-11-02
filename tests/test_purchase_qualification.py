@@ -16,6 +16,7 @@ from app.services.purchase_service import (
     first_purchase_bypass_eligible,
     is_purchase_transaction_type,
     normalize_qualification_mode,
+    purchase_expires_on,
     serialize_purchase_movement_out,
 )
 
@@ -40,8 +41,18 @@ def test_normalize_qualification_mode():
 def test_extract_purchase_amount_prefers_order_total():
     assert extract_purchase_amount({"orderTotal": 525, "total": 100}) == 525
     assert extract_purchase_amount({"total": "6 300 CFA"}) == 6300
+    assert extract_purchase_amount({"properties": {"orderTotal": 1200}}) == 1200
+    assert extract_purchase_amount({"amount": 99}) == 99
     assert extract_purchase_amount({}) == 0
     assert extract_purchase_amount(None) == 0
+
+
+def test_purchase_expiry_uses_sale_date_not_today():
+    from datetime import date, datetime
+
+    assert purchase_expires_on(datetime(2026, 1, 1, 15, 0, 0), 30) == date(2026, 1, 31)
+    assert purchase_expires_on(date(2025, 12, 1), 10) == date(2025, 12, 11)
+    assert purchase_expires_on(datetime(2026, 1, 1), None) is None
 
 
 def test_sale_is_purchase_transaction_type():
@@ -89,6 +100,10 @@ def test_first_purchase_bypass_eligible_only_first_sale_over_threshold():
     ) is False
     assert first_purchase_bypass_eligible(
         enabled=True, min_amount=None, purchase_amount=50000, is_first_purchase=True, tier_key="gold"
+    ) is False
+    # Un client qui a déjà un achat n'est jamais éligible, même au-dessus du seuil.
+    assert first_purchase_bypass_eligible(
+        enabled=True, min_amount=1, purchase_amount=10_000_000, is_first_purchase=False, tier_key="gold"
     ) is False
 
 

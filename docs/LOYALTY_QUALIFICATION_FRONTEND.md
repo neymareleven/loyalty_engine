@@ -38,7 +38,7 @@ Doit répondre `{"ok": true, ...}` et inclure notamment :
 | **Mode PURCHASES** | Le palier dépend de **deux** compteurs : `purchaseCount` **ET** `purchaseAmountTotal` vs `min_purchase_count` **ET** `min_purchase_amount`. Chaque `sale` PROCESSED est comptée **automatiquement** (+1 achat, +montant). **Pas de règle** de qualification à créer pour ça. |
 | **Les deux modes sont exclusifs** | Une marque n’utilise qu’un mode à la fois (`qualification_mode`). Les compteurs points **et** achats continuent d’être enregistrés en parallèle, mais **seul le mode actif** décide du palier affiché. |
 | **Bypass premier achat** | Option marque : si activé, le **tout premier** `sale` d’un montant ≥ seuil accorde immédiatement un **palier existant** choisi. Ce n’est **pas** une règle. |
-| **Changement de mode** | Recalcule immédiatement tous les clients pour le nouveau mode. Ce n’est **ni** upgrade, **ni** downgrade, **ni** renew. |
+| **Changement de mode** | Recalcule les paliers pour le **nouveau** mode (ce n’est **ni** upgrade, **ni** downgrade, **ni** renew). Les `sale` historiques sont d’abord converties en compteurs d’achats. |
 | **Upgrade / downgrade / renew** | Inchangés pour la vie normale d’un palier (upgrade immédiat ; downgrade seulement après expiration de fenêtre ; renew = même palier + fenêtre prolongée). |
 
 ### Ce que le front ne doit PAS faire
@@ -233,14 +233,23 @@ X-Brand: {brand}
 }
 ```
 
-### Affichage selon `qualificationMode`
+### Affichage selon `qualificationMode` — masquer le reste
 
-| Mode | Afficher en premier | Progression vers le palier suivant |
-|------|---------------------|------------------------------------|
-| `POINTS` | `statusPoints` / `pointsBalance`, `pointsExpiresAt` | `pointsToNextTier` |
-| `PURCHASES` | `purchaseCount`, `purchaseAmountTotal`, `purchasesExpiresAt` | `purchasesToNextTier` **et** `amountToNextTier` (les deux) |
+Ne **pas** afficher les champs de l’autre mode (pas en secondaire non plus).
 
-Les compteurs « non actifs » peuvent rester visibles en secondaire (ex. points en mode PURCHASES), mais le **palier** et la **barre de progression** doivent suivre le mode.
+| Mode | **Afficher** | **Masquer** |
+|------|----------------|---------------|
+| `POINTS` | palier, `statusPoints` / `pointsBalance`, `pointsExpiresAt`, `pointsToNextTier`, ledger points | `purchaseCount`, `purchaseAmountTotal`, `purchasesExpiresAt`, `purchasesToNextTier`, `amountToNextTier`, onglet / ledger `purchase-movements`, seuils achats du palier suivant |
+| `PURCHASES` | palier, `purchaseCount`, `purchaseAmountTotal`, `purchasesExpiresAt`, `purchasesToNextTier` **et** `amountToNextTier`, ledger `purchase-movements` | `statusPoints` / `pointsBalance`, `pointsExpiresAt`, `pointsToNextTier`, onglet / ledger points (sauf si l’écran wallet points est un module séparé hors « qualification palier ») |
+
+Toujours afficher : `qualificationMode`, `loyaltyStatus` / palier courant, `lastChange`, `nextTier` **filtré** (libellés de seuils du mode actif seulement).
+
+Dans `currentTier` / `nextTier` / liste `tiers` :
+
+- POINTS : montrer `minStatusPoints` ; cacher `minPurchaseCount` / `minPurchaseAmount`
+- PURCHASES : montrer `minPurchaseCount` + `minPurchaseAmount` ; cacher `minStatusPoints`
+
+`lastChange` : afficher le label du mode (y compris `mode_changed` / `first_purchase_bypass`). Ne pas inventer un badge upgrade pour le bypass.
 
 ### `lastChange` — labels UI obligatoires
 
@@ -275,7 +284,7 @@ GET /customers/{brand}/{profileId}/purchase-movements?limit=100&offset=0
 
 Champs utiles : `quantity`, `amount`, `type` (`EARN` | `DEDUCT` | `EXPIRE`), `expires_at`, `status`, `isExpired`.
 
-Afficher ce ledger surtout en mode PURCHASES (miroir des point-movements).
+**Masquer** ce ledger en mode POINTS. **Masquer** le ledger points dans le bloc qualification palier en mode PURCHASES.
 
 ---
 
@@ -296,7 +305,24 @@ UX rules (recommandation) :
 
 ---
 
-## 5. Séquence d’un achat (pour tooltips / docs UI)
+## 5. Quand le recalcul a lieu (important)
+
+Au **PATCH `/admin/loyalty-settings`** (changement de mode, ou sauvegarde alors que le mode est déjà `PURCHASES`) :
+
+1. Le backend rejoue les transactions **`sale` PROCESSED** manquantes → lots d’achats (nombre + montant).
+2. La **date de la vente** (`processed_at` sinon `created_at`) sert de base à la validité : `expires_at = date_vente + purchase_validity_days` (si configuré). Une vente trop ancienne n’est plus comptée.
+3. Un job `MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS` applique ensuite le palier du mode choisi **tout de suite** (pas d’anti-downgrade « on garde Or parce que la fenêtre points n’est pas finie »).
+4. L’historique reçoit `QUALIFICATION_MODE_CHANGED` (`lastChange: "mode_changed"`), pas upgrade/downgrade/renew.
+
+Les ventes **futures** sont comptées à l’ingestion (plus besoin de règle).
+
+À l’ouverture d’une **fiche client** en mode `PURCHASES`, le backend rejoue aussi les `sale` de **ce** client puis aligne le palier, pour que les compteurs ne restent pas à 0.
+
+Le bypass premier achat **n’est pas** appliqué rétroactivement. Il ne se déclenche que si **cette** `sale` est la **toute première** `sale` PROCESSED du client (historique inclus : un client qui a déjà acheté n’est plus éligible, même si le bypass vient d’être activé).
+
+---
+
+## 6. Séquence d’un achat (pour tooltips / docs UI)
 
 1. Transaction `sale` ingérée → règles exécutées.
 2. Backend enregistre +1 purchase / +montant (automatique).
@@ -306,7 +332,7 @@ UX rules (recommandation) :
 
 ---
 
-## 6. Checklist d’implémentation frontend
+## 7. Checklist d’implémentation frontend
 
 ### Settings
 
@@ -324,8 +350,9 @@ UX rules (recommandation) :
 
 ### Fiche client
 
-- [ ] Lire `qualificationMode` et brancher l’UI principale dessus
-- [ ] Afficher compteurs achats + progression duale en PURCHASES
+- [ ] Lire `qualificationMode` et **masquer** tout champ / onglet de l’autre mode (voir §3)
+- [ ] POINTS : points + `pointsToNextTier` uniquement
+- [ ] PURCHASES : achats + montant + `purchasesToNextTier` et `amountToNextTier` uniquement
 - [ ] Labels `lastChange` pour `mode_changed` et `first_purchase_bypass`
 - [ ] Historique : nouveaux types d’événements
 - [ ] Onglet / section `purchase-movements`
@@ -337,14 +364,14 @@ UX rules (recommandation) :
 ### QA manuelle suggérée
 
 1. Mode POINTS + règles earn_points → upgrade classique.
-2. Switch vers PURCHASES → clients recalculés ; `lastChange` / historique = mode_changed (pas downgrade).
+2. Switch vers PURCHASES → compteurs alimentés depuis l’historique `sale` ; palier du mode achats ; `lastChange` / historique = mode_changed (pas downgrade). Les ventes expirées (date + validité) ne comptent plus.
 3. Bypass on, premier sale ≥ seuil → palier cible + `first_purchase_bypass`.
 4. Deuxième sale → pas de re-bypass.
 5. Bypass off → premier gros achat ne force plus le palier.
 
 ---
 
-## 7. Référence API rapide
+## 8. Référence API rapide
 
 | Besoin | Endpoint |
 |--------|----------|

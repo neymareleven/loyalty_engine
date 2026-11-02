@@ -4,18 +4,32 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from typing import Any
+from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.models.purchase_movement import PurchaseMovement
+from app.models.transaction import Transaction
 from app.services.loyalty_settings_service import get_loyalty_settings
 
 QUALIFICATION_POINTS = "POINTS"
 QUALIFICATION_PURCHASES = "PURCHASES"
 
 _PURCHASE_TRANSACTION_TYPES = frozenset({"sale"})
-_AMOUNT_FIELD_CANDIDATES = ("orderTotal", "total", "order_total", "subtotal")
+_AMOUNT_FIELD_CANDIDATES = (
+    "orderTotal",
+    "total",
+    "order_total",
+    "subtotal",
+    "amount",
+    "orderAmount",
+    "grandTotal",
+    "ttc",
+    "paidAmount",
+    "value",
+)
+_NESTED_PAYLOAD_KEYS = ("properties", "attributes", "order", "data", "payload")
 
 
 def normalize_qualification_mode(value: Any) -> str:
@@ -30,26 +44,62 @@ def get_qualification_mode(db: Session, *, brand: str) -> str:
     return normalize_qualification_mode(getattr(settings, "qualification_mode", None) if settings else None)
 
 
+def _parse_amount_value(raw: Any) -> int | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return max(0, raw)
+    if isinstance(raw, float):
+        return max(0, int(raw))
+    if isinstance(raw, str):
+        from app.services.rule_engine import _as_number_from_text
+
+        parsed = _as_number_from_text(raw)
+        if parsed is not None:
+            return max(0, int(parsed))
+    return None
+
+
 def extract_purchase_amount(payload: dict | None) -> int:
     if not isinstance(payload, dict):
         return 0
-    for key in _AMOUNT_FIELD_CANDIDATES:
-        raw = payload.get(key)
-        if raw is None or raw == "":
-            continue
-        if isinstance(raw, bool):
-            continue
-        if isinstance(raw, int):
-            return max(0, raw)
-        if isinstance(raw, float):
-            return max(0, int(raw))
-        if isinstance(raw, str):
-            from app.services.rule_engine import _as_number_from_text
-
-            parsed = _as_number_from_text(raw)
+    bags: list[dict] = [payload]
+    for nest in _NESTED_PAYLOAD_KEYS:
+        inner = payload.get(nest)
+        if isinstance(inner, dict):
+            bags.append(inner)
+    for bag in bags:
+        for key in _AMOUNT_FIELD_CANDIDATES:
+            parsed = _parse_amount_value(bag.get(key))
             if parsed is not None:
-                return max(0, int(parsed))
+                return parsed
     return 0
+
+
+def transaction_occurred_at(transaction) -> datetime:
+    for attr in ("processed_at", "created_at"):
+        value = getattr(transaction, attr, None)
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None) if value.tzinfo else value
+    return datetime.utcnow()
+
+
+def purchase_expires_on(occurred_at: datetime | date | None, validity_days: int | None) -> date | None:
+    if validity_days is None:
+        return None
+    try:
+        days = int(validity_days)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(occurred_at, datetime):
+        start = occurred_at.date()
+    elif isinstance(occurred_at, date):
+        start = occurred_at
+    else:
+        start = date.today()
+    return start + timedelta(days=days)
 
 
 def _active_purchase_filters(*, today: date | None = None):
@@ -111,6 +161,30 @@ def is_purchase_transaction_type(transaction_type: str | None) -> bool:
     return str(transaction_type or "").strip().lower() in _PURCHASE_TRANSACTION_TYPES
 
 
+def customer_has_prior_processed_sale(
+    db: Session,
+    customer,
+    *,
+    excluding_transaction_id=None,
+) -> bool:
+    """True if the customer already has another PROCESSED sale (any profile alias)."""
+    from app.services.contact_service import list_customer_unomi_profile_ids
+
+    profile_ids = list_customer_unomi_profile_ids(db, customer)
+    if not profile_ids:
+        return False
+    q = (
+        db.query(Transaction.id)
+        .filter(Transaction.brand == customer.brand)
+        .filter(Transaction.profile_id.in_(profile_ids))
+        .filter(func.lower(Transaction.transaction_type) == "sale")
+        .filter(func.upper(Transaction.status).like("PROCESSED%"))
+    )
+    if excluding_transaction_id is not None:
+        q = q.filter(Transaction.id != excluding_transaction_id)
+    return q.first() is not None
+
+
 def first_purchase_bypass_eligible(
     *,
     enabled: bool,
@@ -157,13 +231,16 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
         .filter(PurchaseMovement.type == "EARN")
         .scalar()
     )
-    is_first_purchase = int(prior_earn or 0) == 0
+    is_first_purchase = int(prior_earn or 0) == 0 and not customer_has_prior_processed_sale(
+        db, customer, excluding_transaction_id=getattr(transaction, "id", None)
+    )
 
     payload = transaction.payload if isinstance(transaction.payload, dict) else {}
     amount = extract_purchase_amount(payload)
     settings = get_loyalty_settings(db, brand=customer.brand)
     validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
-    expires_at = (date.today() + timedelta(days=int(validity_days))) if validity_days is not None else None
+    occurred_at = transaction_occurred_at(transaction)
+    expires_at = purchase_expires_on(occurred_at, validity_days)
 
     bypass_tier_key = None
     if settings and first_purchase_bypass_eligible(
@@ -181,6 +258,7 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
         amount=amount,
         type="EARN",
         source_transaction_id=transaction.id,
+        created_at=occurred_at,
         expires_at=expires_at,
     )
     db.add(movement)
@@ -203,6 +281,146 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
     return movement
 
 
+def backfill_purchase_movements_from_sales(
+    db: Session,
+    *,
+    brand: str,
+    after_id: UUID | None = None,
+    batch_size: int = 500,
+) -> dict:
+    """Create missing EARN purchase lots from historical PROCESSED sale transactions.
+
+    Idempotent. Does not apply first-purchase bypass and does not emit palier events.
+    Expiry is computed from the sale date + purchase_validity_days.
+    """
+    from app.services.contact_service import get_customer
+
+    batch_size = max(1, min(int(batch_size or 500), 5000))
+    settings = get_loyalty_settings(db, brand=brand)
+    validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
+
+    q = (
+        db.query(Transaction)
+        .outerjoin(
+            PurchaseMovement,
+            and_(
+                PurchaseMovement.source_transaction_id == Transaction.id,
+                PurchaseMovement.type == "EARN",
+            ),
+        )
+        .filter(Transaction.brand == brand)
+        .filter(func.lower(Transaction.transaction_type) == "sale")
+        .filter(func.upper(Transaction.status).like("PROCESSED%"))
+        .filter(PurchaseMovement.id.is_(None))
+        .order_by(Transaction.id.asc())
+    )
+    if after_id:
+        q = q.filter(Transaction.id > after_id)
+
+    sales = q.limit(batch_size).all()
+    created = 0
+    skipped = 0
+    touched_ids: set = set()
+    last_id = None
+    customer_cache: dict[str, Any] = {}
+
+    for tx in sales:
+        last_id = tx.id
+        profile_id = (tx.profile_id or "").strip()
+        customer = customer_cache.get(profile_id) if profile_id else None
+        if profile_id and profile_id not in customer_cache:
+            customer = get_customer(db, brand, profile_id)
+            customer_cache[profile_id] = customer
+        if customer is None:
+            skipped += 1
+            continue
+
+        payload = tx.payload if isinstance(tx.payload, dict) else {}
+        amount = extract_purchase_amount(payload)
+        occurred_at = transaction_occurred_at(tx)
+        movement = PurchaseMovement(
+            customer_id=customer.id,
+            quantity=1,
+            amount=amount,
+            type="EARN",
+            source_transaction_id=tx.id,
+            created_at=occurred_at,
+            expires_at=purchase_expires_on(occurred_at, validity_days),
+        )
+        db.add(movement)
+        created += 1
+        touched_ids.add(customer.id)
+
+    if touched_ids:
+        db.flush()
+        from app.models.customer import Customer
+
+        customers = db.query(Customer).filter(Customer.id.in_(list(touched_ids))).all()
+        for customer in customers:
+            sync_customer_purchase_counters(db, customer)
+        db.flush()
+
+    finished = len(sales) < batch_size
+    return {
+        "scanned": len(sales),
+        "created": created,
+        "skipped": skipped,
+        "finished": finished,
+        "after_id": last_id,
+    }
+
+
+def backfill_customer_purchase_movements_from_sales(db: Session, customer) -> int:
+    """Backfill missing sale lots for one customer (master profile_id + aliases)."""
+    from app.services.contact_service import list_customer_unomi_profile_ids
+
+    profile_ids = list_customer_unomi_profile_ids(db, customer)
+    if not profile_ids:
+        return 0
+
+    settings = get_loyalty_settings(db, brand=customer.brand)
+    validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
+
+    sales = (
+        db.query(Transaction)
+        .outerjoin(
+            PurchaseMovement,
+            and_(
+                PurchaseMovement.source_transaction_id == Transaction.id,
+                PurchaseMovement.type == "EARN",
+            ),
+        )
+        .filter(Transaction.brand == customer.brand)
+        .filter(Transaction.profile_id.in_(profile_ids))
+        .filter(func.lower(Transaction.transaction_type) == "sale")
+        .filter(func.upper(Transaction.status).like("PROCESSED%"))
+        .filter(PurchaseMovement.id.is_(None))
+        .all()
+    )
+    created = 0
+    for tx in sales:
+        payload = tx.payload if isinstance(tx.payload, dict) else {}
+        occurred_at = transaction_occurred_at(tx)
+        db.add(
+            PurchaseMovement(
+                customer_id=customer.id,
+                quantity=1,
+                amount=extract_purchase_amount(payload),
+                type="EARN",
+                source_transaction_id=tx.id,
+                created_at=occurred_at,
+                expires_at=purchase_expires_on(occurred_at, validity_days),
+            )
+        )
+        created += 1
+    if created:
+        db.flush()
+        sync_customer_purchase_counters(db, customer)
+    else:
+        sync_customer_purchase_counters(db, customer)
+    return created
+
+
 def apply_purchase_delta(
     db: Session,
     *,
@@ -218,7 +436,7 @@ def apply_purchase_delta(
     validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
     expires_at = None
     if movement_type == "EARN" and (quantity_delta > 0 or amount_delta > 0) and validity_days is not None:
-        expires_at = date.today() + timedelta(days=int(validity_days))
+        expires_at = purchase_expires_on(datetime.utcnow(), validity_days)
 
     movement = PurchaseMovement(
         customer_id=customer.id,
