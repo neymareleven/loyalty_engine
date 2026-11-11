@@ -127,3 +127,13 @@ def test_serialize_purchase_movement_expire_type():
     assert out["status"] == "expired"
     assert out["quantity"] == -1
     assert out["amount"] == -500
+
+
+def test_unique_min_status_points_avoids_duplicate_zero():
+    from app.routes.loyalty_tiers import unique_min_status_points
+
+    assert unique_min_status_points(set(), 0) == 0
+    assert unique_min_status_points({0}, 0) == 1
+    assert unique_min_status_points({0, 1, 5}, 1) == 6
+    assert unique_min_status_points({0, 100}, 100) == 101
+    assert unique_min_status_points({0, 100}, 50) == 50

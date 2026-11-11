@@ -274,6 +274,12 @@ def customer_transaction_filters(db: Session, *, brand: str, customer: Customer)
             [
                 func.lower(Transaction.payload["email"].as_string()) == email,
                 func.lower(Transaction.payload["scopeEmail"].as_string()) == scope_email,
+                func.lower(Transaction.payload["billing_email"].as_string()) == email,
+                func.lower(Transaction.payload["billingEmail"].as_string()) == email,
+                func.lower(Transaction.payload["properties"]["email"].as_string()) == email,
+                func.lower(Transaction.payload["properties"]["scopeEmail"].as_string()) == scope_email,
+                func.lower(Transaction.payload["properties"]["billing_email"].as_string()) == email,
+                func.lower(Transaction.payload["properties"]["billingEmail"].as_string()) == email,
             ]
         )
     if not clauses:
@@ -380,13 +386,18 @@ def _extract_email_from_payload(payload: dict | None, *, brand: str) -> str | No
     """Broad email extraction (repair scripts / diagnostics). Includes billing fields."""
     if not isinstance(payload, dict):
         return None
-    trusted = _extract_trusted_identity_email_from_payload(payload, brand=brand)
-    if trusted:
-        return trusted
-    for key in ("billing_email", "recipientEmail", "billingEmail"):
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip() and "@" in val:
-            return val.strip().lower()
+    sources = [payload]
+    nested = payload.get("properties")
+    if isinstance(nested, dict):
+        sources.append(nested)
+    for source in sources:
+        trusted = _extract_trusted_identity_email_from_payload(source, brand=brand)
+        if trusted:
+            return trusted
+        for key in ("billing_email", "recipientEmail", "billingEmail"):
+            val = source.get(key)
+            if isinstance(val, str) and val.strip() and "@" in val:
+                return val.strip().lower()
     return None
 
 

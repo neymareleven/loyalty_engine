@@ -2,6 +2,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -115,9 +116,17 @@ def list_transactions(
         raise HTTPException(status_code=400, detail="brand does not match active brand context")
     q = q.filter(Transaction.brand == active_brand)
     if profileId:
-        q = q.filter(Transaction.profile_id == profileId)
+        customer, _ = resolve_customer_for_lookup(
+            db,
+            brand=active_brand,
+            profile_id=profileId,
+        )
+        if customer:
+            q = q.filter(customer_transaction_filters(db, brand=active_brand, customer=customer))
+        else:
+            q = q.filter(Transaction.profile_id == profileId)
     if status:
-        q = q.filter(Transaction.status == status)
+        q = q.filter(func.upper(Transaction.status) == status.strip().upper())
 
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -203,7 +212,7 @@ def list_transactions_by_user_and_type(
         db.query(Transaction)
         .filter(Transaction.brand == active_brand)
         .filter(customer_transaction_filters(db, brand=active_brand, customer=customer))
-        .filter(Transaction.transaction_type == transactionType)
+        .filter(func.lower(Transaction.transaction_type) == (transactionType or "").strip().lower())
     )
 
     limit = max(1, min(limit, 200))

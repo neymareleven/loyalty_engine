@@ -123,6 +123,71 @@ def get_loyalty_settings(
     return serialize_loyalty_settings(obj)
 
 
+@router.get("/loyalty-settings/ui-catalog")
+def get_loyalty_settings_ui_catalog():
+    """Which settings/tier/customer fields the admin UI must show for the active mode.
+
+    The API still returns every stored field. The other mode keeps running in the
+    background; the UI must not display it.
+    """
+    shared_settings = [
+        "qualification_mode",
+        "loyalty_status_validity_days",
+        "first_purchase_bypass_enabled",
+        "first_purchase_bypass_min_amount",
+        "first_purchase_bypass_tier_key",
+    ]
+    return {
+        "visibleByMode": {
+            "POINTS": {
+                "settings": shared_settings + ["points_validity_days"],
+                "tierFields": ["name", "min_status_points", "active"],
+                "customerFields": [
+                    "loyaltyStatus",
+                    "statusPoints",
+                    "pointsBalance",
+                    "pointsExpiresAt",
+                    "pointsToNextTier",
+                    "lastChange",
+                ],
+                "ledgers": ["points"],
+            },
+            "PURCHASES": {
+                "settings": shared_settings + ["purchase_validity_days"],
+                "tierFields": ["name", "min_purchase_count", "min_purchase_amount", "active"],
+                "customerFields": [
+                    "loyaltyStatus",
+                    "purchaseCount",
+                    "purchaseAmountTotal",
+                    "purchasesExpiresAt",
+                    "purchasesToNextTier",
+                    "amountToNextTier",
+                    "lastChange",
+                ],
+                "ledgers": ["purchases"],
+            },
+        },
+        "alwaysHideOtherMode": True,
+        "notes": {
+            "immersion": (
+                "Afficher uniquement les champs du mode actif partout "
+                "(settings, paliers, fiche client, ledgers). Ne pas montrer "
+                "points_validity_days en PURCHASES ni purchase_validity_days en POINTS."
+            ),
+            "bypass": (
+                "Le bypass premier achat n’est pas un réglage POINTS : il fonctionne "
+                "dans les deux modes. Mêmes champs (enabled, montant min du premier sale, "
+                "palier cible). Il n’utilise pas les points. Le montrer dans les deux modes "
+                "avec un libellé « premier achat », jamais « points »."
+            ),
+            "loyaltyStatusWindow": (
+                "loyalty_status_validity_days = durée du palier (anti-downgrade / renew). "
+                "Commun aux deux modes."
+            ),
+        },
+    }
+
+
 @router.get("/ui-options/coupon-types")
 def list_ui_options_coupon_types(
     brand: str = Depends(get_active_brand),
@@ -1220,7 +1285,7 @@ def list_ui_options_loyalty_tiers(
     q = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand)
     if active is not None:
         q = q.filter(LoyaltyTier.active.is_(active))
-    items = q.order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc()).all()
+    items = q.order_by(LoyaltyTier.rank.asc(), LoyaltyTier.created_at.asc()).all()
     return {
         "brand": brand,
         "items": [
@@ -1495,7 +1560,7 @@ def get_rules_ui_bundle(
 ):
     rewards = db.query(Reward).filter(Reward.brand == brand).order_by(Reward.name.asc()).all()
     event_types = db.query(TransactionType).filter(TransactionType.brand == brand).order_by(TransactionType.key.asc()).all()
-    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc()).all()
+    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).order_by(LoyaltyTier.rank.asc(), LoyaltyTier.created_at.asc()).all()
     return {
         "brand": brand,
         "rules": {"uiCatalog": get_rules_ui_catalog()},

@@ -124,15 +124,25 @@ Aide utilisateur :
 
 > Si le premier achat d’un client atteint au moins ce montant, il reçoit immédiatement le palier choisi, sans attendre les seuils du mode. Uniquement sur la toute première vente.
 
-### Validités
+### Immersion mode — settings (obligatoire)
 
-| Champ | Sens |
-|-------|------|
-| `points_validity_days` | Expiration des lots de points (`null` = pas d’expiration) |
-| `purchase_validity_days` | Expiration des lots d’achats/montants |
-| `loyalty_status_validity_days` | Fenêtre du palier (anti-downgrade / renew) |
+L’API renvoie **tous** les champs (l’autre mode tourne en arrière-plan). L’UI n’affiche **que** le mode actif. Source machine-readable :
 
-En mode PURCHASES, afficher clairement `purchase_validity_days`. En mode POINTS, `points_validity_days` reste prioritaire dans l’UI, mais les deux peuvent coexister.
+```http
+GET /admin/loyalty-settings/ui-catalog
+```
+
+| Champ | POINTS | PURCHASES |
+|-------|--------|-----------|
+| `qualification_mode` | visible | visible |
+| `loyalty_status_validity_days` (durée du palier) | visible | visible |
+| `points_validity_days` | **visible** | **masquer** |
+| `purchase_validity_days` | **masquer** | **visible** |
+| Bypass premier achat (`enabled` + montant + palier) | **visible** | **visible** |
+
+Le bypass **n’est pas** un réglage POINTS. Même formulaire dans les deux modes : switch, montant minimum du **premier achat**, palier cible. Jamais de champ « points » dans cette section. Libellé : « Bypass premier achat ».
+
+Au switch de mode : masquer / afficher immédiatement, sans laisser les champs de l’autre mode en lecture seule.
 
 ---
 
@@ -160,19 +170,21 @@ Les payloads utilisent **snake_case** :
 
 | Champ | Mode POINTS | Mode PURCHASES |
 |-------|-------------|----------------|
-| `min_status_points` | **Décide** le palier | Conservé / éditable (utilisé si on repasse en POINTS) |
-| `min_purchase_count` | Conservé | **Requis avec** le montant |
-| `min_purchase_amount` | Conservé | **Requis avec** le compteur |
+| `min_status_points` | **Décide** le palier — champ visible | **Masquer** (le serveur aligne automatiquement pour l’unicité / le rank) |
+| `min_purchase_count` | **Masquer** (auto-aligné) | **Requis avec** le montant |
+| `min_purchase_amount` | **Masquer** (auto-aligné) | **Requis avec** le compteur |
 
 **Règle produit** en mode PURCHASES : le client doit atteindre **les deux** seuils pour un palier.
 
 ### UX formulaires paliers
 
-- Afficher **toujours** les 3 seuils (recommandé), avec un badge / hint selon le mode actif :
-  - POINTS → highlight `min_status_points`
-  - PURCHASES → highlight `min_purchase_count` + `min_purchase_amount`
-- Empêcher de sauvegarder un palier « Or » avec count/amount à 0 si le mode actif est PURCHASES (sauf palier de base).
-- Le palier de **base** (seuils 0) est créé automatiquement — ne pas le proposer comme cible de bypass sauf intention explicite.
+- **Masquer** les champs du mode inactif. Ne pas les laisser en lecture seule / secondaire.
+  - POINTS → uniquement `name`, `min_status_points`, `active`
+  - PURCHASES → uniquement `name`, `min_purchase_count`, `min_purchase_amount`, `active`
+- Omettre les champs cachés (ou les envoyer à `0`) : le backend les réécrit pour qu’ils restent **strictement croissants** dans l’ordre du mode actif, afin qu’un switch de mode ne permute pas les ranks.
+- Palier de **base** du mode POINTS : `min_status_points = 0`. Palier de **base** du mode PURCHASES : `min_purchase_count = 0` **et** `min_purchase_amount = 0`. `POST /admin/loyalty-tiers/ensure-base-tier` crée / réactive le palier 0/0/0.
+- Empêcher de sauvegarder un palier non-base avec count **et** amount à 0 si le mode actif est PURCHASES.
+- Ne pas proposer le palier de base comme cible de bypass sauf intention explicite.
 
 Liste :
 
@@ -340,12 +352,13 @@ Le bypass premier achat **n’est pas** appliqué rétroactivement. Il ne se dé
 - [ ] Confirmation avant switch de mode
 - [ ] Section bypass (enabled + amount + tier select)
 - [ ] Validation enabled ⇒ amount + tier
-- [ ] Afficher / éditer `purchase_validity_days`
+- [ ] POINTS : uniquement `points_validity_days` ; PURCHASES : uniquement `purchase_validity_days`
+- [ ] Bypass visible **dans les deux modes** (libellé premier achat, pas points)
 
 ### Paliers
 
-- [ ] Champs `min_purchase_count` + `min_purchase_amount` dans create/edit
-- [ ] Hints / highlight selon mode actif
+- [ ] Champs visibles **selon le mode** uniquement (masquer l’autre mode, voir §2)
+- [ ] Ne pas envoyer les seuils cachés (le serveur auto-aligne)
 - [ ] Select bypass alimenté par les paliers actifs
 
 ### Fiche client
@@ -376,6 +389,7 @@ Le bypass premier achat **n’est pas** appliqué rétroactivement. Il ne se dé
 | Besoin | Endpoint |
 |--------|----------|
 | Mode + validités + bypass | `GET/PATCH /admin/loyalty-settings` |
+| Champs visibles par mode | `GET /admin/loyalty-settings/ui-catalog` |
 | Santé schéma | `GET /admin/health/schema` |
 | CRUD paliers | `/admin/loyalty-tiers` |
 | Hints formulaires paliers | `GET /admin/loyalty-tiers/ui-catalog` |
@@ -388,3 +402,27 @@ Convention naming :
 
 - Admin settings / tiers payloads : **snake_case**
 - Customer loyalty payload : **camelCase**
+
+---
+
+## Prompt frontend (à coller tel quel)
+
+Immersion totale dans `qualification_mode` (POINTS | PURCHASES). L’autre mode continue en backend : **ne jamais l’afficher**. Lire `GET /admin/loyalty-settings` + `GET /admin/loyalty-settings/ui-catalog` et n’afficher que `visibleByMode[mode]`.
+
+**Settings**
+- Radio POINTS / PURCHASES + confirmation au switch (recalcul palier, pas un upgrade/downgrade).
+- POINTS seulement : `points_validity_days`. PURCHASES seulement : `purchase_validity_days`. Jamais les deux à l’écran.
+- Les deux modes : `loyalty_status_validity_days` (durée du palier).
+- Bypass premier achat **dans les deux modes** (ce n’est pas un réglage points) : `first_purchase_bypass_enabled`, `first_purchase_bypass_min_amount` (montant du 1er sale), `first_purchase_bypass_tier_key` (palier existant). Libellés « premier achat / montant / palier », jamais « points ». Masquer le montant et le palier si switch bypass off.
+
+**Paliers**
+- POINTS : `name`, `min_status_points`, `active`. PURCHASES : `name`, `min_purchase_count`, `min_purchase_amount`, `active`. Omettre le reste ; le serveur auto-aligne les seuils cachés.
+- Base POINTS = 0 points. Base PURCHASES = 0 achats ET 0 montant.
+
+**Fiche client / ledgers / nextTier**
+- POINTS : palier, points, expiration points, pointsToNext, ledger points. Masquer tout achat.
+- PURCHASES : palier, purchaseCount, purchaseAmountTotal, expiration achats, purchasesToNext + amountToNext, ledger purchase-movements. Masquer tout point de qualification.
+- `lastChange` `first_purchase_bypass` et `mode_changed` ≠ upgrade / downgrade / renew.
+
+**Règles**
+- En PURCHASES : bandeau « les règles earn_points n’attribuent plus le palier ». Ne pas présenter earn_points comme config du palier.

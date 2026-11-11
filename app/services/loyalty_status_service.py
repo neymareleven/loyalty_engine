@@ -34,6 +34,18 @@ def _tier_sort_key(tier: LoyaltyTier) -> tuple[int, int, int]:
     )
 
 
+def _tier_mode_sort_key(tier: LoyaltyTier, mode: str | None) -> tuple:
+    from app.services.purchase_service import QUALIFICATION_PURCHASES
+
+    if mode == QUALIFICATION_PURCHASES:
+        return (
+            int(getattr(tier, "min_purchase_count", 0) or 0),
+            int(getattr(tier, "min_purchase_amount", 0) or 0),
+            int(tier.min_status_points or 0),
+        )
+    return _tier_sort_key(tier)
+
+
 def _tier_meets_points(tier: LoyaltyTier, status_points: int) -> bool:
     return int(tier.min_status_points or 0) <= int(status_points or 0)
 
@@ -76,15 +88,17 @@ def compute_loyalty_status_from_tiers(
         qualifying = [t for t in active_tiers if _tier_meets_points(t, status_points)]
 
     if qualifying:
-        best = max(qualifying, key=_tier_sort_key)
+        best = max(qualifying, key=lambda t: _tier_mode_sort_key(t, mode))
         return best.key
 
-    # Fallback to lowest active tier (base) to avoid UNCONFIGURED when tiers exist.
-    lowest = min(active_tiers, key=_tier_sort_key)
+    # Fallback to lowest active tier (base) for the active qualification mode.
+    lowest = min(active_tiers, key=lambda t: _tier_mode_sort_key(t, mode))
     return lowest.key
 
 
 def _get_base_tier_key(db: Session, brand: str) -> str | None:
+    from app.services.purchase_service import get_qualification_mode
+
     tiers = (
         db.query(LoyaltyTier)
         .filter(LoyaltyTier.brand == brand)
@@ -93,7 +107,17 @@ def _get_base_tier_key(db: Session, brand: str) -> str | None:
     )
     if not tiers:
         return None
-    return min(tiers, key=_tier_sort_key).key
+    mode = get_qualification_mode(db, brand=brand)
+    zeros = [
+        t
+        for t in tiers
+        if int(t.min_status_points or 0) == 0
+        and int(getattr(t, "min_purchase_count", 0) or 0) == 0
+        and int(getattr(t, "min_purchase_amount", 0) or 0) == 0
+    ]
+    if zeros:
+        return min(zeros, key=lambda t: _tier_mode_sort_key(t, mode)).key
+    return min(tiers, key=lambda t: _tier_mode_sort_key(t, mode)).key
 
 
 def _get_tier_rank_value(db: Session, brand: str, tier_key: str) -> int | None:
@@ -179,12 +203,15 @@ def update_customer_status(
     )
     floor_key = (min_tier_key or "").strip() or None
     if floor_key:
-        floor_rank = _get_tier_sort_tuple(db, customer.brand, floor_key)
-        current_rank = _get_tier_sort_tuple(db, customer.brand, new_status) if new_status else None
-        if floor_rank is not None and (current_rank is None or current_rank < floor_rank):
+        bypass_rank = _get_tier_rank_value(db, customer.brand, floor_key)
+        computed_rank = _get_tier_rank_value(db, customer.brand, new_status) if new_status else None
+        if bypass_rank is not None and (computed_rank is None or computed_rank < bypass_rank):
             new_status = floor_key
             if not is_mode_switch:
                 reason = FIRST_PURCHASE_BYPASS_REASON
+                # Bypass must apply even if a leftover palier from the other mode is "higher".
+                allow_downgrade_before_expiry = True
+                refresh_window = True
     if new_status is None:
         if not customer.loyalty_status:
             customer.loyalty_status = "UNCONFIGURED"
@@ -207,8 +234,8 @@ def update_customer_status(
     # Prevent automatic downgrades before the current loyalty status validity window expires.
     # Upgrades are still applied immediately.
     if customer.loyalty_status and customer.loyalty_status != new_status:
-        old_rank = _get_tier_sort_tuple(db, customer.brand, customer.loyalty_status)
-        new_rank = _get_tier_sort_tuple(db, customer.brand, new_status)
+        old_rank = _get_tier_rank_value(db, customer.brand, customer.loyalty_status)
+        new_rank = _get_tier_rank_value(db, customer.brand, new_status)
         is_downgrade = bool(old_rank is not None and new_rank is not None and new_rank < old_rank)
         not_expired = bool(customer.loyalty_status_expires_at is not None and customer.loyalty_status_expires_at > now)
         if is_downgrade and not allow_downgrade_before_expiry and not_expired:
@@ -260,8 +287,8 @@ def update_customer_status(
         elif status_changed and reason == FIRST_PURCHASE_BYPASS_REASON:
             transaction_type = FIRST_PURCHASE_BYPASS_REASON
         elif status_changed:
-            old_rank = _get_tier_sort_tuple(db, customer.brand, old_status)
-            new_rank = _get_tier_sort_tuple(db, customer.brand, new_status)
+            old_rank = _get_tier_rank_value(db, customer.brand, old_status)
+            new_rank = _get_tier_rank_value(db, customer.brand, new_status)
             transaction_type = (
                 "TIER_UPGRADED"
                 if (new_rank is not None and (old_rank is None or new_rank > old_rank))

@@ -13,6 +13,7 @@ from app.models.internal_job import InternalJob
 from app.models.loyalty_tier import LoyaltyTier
 from app.schemas.loyalty_tier import LoyaltyTierCreate, LoyaltyTierOut, LoyaltyTierUpdate
 from app.services.loyalty_status_service import update_customer_status
+from app.services.purchase_service import QUALIFICATION_PURCHASES, get_qualification_mode
 
 
 router = APIRouter(prefix="/admin/loyalty-tiers", tags=["admin-loyalty-tiers"])
@@ -78,6 +79,17 @@ def get_loyalty_tiers_ui_catalog():
                 "Un palier plus élevé déjà mérité par les seuils n'est pas abaissé."
             ),
             "rank": "Calculé automatiquement côté serveur — ne pas envoyer rank=0 sauf pour le tier de base.",
+            "hideInactiveModeFields": (
+                "Masquer les champs du mode inactif. En POINTS : n’afficher que min_status_points. "
+                "En PURCHASES : n’afficher que min_purchase_count et min_purchase_amount. "
+                "Omettre les champs cachés (ou les envoyer à 0) : le serveur aligne les seuils "
+                "du mode inactif pour garder rank/ordre cohérents au changement de mode."
+            ),
+            "baseTierByMode": (
+                "Le palier de base du mode POINTS a min_status_points=0. "
+                "Le palier de base du mode PURCHASES a min_purchase_count=0 et min_purchase_amount=0. "
+                "POST /admin/loyalty-tiers/ensure-base-tier crée ou réactive ce palier 0/0/0."
+            ),
         },
     }
 
@@ -176,16 +188,83 @@ def _enqueue_recompute_customers_job(
     db.commit()
 
 
+def _tier_mode_order_key(tier: LoyaltyTier, mode: str) -> tuple:
+    points = int(tier.min_status_points or 0)
+    count = int(getattr(tier, "min_purchase_count", 0) or 0)
+    amount = int(getattr(tier, "min_purchase_amount", 0) or 0)
+    created = getattr(tier, "created_at", None)
+    if mode == QUALIFICATION_PURCHASES:
+        return (count, amount, points, created or datetime.min)
+    return (points, count, amount, created or datetime.min)
+
+
 def _recompute_tier_ranks(db: Session, brand: str) -> None:
-    tiers = (
-        db.query(LoyaltyTier)
-        .filter(LoyaltyTier.brand == brand)
-        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
-        .all()
-    )
+    mode = get_qualification_mode(db, brand=brand)
+    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).all()
+    tiers.sort(key=lambda t: _tier_mode_order_key(t, mode))
     for i, t in enumerate(tiers):
         t.rank = i
     db.flush()
+
+
+def _align_inactive_mode_thresholds(db: Session, brand: str) -> None:
+    """Keep hidden-mode thresholds unique and strictly increasing in the active-mode order.
+
+    The palier order follows the active qualification mode. The other mode's minima are
+    auto-adjusted so switching mode does not invert ranks.
+    """
+    mode = get_qualification_mode(db, brand=brand)
+    tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).all()
+    if not tiers:
+        return
+    ordered = sorted(tiers, key=lambda t: _tier_mode_order_key(t, mode))
+    if mode == QUALIFICATION_PURCHASES:
+        prev_points = -1
+        for i, t in enumerate(ordered):
+            points = int(t.min_status_points or 0)
+            if i == 0:
+                if points != 0:
+                    t.min_status_points = 0
+                prev_points = 0
+            elif points <= prev_points:
+                t.min_status_points = prev_points + 1
+                prev_points = int(t.min_status_points)
+            else:
+                prev_points = points
+    else:
+        prev_count, prev_amount = -1, -1
+        for i, t in enumerate(ordered):
+            count = int(getattr(t, "min_purchase_count", 0) or 0)
+            amount = int(getattr(t, "min_purchase_amount", 0) or 0)
+            if i == 0:
+                t.min_purchase_count = 0
+                t.min_purchase_amount = 0
+                prev_count, prev_amount = 0, 0
+                continue
+            if count < prev_count:
+                count = prev_count
+                t.min_purchase_count = count
+            if count == prev_count and amount <= prev_amount:
+                amount = prev_amount + 1
+                t.min_purchase_amount = amount
+            prev_count, prev_amount = count, amount
+    db.flush()
+    _recompute_tier_ranks(db, brand)
+
+
+def unique_min_status_points(used: set[int], desired: int) -> int:
+    """Next value that satisfies uq_loyalty_tiers_brand_min_status_points."""
+    desired = int(desired or 0)
+    if desired not in used:
+        return desired
+    return (max(used) + 1) if used else 0
+
+
+def _used_min_status_points(db: Session, brand: str, *, exclude_id: UUID | None = None) -> set[int]:
+    q = db.query(LoyaltyTier.min_status_points).filter(LoyaltyTier.brand == brand)
+    if exclude_id is not None:
+        q = q.filter(LoyaltyTier.id != exclude_id)
+    return {int(v[0] or 0) for v in q.all()}
 
 
 def _initial_rank_for_new_tier(*, db: Session, brand: str, min_status_points: int) -> int:
@@ -240,18 +319,7 @@ def _validate_tier_payload(
     if dup_name_q.first():
         raise HTTPException(status_code=400, detail="A level with this name already exists for this brand")
 
-    dup_min_q = (
-        db.query(LoyaltyTier.id)
-        .filter(LoyaltyTier.brand == brand)
-        .filter(LoyaltyTier.min_status_points == min_i)
-    )
-    if tier_id is not None:
-        dup_min_q = dup_min_q.filter(LoyaltyTier.id != tier_id)
-    if dup_min_q.first():
-        raise HTTPException(
-            status_code=400,
-            detail="You've already used this minimum status points value for another level in this brand",
-        )
+    mode = get_qualification_mode(db, brand=brand)
 
     tiers = db.query(LoyaltyTier).filter(LoyaltyTier.brand == brand).all()
     simulated = []
@@ -273,7 +341,7 @@ def _validate_tier_payload(
                     "count": int(getattr(t, "min_purchase_count", 0) or 0),
                     "amount": int(getattr(t, "min_purchase_amount", 0) or 0),
                     "key": t.key,
-                    "active": bool(t.active),
+                    "active": bool(active),
                 }
             )
     if tier_id is None:
@@ -287,26 +355,44 @@ def _validate_tier_payload(
             }
         )
 
-    simulated.sort(key=lambda x: (x["min"], x["count"], x["amount"]))
-    for prev, cur in zip(simulated, simulated[1:]):
-        if cur["min"] <= prev["min"]:
+    if mode == QUALIFICATION_PURCHASES:
+        simulated.sort(key=lambda x: (x["count"], x["amount"], x["min"]))
+        for prev, cur in zip(simulated, simulated[1:]):
+            if (cur["count"], cur["amount"]) <= (prev["count"], prev["amount"]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid levels: min_purchase_count then min_purchase_amount "
+                        "must be unique and strictly increasing"
+                    ),
+                )
+        has_base = any(
+            t["active"] and int(t["count"]) == 0 and int(t["amount"]) == 0 for t in simulated
+        )
+        if not has_base:
             raise HTTPException(
                 status_code=400,
-                detail="Invalid levels configuration: minimum status points must be unique and strictly increasing",
+                detail=(
+                    "Invalid levels: you must have at least one active base level "
+                    "with min_purchase_count=0 and min_purchase_amount=0"
+                ),
             )
-
-    active_zero = any(
-        (t["active"] is True) and int(t["min"]) == 0 and int(t["count"]) == 0 and int(t["amount"]) == 0
-        for t in simulated
-    )
-    if not active_zero:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid levels configuration: you must have at least one active base level "
-                "with min_status_points=0, min_purchase_count=0 and min_purchase_amount=0"
-            ),
-        )
+    else:
+        simulated.sort(key=lambda x: (x["min"], x["count"], x["amount"]))
+        for prev, cur in zip(simulated, simulated[1:]):
+            if cur["min"] <= prev["min"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid levels: minimum status points must be unique and strictly increasing"
+                    ),
+                )
+        has_base = any(t["active"] and int(t["min"]) == 0 for t in simulated)
+        if not has_base:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid levels: you must have at least one active base level with min_status_points=0",
+            )
 
 
 @router.get("", response_model=list[LoyaltyTierOut])
@@ -322,7 +408,7 @@ def list_loyalty_tiers(
     q = q.filter(LoyaltyTier.brand == active_brand)
     if active is not None:
         q = q.filter(LoyaltyTier.active.is_(active))
-    return q.order_by(LoyaltyTier.brand.asc(), LoyaltyTier.min_status_points.asc()).all()
+    return q.order_by(LoyaltyTier.brand.asc(), LoyaltyTier.rank.asc(), LoyaltyTier.created_at.asc()).all()
 
 
 @router.post("", response_model=LoyaltyTierOut)
@@ -348,6 +434,12 @@ def create_loyalty_tier(
 
     min_purchase_count = int(getattr(payload, "min_purchase_count", 0) or 0)
     min_purchase_amount = int(getattr(payload, "min_purchase_amount", 0) or 0)
+    min_status_points = int(getattr(payload, "min_status_points", 0) or 0)
+    if get_qualification_mode(db, brand=active_brand) == QUALIFICATION_PURCHASES:
+        min_status_points = unique_min_status_points(
+            _used_min_status_points(db, active_brand),
+            min_status_points,
+        )
     _validate_tier_payload(
         db=db,
         brand=active_brand,
@@ -355,7 +447,7 @@ def create_loyalty_tier(
         key=key,
         name=payload.name,
         rank=0,
-        min_status_points=payload.min_status_points,
+        min_status_points=min_status_points,
         min_purchase_count=min_purchase_count,
         min_purchase_amount=min_purchase_amount,
         active=payload.active,
@@ -365,19 +457,19 @@ def create_loyalty_tier(
         brand=active_brand,
         key=key,
         name=payload.name,
-        min_status_points=payload.min_status_points,
+        min_status_points=min_status_points,
         min_purchase_count=min_purchase_count,
         min_purchase_amount=min_purchase_amount,
         rank=_initial_rank_for_new_tier(
             db=db,
             brand=active_brand,
-            min_status_points=payload.min_status_points,
+            min_status_points=min_status_points,
         ),
         active=payload.active,
     )
     db.add(obj)
     db.flush()
-    _recompute_tier_ranks(db, active_brand)
+    _align_inactive_mode_thresholds(db, active_brand)
     db.commit()
     db.refresh(obj)
 
@@ -429,6 +521,12 @@ def update_loyalty_tier(
     final_count = data.get("min_purchase_count", getattr(obj, "min_purchase_count", 0) or 0)
     final_amount = data.get("min_purchase_amount", getattr(obj, "min_purchase_amount", 0) or 0)
     final_active = data.get("active", obj.active)
+    if get_qualification_mode(db, brand=active_brand) == QUALIFICATION_PURCHASES:
+        final_min = unique_min_status_points(
+            _used_min_status_points(db, active_brand, exclude_id=tier_id),
+            int(final_min or 0),
+        )
+        data["min_status_points"] = final_min
     _validate_tier_payload(
         db=db,
         brand=active_brand,
@@ -450,7 +548,7 @@ def update_loyalty_tier(
         setattr(obj, k, v)
 
     db.flush()
-    _recompute_tier_ranks(db, active_brand)
+    _align_inactive_mode_thresholds(db, active_brand)
     db.commit()
     db.refresh(obj)
 
@@ -496,6 +594,8 @@ def delete_loyalty_tier(
             )
 
     db.delete(obj)
+    db.flush()
+    _align_inactive_mode_thresholds(db, active_brand)
     db.commit()
 
     _enqueue_recompute_customers_job(db, active_brand)
@@ -521,8 +621,18 @@ def ensure_base_loyalty_tier(
         db.query(LoyaltyTier)
         .filter(LoyaltyTier.brand == active_brand)
         .filter(LoyaltyTier.min_status_points == 0)
+        .filter(LoyaltyTier.min_purchase_count == 0)
+        .filter(LoyaltyTier.min_purchase_amount == 0)
         .first()
     )
+    if not existing:
+        existing = (
+            db.query(LoyaltyTier)
+            .filter(LoyaltyTier.brand == active_brand)
+            .filter(LoyaltyTier.min_status_points == 0)
+            .order_by(LoyaltyTier.rank.asc())
+            .first()
+        )
     if existing:
         if not bool(existing.active):
             _validate_tier_payload(
@@ -537,7 +647,7 @@ def ensure_base_loyalty_tier(
             )
             existing.active = True
             db.flush()
-            _recompute_tier_ranks(db, active_brand)
+            _align_inactive_mode_thresholds(db, active_brand)
             db.commit()
             db.refresh(existing)
 
@@ -581,7 +691,7 @@ def ensure_base_loyalty_tier(
     )
     db.add(obj)
     db.flush()
-    _recompute_tier_ranks(db, active_brand)
+    _align_inactive_mode_thresholds(db, active_brand)
     db.commit()
     db.refresh(obj)
 

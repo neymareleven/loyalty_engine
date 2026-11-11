@@ -595,18 +595,17 @@ def get_customer_loyalty(
     )
 
     qualification_mode = get_qualification_mode(db, brand=brand)
-    if qualification_mode == "PURCHASES":
-        backfill_customer_purchase_movements_from_sales(db, customer)
-        update_customer_status(
-            db,
-            customer,
-            reason="PURCHASE_HISTORY_BACKFILL",
-            refresh_window=False,
-            emit_events=False,
-            allow_downgrade_before_expiry=True,
-        )
-        db.commit()
-        db.refresh(customer)
+    backfill_customer_purchase_movements_from_sales(db, customer)
+    update_customer_status(
+        db,
+        customer,
+        reason="PURCHASE_HISTORY_BACKFILL",
+        refresh_window=False,
+        emit_events=False,
+        allow_downgrade_before_expiry=False,
+    )
+    db.commit()
+    db.refresh(customer)
     purchase_count, purchase_amount = get_purchase_balances(db, customer.id)
 
     tiers = (
@@ -614,9 +613,7 @@ def get_customer_loyalty(
         .filter(LoyaltyTier.brand == brand)
         .filter(LoyaltyTier.active.is_(True))
         .order_by(
-            LoyaltyTier.min_status_points.asc(),
-            LoyaltyTier.min_purchase_count.asc(),
-            LoyaltyTier.min_purchase_amount.asc(),
+            LoyaltyTier.rank.asc(),
             LoyaltyTier.created_at.asc(),
         )
         .all()

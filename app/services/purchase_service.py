@@ -308,10 +308,11 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
         reason="PURCHASE_RECORDED",
         source_transaction_id=transaction.id,
         depth=0,
-        refresh_window=False,
+        refresh_window=bool(bypass_tier_key),
         emit_events=True,
         sync_unomi=False,
         min_tier_key=bypass_tier_key,
+        allow_downgrade_before_expiry=bool(bypass_tier_key),
     )
     return movement
 

@@ -11,7 +11,10 @@ class LoyaltyTierCreate(BaseModel):
     key: Optional[str] = None
     name: str
 
-    min_status_points: int = Field(description="Seuil points (mode POINTS).")
+    min_status_points: int = Field(
+        0,
+        description="Seuil points (mode POINTS). En mode PURCHASES peut être 0 : le serveur aligne automatiquement.",
+    )
     min_purchase_count: int = Field(0, description="Seuil nombre d'achats (mode PURCHASES).")
     min_purchase_amount: int = Field(0, description="Seuil montant total d'achats (mode PURCHASES).")
     rank: Optional[int] = None
