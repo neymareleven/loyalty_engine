@@ -43,7 +43,12 @@ from app.services.entitlement_history_service import build_customer_entitlement_
 from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
-from app.services.loyalty_status_service import last_change_from_tier_event, update_customer_status
+from app.services.loyalty_guarantee_service import serialize_guarantees
+from app.services.loyalty_status_service import (
+    compute_loyalty_status_from_tiers,
+    last_change_from_tier_event,
+    update_customer_status,
+)
 from app.services.profile_reconciliation_service import reconcile_profile_view
 from app.services.purchase_service import (
     backfill_customer_purchase_movements_from_sales,
@@ -260,8 +265,8 @@ def upsert_customer(
                 reason="AUTO_TIER_REFRESH",
                 source_transaction_id=None,
                 depth=0,
-                refresh_window=True,
-                emit_events=False,
+                refresh_window=False,
+                emit_events=True,
             )
 
         customer.last_activity_at = datetime.utcnow()
@@ -601,7 +606,7 @@ def get_customer_loyalty(
         customer,
         reason="PURCHASE_HISTORY_BACKFILL",
         refresh_window=False,
-        emit_events=False,
+        emit_events=True,
         allow_downgrade_before_expiry=False,
     )
     db.commit()
@@ -698,6 +703,15 @@ def get_customer_loyalty(
         "reconciliation": reconciliation,
         "qualificationMode": qualification_mode,
         "loyaltyStatus": customer.loyalty_status,
+        "earnedTier": compute_loyalty_status_from_tiers(
+            db,
+            brand,
+            sp,
+            purchase_count=purchase_count,
+            purchase_amount=purchase_amount,
+            qualification_mode=qualification_mode,
+        ),
+        "guarantees": serialize_guarantees(db, customer_id=customer.id),
         "statusPoints": sp,
         "pointsBalance": get_status_points_balance(db, customer.id),
         "pointsExpiresAt": resolve_points_expires_at(db, customer.id),
@@ -740,6 +754,7 @@ def get_customer_loyalty_history(
         "FIRST_PURCHASE_BYPASS",
         "STATUS_RESET",
         "ADMIN_SET_TIER",
+        "TIER_CHANGED",
     ]
 
     q = (

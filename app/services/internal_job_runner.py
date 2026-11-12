@@ -238,6 +238,22 @@ def run_internal_job_once(
         for c in customers:
             processed += 1
             before = c.loyalty_status
+            if apply_qualification_mode:
+                from app.services.loyalty_status_service import MODE_SWITCH_POLICY_HOLD
+                from app.models.customer_loyalty_guarantee import GUARANTEE_MODE_HOLD
+                from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
+                from app.services.loyalty_settings_service import get_loyalty_settings as _gls
+
+                settings = _gls(db, brand=job.brand)
+                policy = str(getattr(settings, "mode_switch_policy", "IMMEDIATE") or "IMMEDIATE").upper()
+                if policy == MODE_SWITCH_POLICY_HOLD and c.loyalty_status:
+                    grant_loyalty_guarantee(
+                        db,
+                        customer=c,
+                        source=GUARANTEE_MODE_HOLD,
+                        floor_tier_key=c.loyalty_status,
+                        expires_at=c.loyalty_status_expires_at,
+                    )
             update_customer_status(
                 db,
                 c,
@@ -248,8 +264,8 @@ def run_internal_job_once(
                 ),
                 source_transaction_id=None,
                 depth=0,
-                refresh_window=True,
-                emit_events=bool(apply_qualification_mode),
+                refresh_window=False,
+                emit_events=True,
                 allow_downgrade_before_expiry=bool(apply_qualification_mode),
             )
             if c.loyalty_status != before:

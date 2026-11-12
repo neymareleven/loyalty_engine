@@ -32,6 +32,11 @@ def ensure_system_transaction_types(db: Session, *, brand: str) -> None:
         ),
         "STATUS_RESET": "System event emitted when status points are reset.",
         "ADMIN_SET_TIER": "Audit event for manual tier overrides performed via admin UI.",
+        "TIER_CHANGED": (
+            "System event emitted on every effective palier change. payload.cause is "
+            "thresholds | first_purchase_bypass | mode_switch | admin | expiration. "
+            "Subscribe to this type for any palier change, or to a specific type for one cause."
+        ),
         "CUSTOMER_REGISTRATION": (
             "System event emitted once when a customer is created (first ingestion), not on updates."
         ),
@@ -44,6 +49,7 @@ def ensure_system_transaction_types(db: Session, *, brand: str) -> None:
         "FIRST_PURCHASE_BYPASS": "First purchase bypass",
         "STATUS_RESET": "Status reset",
         "ADMIN_SET_TIER": "Admin set tier",
+        "TIER_CHANGED": "Tier changed",
         "CUSTOMER_REGISTRATION": "Customer registration",
     }
     system_types = [
@@ -150,6 +156,7 @@ def serialize_loyalty_settings(obj: BrandLoyaltySettings) -> dict:
         "first_purchase_bypass_enabled": bool(getattr(obj, "first_purchase_bypass_enabled", False)),
         "first_purchase_bypass_min_amount": getattr(obj, "first_purchase_bypass_min_amount", None),
         "first_purchase_bypass_tier_key": (str(tier_key).strip() if tier_key else None) or None,
+        "mode_switch_policy": str(getattr(obj, "mode_switch_policy", None) or "IMMEDIATE").upper(),
     }
 
 

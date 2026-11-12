@@ -97,7 +97,11 @@ Tous les champs sont optionnels (PATCH partiel).
 - Texte d’aide :
   - **POINTS** : « Les paliers suivent les points de statut. Configurez des règles `earn_points` sur les ventes. »
   - **PURCHASES** : « Les paliers suivent le nombre d’achats **et** le montant total. Chaque vente est comptée automatiquement. »
-- **Confirmation** avant changement de mode : « Tous les clients seront recalculés immédiatement avec le nouveau mode. Ce n’est pas un upgrade / downgrade. »
+- **Avant de changer de mode** : l’admin doit saisir les **vrais** seuils du mode cible sur chaque palier (pas de 1, 2, 3 auto).
+- Preview : `GET /admin/loyalty-settings/preview-qualification-mode?target=PURCHASES` → `up` / `down` / `unchanged` / `errors`.
+- Appliquer : `PATCH` avec `qualification_mode` **et** `confirm_mode_switch: true` (sinon **409** + preview). Un save bypass / validité **n’est pas** une bascule.
+- `mode_switch_policy` : `IMMEDIATE` (palier mérité maintenant, les **garanties** bypass/admin restent) ou `HOLD_UNTIL_WINDOW` (garde le palier actuel jusqu’à expiration).
+- Événement `QUALIFICATION_MODE_CHANGED` / `TIER_CHANGED` **seulement** si le palier effectif change.
 
 ### UX recommandée — bypass premier achat
 
@@ -389,6 +393,7 @@ Le bypass premier achat **n’est pas** appliqué rétroactivement. Il ne se dé
 | Besoin | Endpoint |
 |--------|----------|
 | Mode + validités + bypass | `GET/PATCH /admin/loyalty-settings` |
+| Preview bascule de mode | `GET /admin/loyalty-settings/preview-qualification-mode?target=PURCHASES` |
 | Champs visibles par mode | `GET /admin/loyalty-settings/ui-catalog` |
 | Santé schéma | `GET /admin/health/schema` |
 | CRUD paliers | `/admin/loyalty-tiers` |
@@ -410,19 +415,23 @@ Convention naming :
 Immersion totale dans `qualification_mode` (POINTS | PURCHASES). L’autre mode continue en backend : **ne jamais l’afficher**. Lire `GET /admin/loyalty-settings` + `GET /admin/loyalty-settings/ui-catalog` et n’afficher que `visibleByMode[mode]`.
 
 **Settings**
-- Radio POINTS / PURCHASES + confirmation au switch (recalcul palier, pas un upgrade/downgrade).
-- POINTS seulement : `points_validity_days`. PURCHASES seulement : `purchase_validity_days`. Jamais les deux à l’écran.
-- Les deux modes : `loyalty_status_validity_days` (durée du palier).
-- Bypass premier achat **dans les deux modes** (ce n’est pas un réglage points) : `first_purchase_bypass_enabled`, `first_purchase_bypass_min_amount` (montant du 1er sale), `first_purchase_bypass_tier_key` (palier existant). Libellés « premier achat / montant / palier », jamais « points ». Masquer le montant et le palier si switch bypass off.
+- Radio POINTS / PURCHASES. Avant switch : formulaire des **vrais** seuils du mode cible, puis `GET .../preview-qualification-mode?target=...`, puis PATCH `confirm_mode_switch: true`. Afficher up/down/unchanged. 409 si confirm manquant. 400 si seuils incomplets.
+- `mode_switch_policy` IMMEDIATE | HOLD_UNTIL_WINDOW. Un save bypass/validité n’est pas une bascule.
+- POINTS seulement : `points_validity_days`. PURCHASES seulement : `purchase_validity_days`.
+- Les deux modes : `loyalty_status_validity_days`, bypass premier achat (montant + palier, jamais « points »).
 
 **Paliers**
-- POINTS : `name`, `min_status_points`, `active`. PURCHASES : `name`, `min_purchase_count`, `min_purchase_amount`, `active`. Omettre le reste ; le serveur auto-aligne les seuils cachés.
+- POINTS : `name`, `min_status_points`, `active`. PURCHASES : `name`, `min_purchase_count` **et** `min_purchase_amount` (>=1 hors base). Ne pas inventer 1,2,3.
+- Avant une bascule, permettre de saisir les seuils de l’autre mode (écran de préparation).
 - Base POINTS = 0 points. Base PURCHASES = 0 achats ET 0 montant.
+
+**Règles**
+- Tout changement de palier émet `TIER_CHANGED` (`payload.cause` = thresholds | first_purchase_bypass | mode_switch | admin | expiration) **en plus** du type précis. Une règle « tout changement » écoute `TIER_CHANGED`. Une règle bypass écoute `FIRST_PURCHASE_BYPASS`.
 
 **Fiche client / ledgers / nextTier**
 - POINTS : palier, points, expiration points, pointsToNext, ledger points. Masquer tout achat.
 - PURCHASES : palier, purchaseCount, purchaseAmountTotal, expiration achats, purchasesToNext + amountToNext, ledger purchase-movements. Masquer tout point de qualification.
 - `lastChange` `first_purchase_bypass` et `mode_changed` ≠ upgrade / downgrade / renew.
 
-**Règles**
-- En PURCHASES : bandeau « les règles earn_points n’attribuent plus le palier ». Ne pas présenter earn_points comme config du palier.
+**Règles (suite)**
+- En PURCHASES : bandeau « les règles earn_points n’attribuent plus le palier ».

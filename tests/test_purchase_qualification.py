@@ -129,6 +129,27 @@ def test_serialize_purchase_movement_expire_type():
     assert out["amount"] == -500
 
 
+def test_first_purchase_by_sale_dates_rejects_replay():
+    from datetime import datetime
+
+    from app.services.purchase_service import is_first_purchase_by_sale_dates
+
+    t0 = datetime(2026, 1, 1)
+    t1 = datetime(2026, 6, 1)
+    assert is_first_purchase_by_sale_dates(t1, []) is True
+    assert is_first_purchase_by_sale_dates(t0, [t1]) is False
+    assert is_first_purchase_by_sale_dates(t1, [t0]) is False
+
+
+def test_cause_from_reason_maps_bypass_and_mode():
+    from app.services.loyalty_guarantee_service import cause_from_reason
+
+    assert cause_from_reason("FIRST_PURCHASE_BYPASS") == "first_purchase_bypass"
+    assert cause_from_reason("QUALIFICATION_MODE_CHANGED") == "mode_switch"
+    assert cause_from_reason("ADMIN_SET_TIER") == "admin"
+    assert cause_from_reason("EARN_POINTS") == "thresholds"
+
+
 def test_unique_min_status_points_avoids_duplicate_zero():
     from app.routes.loyalty_tiers import unique_min_status_points
 

@@ -90,6 +90,10 @@ def admin_schema_health(db: Session = Depends(get_db)):
         "loyalty_tiers.min_purchase_count": "SELECT min_purchase_count FROM loyalty_tiers LIMIT 1",
         "customers.purchase_count": "SELECT purchase_count FROM customers LIMIT 1",
         "purchase_movements": "SELECT id FROM purchase_movements LIMIT 1",
+        "customer_loyalty_guarantees": "SELECT id FROM customer_loyalty_guarantees LIMIT 1",
+        "brand_loyalty_settings.mode_switch_policy": (
+            "SELECT mode_switch_policy FROM brand_loyalty_settings LIMIT 1"
+        ),
     }
     missing: list[str] = []
     errors: dict[str, str] = {}
@@ -132,6 +136,7 @@ def get_loyalty_settings_ui_catalog():
     """
     shared_settings = [
         "qualification_mode",
+        "mode_switch_policy",
         "loyalty_status_validity_days",
         "first_purchase_bypass_enabled",
         "first_purchase_bypass_min_amount",
@@ -184,8 +189,28 @@ def get_loyalty_settings_ui_catalog():
                 "loyalty_status_validity_days = durée du palier (anti-downgrade / renew). "
                 "Commun aux deux modes."
             ),
+            "modeSwitch": (
+                "Avant de changer qualification_mode : remplir les vrais seuils du mode cible "
+                "(pas de montants 1,2,3 auto). GET /admin/loyalty-settings/preview-qualification-mode"
+                "?target=PURCHASES puis PATCH confirm_mode_switch=true. "
+                "mode_switch_policy=IMMEDIATE|HOLD_UNTIL_WINDOW."
+            ),
         },
     }
+
+
+@router.get("/loyalty-settings/preview-qualification-mode")
+def preview_qualification_mode(
+    target: str,
+    brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    from app.routes.loyalty_tiers import preview_qualification_mode_switch
+    from app.services.purchase_service import normalize_qualification_mode
+
+    return preview_qualification_mode_switch(
+        db, brand=brand, target_mode=normalize_qualification_mode(target)
+    )
 
 
 @router.get("/ui-options/coupon-types")
@@ -404,6 +429,15 @@ def update_loyalty_settings(
         raw_key = data["first_purchase_bypass_tier_key"]
         obj.first_purchase_bypass_tier_key = (str(raw_key).strip() if raw_key else None) or None
 
+    if "mode_switch_policy" in data and data["mode_switch_policy"] is not None:
+        policy = str(data["mode_switch_policy"]).strip().upper()
+        if policy not in {"IMMEDIATE", "HOLD_UNTIL_WINDOW"}:
+            raise HTTPException(
+                status_code=400,
+                detail="mode_switch_policy must be IMMEDIATE or HOLD_UNTIL_WINDOW",
+            )
+        obj.mode_switch_policy = policy
+
     should_backfill_points = obj.points_validity_days is not None and prev_points_days is None
     should_backfill_status = obj.loyalty_status_validity_days is not None and prev_status_days is None
     should_backfill_purchases = obj.purchase_validity_days is not None and prev_purchase_days is None
@@ -422,9 +456,31 @@ def update_loyalty_settings(
 
     new_mode = normalize_qualification_mode(getattr(obj, "qualification_mode", None))
     mode_changed = new_mode != prev_qualification_mode
-    if mode_changed or new_mode == QUALIFICATION_PURCHASES:
-        from app.routes.loyalty_tiers import _enqueue_recompute_customers_job
+    if mode_changed:
+        from app.routes.loyalty_tiers import (
+            _enqueue_recompute_customers_job,
+            preview_qualification_mode_switch,
+            target_mode_threshold_errors,
+        )
 
+        threshold_errors = target_mode_threshold_errors(db, brand, new_mode)
+        if threshold_errors:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Cannot switch qualification mode until target-mode thresholds are complete",
+                    "errors": threshold_errors,
+                },
+            )
+        preview = preview_qualification_mode_switch(db, brand=brand, target_mode=new_mode)
+        if not bool(data.get("confirm_mode_switch")):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Set confirm_mode_switch=true after reviewing the preview",
+                    "preview": preview,
+                },
+            )
         more_sales = True
         after_id = None
         for _ in range(20):
@@ -435,13 +491,21 @@ def update_loyalty_settings(
             if stats.get("finished"):
                 more_sales = False
                 break
-
         _enqueue_recompute_customers_job(
             db,
             brand,
             apply_qualification_mode=True,
             backfill_purchases=more_sales,
             backfill_after_id=after_id if more_sales else None,
+        )
+    elif should_backfill_purchases:
+        from app.routes.loyalty_tiers import _enqueue_recompute_customers_job
+
+        _enqueue_recompute_customers_job(
+            db,
+            brand,
+            apply_qualification_mode=False,
+            backfill_purchases=True,
         )
 
     db.commit()

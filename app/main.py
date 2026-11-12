@@ -27,6 +27,7 @@ from app.models.internal_job import InternalJob
 from app.models.event_type import TransactionType
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.brand_loyalty_settings import BrandLoyaltySettings
+from app.models.customer_loyalty_guarantee import CustomerLoyaltyGuarantee
 
 from app.routes.customers import router as customers_router
 from app.routes.transactions import router as transactions_router

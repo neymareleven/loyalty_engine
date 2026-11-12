@@ -15,6 +15,7 @@ class LoyaltySettingsOut(BaseModel):
     first_purchase_bypass_enabled: bool = False
     first_purchase_bypass_min_amount: Optional[int] = None
     first_purchase_bypass_tier_key: Optional[str] = None
+    mode_switch_policy: str = "IMMEDIATE"
 
 
 class LoyaltySettingsUpdate(BaseModel):
@@ -39,4 +40,12 @@ class LoyaltySettingsUpdate(BaseModel):
     first_purchase_bypass_tier_key: Optional[str] = Field(
         default=None,
         description="Clé d'un palier existant (actif) attribué par le bypass (requis si activé).",
+    )
+    mode_switch_policy: Optional[Literal["IMMEDIATE", "HOLD_UNTIL_WINDOW"]] = Field(
+        default=None,
+        description="IMMEDIATE = palier mérité tout de suite (les garanties restent). HOLD_UNTIL_WINDOW = garder le palier actuel jusqu'à la fin de fenêtre.",
+    )
+    confirm_mode_switch: Optional[bool] = Field(
+        default=None,
+        description="Requis à true pour appliquer un changement de qualification_mode (après preview).",
     )

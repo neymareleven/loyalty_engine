@@ -8,6 +8,9 @@ from app.services.loyalty_settings_service import get_loyalty_settings
 # Recalc after POINTS ↔ PURCHASES: not an upgrade, downgrade, or renew.
 QUALIFICATION_MODE_CHANGED_REASON = "QUALIFICATION_MODE_CHANGED"
 FIRST_PURCHASE_BYPASS_REASON = "FIRST_PURCHASE_BYPASS"
+TIER_CHANGED_REASON = "TIER_CHANGED"
+MODE_SWITCH_POLICY_IMMEDIATE = "IMMEDIATE"
+MODE_SWITCH_POLICY_HOLD = "HOLD_UNTIL_WINDOW"
 
 
 def last_change_from_tier_event(transaction_type: str | None) -> str | None:
@@ -91,7 +94,6 @@ def compute_loyalty_status_from_tiers(
         best = max(qualifying, key=lambda t: _tier_mode_sort_key(t, mode))
         return best.key
 
-    # Fallback to lowest active tier (base) for the active qualification mode.
     lowest = min(active_tiers, key=lambda t: _tier_mode_sort_key(t, mode))
     return lowest.key
 
@@ -150,9 +152,54 @@ def _get_tier_sort_tuple(db: Session, brand: str, tier_key: str) -> tuple[int, i
     return _tier_sort_key(tier)
 
 
-# ============================================================
-# Mise à jour du statut client
-# ============================================================
+def _apply_status_window(customer, *, now: datetime, status_days, is_base_tier: bool) -> None:
+    if is_base_tier:
+        customer.loyalty_status_assigned_at = now
+        customer.loyalty_status_expires_at = None
+        return
+    customer.loyalty_status_assigned_at = now
+    if status_days is not None:
+        customer.loyalty_status_expires_at = now + timedelta(days=int(status_days))
+    else:
+        customer.loyalty_status_expires_at = None
+
+
+def _emit_tier_transactions(
+    db: Session,
+    customer,
+    *,
+    transaction_type: str,
+    payload: dict,
+    depth: int,
+    also_generic: bool,
+):
+    from app.services.transaction_service import create_internal_transaction
+
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    create_internal_transaction(
+        db,
+        brand=customer.brand,
+        profile_id=customer.profile_id,
+        transaction_type=transaction_type,
+        transaction_id=f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}",
+        payload=payload,
+        depth=depth,
+        commit=False,
+    )
+    if also_generic and transaction_type != TIER_CHANGED_REASON:
+        ts2 = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        create_internal_transaction(
+            db,
+            brand=customer.brand,
+            profile_id=customer.profile_id,
+            transaction_type=TIER_CHANGED_REASON,
+            transaction_id=f"tier_{customer.brand}_{customer.profile_id}_{TIER_CHANGED_REASON}_{ts2}",
+            payload=dict(payload),
+            depth=depth,
+            commit=False,
+        )
+
+
 def update_customer_status(
     db: Session,
     customer,
@@ -166,34 +213,34 @@ def update_customer_status(
     sync_unomi: bool = False,
     min_tier_key: str | None = None,
 ):
-    """
-    Recalcule et met à jour le statut fidélité du client
-    selon qualification_mode (POINTS ou PURCHASES).
+    """Effective palier = max(earned from active-mode thresholds, active guarantees).
 
-    reason=QUALIFICATION_MODE_CHANGED applies the palier of the current
-    mode immediately (no anti-downgrade holdover) and emits
-    QUALIFICATION_MODE_CHANGED instead of TIER_UPGRADED/DOWNGRADED/RENEWED.
+    Upgrade is immediate. Descent waits for the status window unless explicitly
+    allowed. Settings/tier CRUD must pass refresh_window=False.
     """
-    is_mode_switch = reason == QUALIFICATION_MODE_CHANGED_REASON
-    if is_mode_switch:
-        allow_downgrade_before_expiry = True
-        refresh_window = True
+    from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
+    from app.services.loyalty_guarantee_service import (
+        ACTIVITY_REASONS,
+        active_guarantees,
+        cause_from_reason,
+        highest_guarantee_floor_key,
+    )
     from app.services.purchase_service import (
         QUALIFICATION_PURCHASES,
         get_purchase_balances,
         get_qualification_mode,
     )
 
+    is_mode_switch = reason == QUALIFICATION_MODE_CHANGED_REASON
     mode = get_qualification_mode(db, brand=customer.brand)
     purchase_count = int(getattr(customer, "purchase_count", 0) or 0)
     purchase_amount = int(getattr(customer, "purchase_amount_total", 0) or 0)
     if mode == QUALIFICATION_PURCHASES:
-        # Prefer live balances from movements when available.
         purchase_count, purchase_amount = get_purchase_balances(db, customer.id)
         customer.purchase_count = purchase_count
         customer.purchase_amount_total = purchase_amount
 
-    new_status = compute_loyalty_status_from_tiers(
+    earned_status = compute_loyalty_status_from_tiers(
         db,
         customer.brand,
         customer.status_points,
@@ -201,17 +248,24 @@ def update_customer_status(
         purchase_amount=purchase_amount,
         qualification_mode=mode,
     )
-    floor_key = (min_tier_key or "").strip() or None
+    guarantee_floor = highest_guarantee_floor_key(
+        db, customer_id=customer.id, brand=customer.brand
+    )
+    floor_key = (min_tier_key or "").strip() or guarantee_floor
+    new_status = earned_status
     if floor_key:
-        bypass_rank = _get_tier_rank_value(db, customer.brand, floor_key)
-        computed_rank = _get_tier_rank_value(db, customer.brand, new_status) if new_status else None
-        if bypass_rank is not None and (computed_rank is None or computed_rank < bypass_rank):
+        floor_rank = _get_tier_rank_value(db, customer.brand, floor_key)
+        earned_rank = _get_tier_rank_value(db, customer.brand, new_status) if new_status else None
+        if floor_rank is not None and (earned_rank is None or earned_rank < floor_rank):
             new_status = floor_key
-            if not is_mode_switch:
+            sources = {g.source for g in active_guarantees(db, customer_id=customer.id)}
+            if (
+                not is_mode_switch
+                and reason not in ("ADMIN_OVERRIDE", "ADMIN_SET_TIER")
+                and (min_tier_key or GUARANTEE_BYPASS in sources)
+            ):
                 reason = FIRST_PURCHASE_BYPASS_REASON
-                # Bypass must apply even if a leftover palier from the other mode is "higher".
-                allow_downgrade_before_expiry = True
-                refresh_window = True
+
     if new_status is None:
         if not customer.loyalty_status:
             customer.loyalty_status = "UNCONFIGURED"
@@ -231,36 +285,47 @@ def update_customer_status(
     old_assigned_at = customer.loyalty_status_assigned_at
     old_expires_at = customer.loyalty_status_expires_at
 
-    # Prevent automatic downgrades before the current loyalty status validity window expires.
-    # Upgrades are still applied immediately.
-    if customer.loyalty_status and customer.loyalty_status != new_status:
-        old_rank = _get_tier_rank_value(db, customer.brand, customer.loyalty_status)
-        new_rank = _get_tier_rank_value(db, customer.brand, new_status)
-        is_downgrade = bool(old_rank is not None and new_rank is not None and new_rank < old_rank)
-        not_expired = bool(customer.loyalty_status_expires_at is not None and customer.loyalty_status_expires_at > now)
-        if is_downgrade and not allow_downgrade_before_expiry and not_expired:
-            new_status = customer.loyalty_status
+    old_rank = _get_tier_rank_value(db, customer.brand, customer.loyalty_status) if customer.loyalty_status else None
+    new_rank = _get_tier_rank_value(db, customer.brand, new_status)
+    is_downgrade = bool(
+        customer.loyalty_status
+        and customer.loyalty_status != new_status
+        and old_rank is not None
+        and new_rank is not None
+        and new_rank < old_rank
+    )
+    is_upgrade = bool(
+        customer.loyalty_status != new_status
+        and new_rank is not None
+        and (old_rank is None or new_rank > old_rank)
+    )
+    not_expired = bool(
+        customer.loyalty_status_expires_at is not None and customer.loyalty_status_expires_at > now
+    )
+    if is_downgrade and not allow_downgrade_before_expiry and not_expired:
+        new_status = customer.loyalty_status
+        is_downgrade = False
+        is_upgrade = False
 
     is_base_tier = bool(base_tier_key) and (new_status == base_tier_key)
-
-    # Safety: base tier must never expire, even if no refresh/status-change happens.
+    status_will_change = customer.loyalty_status != new_status
+    is_activity = reason in ACTIVITY_REASONS
+    should_refresh_window = False
     if is_base_tier:
-        if customer.loyalty_status_expires_at is not None:
-            customer.loyalty_status_expires_at = None
-        if customer.loyalty_status_assigned_at is None:
-            customer.loyalty_status_assigned_at = now
-    should_refresh_window = bool(refresh_window) or (customer.loyalty_status != new_status)
-    if should_refresh_window:
-        if is_base_tier:
-            customer.loyalty_status_assigned_at = now
-            customer.loyalty_status_expires_at = None
-        else:
-            if status_days is not None:
-                customer.loyalty_status_assigned_at = now
-                customer.loyalty_status_expires_at = now + timedelta(days=int(status_days))
-            else:
-                customer.loyalty_status_assigned_at = None
-                customer.loyalty_status_expires_at = None
+        if customer.loyalty_status_expires_at is not None or customer.loyalty_status_assigned_at is None:
+            _apply_status_window(customer, now=now, status_days=status_days, is_base_tier=True)
+    elif status_will_change and (is_upgrade or is_downgrade):
+        should_refresh_window = True
+        _apply_status_window(customer, now=now, status_days=status_days, is_base_tier=False)
+    elif (
+        (not status_will_change)
+        and is_activity
+        and refresh_window
+        and (not is_base_tier)
+        and status_days is not None
+    ):
+        should_refresh_window = True
+        _apply_status_window(customer, now=now, status_days=status_days, is_base_tier=False)
 
     did_refresh_window_without_tier_change = bool(
         should_refresh_window
@@ -279,33 +344,26 @@ def update_customer_status(
         db.flush()
 
     if emit_events:
-        from app.services.transaction_service import create_internal_transaction
-
         status_changed = old_status != new_status
-        if is_mode_switch:
+        transaction_type = None
+        if is_mode_switch and status_changed:
             transaction_type = QUALIFICATION_MODE_CHANGED_REASON
         elif status_changed and reason == FIRST_PURCHASE_BYPASS_REASON:
             transaction_type = FIRST_PURCHASE_BYPASS_REASON
+        elif status_changed and reason in ("ADMIN_OVERRIDE", "ADMIN_SET_TIER"):
+            transaction_type = "ADMIN_SET_TIER"
         elif status_changed:
-            old_rank = _get_tier_rank_value(db, customer.brand, old_status)
-            new_rank = _get_tier_rank_value(db, customer.brand, new_status)
-            transaction_type = (
-                "TIER_UPGRADED"
-                if (new_rank is not None and (old_rank is None or new_rank > old_rank))
-                else "TIER_DOWNGRADED"
-            )
+            transaction_type = "TIER_UPGRADED" if is_upgrade else "TIER_DOWNGRADED"
         elif did_refresh_window_without_tier_change:
             transaction_type = "TIER_RENEWED"
-        else:
-            transaction_type = None
 
         if transaction_type:
-            ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-            transaction_id = f"tier_{customer.brand}_{customer.profile_id}_{transaction_type}_{ts}"
             payload = {
                 "fromTier": old_status,
                 "toTier": new_status,
                 "reason": reason,
+                "cause": cause_from_reason(reason),
+                "earnedTier": earned_status,
                 "qualificationMode": mode,
                 "statusPoints": int(customer.status_points or 0),
                 "purchaseCount": int(getattr(customer, "purchase_count", 0) or 0),
@@ -327,15 +385,13 @@ def update_customer_status(
                     if customer.loyalty_status_expires_at
                     else None
                 )
-            create_internal_transaction(
+            _emit_tier_transactions(
                 db,
-                brand=customer.brand,
-                profile_id=customer.profile_id,
+                customer,
                 transaction_type=transaction_type,
-                transaction_id=transaction_id,
                 payload=payload,
                 depth=depth,
-                commit=False,
+                also_generic=status_changed,
             )
 
     if sync_unomi:

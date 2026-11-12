@@ -25,6 +25,8 @@ class BrandLoyaltySettings(Base):
     first_purchase_bypass_enabled = Column(Boolean, nullable=False, default=False)
     first_purchase_bypass_min_amount = Column(Integer, nullable=True)
     first_purchase_bypass_tier_key = Column(String(50), nullable=True)
+    # IMMEDIATE = apply earned palier now (guarantees still hold). HOLD_UNTIL_WINDOW = keep current palier until expiry.
+    mode_switch_policy = Column(String(30), nullable=False, default="IMMEDIATE")
 
     # Legacy columns (unused): Unomi is configured via .env — see UNOMI_* variables.
     segmentation_mode = Column(String(20), nullable=False, default="INTERNAL")

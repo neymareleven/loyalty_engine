@@ -220,6 +220,27 @@ def customer_has_prior_processed_sale(
     return q.first() is not None
 
 
+def is_first_purchase_by_sale_dates(this_occurred_at: datetime | None, other_occurred_ats: list) -> bool:
+    """Bypass only if this is the customer's only known sale.
+
+    Date is the identity of the sale (not ingest order). If any other sale exists —
+    earlier or later — this is not the first-purchase event (replays never grant).
+    """
+    others = [t for t in (other_occurred_ats or []) if t is not None]
+    return this_occurred_at is not None and len(others) == 0
+
+
+def is_first_purchase_sale(db: Session, customer, transaction) -> bool:
+    this_id = getattr(transaction, "id", None)
+    this_at = transaction_occurred_at(transaction)
+    others = []
+    for other in _processed_sale_query(db, customer).all():
+        if this_id is not None and other.id == this_id:
+            continue
+        others.append(transaction_occurred_at(other))
+    return is_first_purchase_by_sale_dates(this_at, others)
+
+
 def first_purchase_bypass_eligible(
     *,
     enabled: bool,
@@ -260,14 +281,8 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
     if existing:
         return None
 
-    prior_earn = (
-        db.query(func.count(PurchaseMovement.id))
-        .filter(PurchaseMovement.customer_id == customer.id)
-        .filter(PurchaseMovement.type == "EARN")
-        .scalar()
-    )
-    is_first_purchase = int(prior_earn or 0) == 0 and not customer_has_prior_processed_sale(
-        db, customer, excluding_transaction_id=getattr(transaction, "id", None)
+    is_first_purchase = is_first_purchase_sale(
+        db, customer, transaction
     )
 
     payload = transaction.payload if isinstance(transaction.payload, dict) else {}
@@ -286,6 +301,21 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
         tier_key=getattr(settings, "first_purchase_bypass_tier_key", None),
     ):
         bypass_tier_key = (getattr(settings, "first_purchase_bypass_tier_key", None) or "").strip() or None
+        from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
+        from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
+
+        status_days = getattr(settings, "loyalty_status_validity_days", None)
+        now = datetime.utcnow()
+        guarantee_expires_at = (
+            (now + timedelta(days=int(status_days))) if status_days is not None else None
+        )
+        grant_loyalty_guarantee(
+            db,
+            customer=customer,
+            source=GUARANTEE_BYPASS,
+            floor_tier_key=bypass_tier_key,
+            expires_at=guarantee_expires_at,
+        )
 
     movement = PurchaseMovement(
         customer_id=customer.id,

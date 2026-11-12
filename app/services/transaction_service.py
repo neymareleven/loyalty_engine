@@ -287,8 +287,8 @@ def create_transaction(db: Session, event_data):
                 reason="AUTO_TIER_REFRESH",
                 source_transaction_id=transaction.id,
                 depth=0,
-                refresh_window=True,
-                emit_events=False,
+                refresh_window=False,
+                emit_events=True,
             )
             db.commit()
 

@@ -19,6 +19,7 @@ SYSTEM_MANAGED_TRANSACTION_TYPE_KEYS = frozenset(
         "FIRST_PURCHASE_BYPASS",
         "STATUS_RESET",
         "ADMIN_SET_TIER",
+        "TIER_CHANGED",
         "CUSTOMER_REGISTRATION",
     }
 )
