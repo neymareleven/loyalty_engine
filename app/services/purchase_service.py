@@ -285,6 +285,8 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
         db, customer, transaction
     )
 
+    previous_purchase_count, previous_purchase_amount_total = get_purchase_balances(db, customer.id)
+
     payload = transaction.payload if isinstance(transaction.payload, dict) else {}
     amount = extract_purchase_amount(payload)
     settings = get_loyalty_settings(db, brand=customer.brand)
@@ -332,19 +334,90 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
 
     from app.services.loyalty_status_service import update_customer_status
 
+    # Tier / bypass events first (TIER_CHANGED, FIRST_PURCHASE_BYPASS), then PURCHASE_RECORDED.
+    sale_depth = 0
+    if isinstance(payload, dict):
+        try:
+            sale_depth = int(payload.get("_ruleDepth") or 0)
+        except (TypeError, ValueError):
+            sale_depth = 0
+
     update_customer_status(
         db,
         customer,
         reason="PURCHASE_RECORDED",
         source_transaction_id=transaction.id,
-        depth=0,
+        depth=sale_depth,
         refresh_window=bool(bypass_tier_key),
         emit_events=True,
         sync_unomi=False,
         min_tier_key=bypass_tier_key,
         allow_downgrade_before_expiry=bool(bypass_tier_key),
     )
+
+    purchase_count, purchase_amount_total = get_purchase_balances(db, customer.id)
+    emit_purchase_recorded_event(
+        db,
+        customer=customer,
+        source_transaction=transaction,
+        order_amount=amount,
+        purchase_count=purchase_count,
+        purchase_amount_total=purchase_amount_total,
+        previous_purchase_count=previous_purchase_count,
+        previous_purchase_amount_total=previous_purchase_amount_total,
+        is_first_purchase=is_first_purchase,
+        depth=sale_depth,
+    )
     return movement
+
+
+PURCHASE_RECORDED_TYPE = "PURCHASE_RECORDED"
+
+
+def emit_purchase_recorded_event(
+    db: Session,
+    *,
+    customer,
+    source_transaction,
+    order_amount: int,
+    purchase_count: int,
+    purchase_amount_total: int,
+    previous_purchase_count: int,
+    previous_purchase_amount_total: int,
+    is_first_purchase: bool,
+    depth: int = 0,
+):
+    """Fire after a sale lot is recorded so rules see post-sale counters.
+
+    Deterministic transaction_id → replaying the sale does not create a second event.
+    """
+    from app.services.transaction_service import create_internal_transaction
+
+    tx_id = getattr(source_transaction, "id", None)
+    if tx_id is None:
+        return None
+    return create_internal_transaction(
+        db,
+        brand=customer.brand,
+        profile_id=customer.profile_id,
+        transaction_type=PURCHASE_RECORDED_TYPE,
+        transaction_id=f"purchase_recorded:{tx_id}",
+        payload={
+            "sourceTransactionId": str(tx_id),
+            "orderAmount": int(order_amount or 0),
+            "purchaseCount": int(purchase_count or 0),
+            "purchaseAmountTotal": int(purchase_amount_total or 0),
+            "previousPurchaseCount": int(previous_purchase_count or 0),
+            "previousPurchaseAmountTotal": int(previous_purchase_amount_total or 0),
+            "isFirstPurchase": bool(is_first_purchase),
+            "qualificationMode": get_qualification_mode(db, brand=customer.brand),
+            "loyaltyStatus": customer.loyalty_status,
+            "_ruleDepth": int(depth) + 1,
+        },
+        source="INTERNAL",
+        depth=int(depth or 0) + 1,
+        commit=False,
+    )
 
 
 def backfill_purchase_movements_from_sales(

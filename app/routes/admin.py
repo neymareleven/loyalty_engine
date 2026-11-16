@@ -36,6 +36,11 @@ from app.services.loyalty_validity_service import initialize_validity_windows_fo
 from app.services.transaction_protection import delete_transaction_if_allowed
 from app.schemas.loyalty_settings import LoyaltySettingsOut, LoyaltySettingsUpdate
 from app.schemas.rule_condition_catalog import get_rule_conditions_catalog
+from app.services.rule_condition_fields import (
+    extra_payload_condition_fields,
+    extra_payload_field_meta,
+    purchase_customer_field_meta,
+)
 from app.schemas.rule import RuleCreate, RuleUpdate
 from app.schemas.rule_action_catalog import (
     EarnPointsAction,
@@ -156,6 +161,11 @@ def get_loyalty_settings_ui_catalog():
                     "lastChange",
                 ],
                 "ledgers": ["points"],
+                "ruleHighlightFields": ["customer.status_points"],
+                "ruleHighlightEvents": ["sale", "TIER_CHANGED"],
+                "ruleDeemphasizeFields": ["customer.purchase_count", "customer.purchase_amount_total"],
+                "ruleDeemphasizeEvents": ["PURCHASE_RECORDED"],
+                "ruleDeemphasizeActions": [],
             },
             "PURCHASES": {
                 "settings": shared_settings + ["purchase_validity_days"],
@@ -170,6 +180,11 @@ def get_loyalty_settings_ui_catalog():
                     "lastChange",
                 ],
                 "ledgers": ["purchases"],
+                "ruleHighlightFields": ["customer.purchase_count", "customer.purchase_amount_total"],
+                "ruleHighlightEvents": ["PURCHASE_RECORDED", "TIER_CHANGED", "FIRST_PURCHASE_BYPASS"],
+                "ruleDeemphasizeFields": ["customer.status_points"],
+                "ruleDeemphasizeEvents": [],
+                "ruleDeemphasizeActions": ["reset_status_points"],
             },
         },
         "alwaysHideOtherMode": True,
@@ -1123,6 +1138,8 @@ def list_rule_condition_fields(
         "customer.status",
         "customer.loyalty_status",
         "customer.status_points",
+        "customer.purchase_count",
+        "customer.purchase_amount_total",
         "customer.created_at",
         "customer.last_activity_at",
         "customer.birthdate",
@@ -1131,6 +1148,7 @@ def list_rule_condition_fields(
 
     system_fields: list[str] = []
 
+    payload_fields = sorted({*payload_fields, *extra_payload_condition_fields(transaction_type)})
     items = sorted({*payload_fields, *customer_fields})
     return {
         "brand": brand,
@@ -1190,7 +1208,9 @@ def list_rule_condition_fields(
                 },
             },
             "customer.birthdate": dict(BIRTHDATE_FIELD_META),
+            **purchase_customer_field_meta(),
             **payload_field_meta,
+            **extra_payload_field_meta(transaction_type),
         },
         "payloadFields": payload_schema_field_catalog(tt.payload_schema, transaction_type_key=transaction_type)
         if tt.payload_schema
@@ -1207,6 +1227,8 @@ def list_internal_job_selector_fields():
         "customer.status",
         "customer.loyalty_status",
         "customer.status_points",
+        "customer.purchase_count",
+        "customer.purchase_amount_total",
         "customer.birthdate",
         "customer.created_at",
         "customer.last_activity_at",
@@ -1233,6 +1255,7 @@ def list_internal_job_selector_fields():
             "customer.created_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.last_activity_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.status_points": {"valueKind": "number", "ui": {"widget": "number"}},
+            **purchase_customer_field_meta(),
             "customer.metrics.last_transaction_at": {"valueKind": "datetime", "ui": {"widget": "datetime"}},
             "customer.metrics.transactions_count_30d": {"valueKind": "number", "ui": {"widget": "number"}},
             "customer.metrics.transactions_count_90d": {"valueKind": "number", "ui": {"widget": "number"}},
@@ -1359,6 +1382,16 @@ def list_ui_options_loyalty_tiers(
                 "name": t.name,
                 "rank": t.rank,
                 "minStatusPoints": t.min_status_points,
+                "minPurchaseCount": int(getattr(t, "min_purchase_count", 0) or 0),
+                "minPurchaseAmount": int(getattr(t, "min_purchase_amount", 0) or 0),
+                "isBase": bool(
+                    int(t.rank or 0) == 0
+                    or (
+                        int(t.min_status_points or 0) == 0
+                        and int(getattr(t, "min_purchase_count", 0) or 0) == 0
+                        and int(getattr(t, "min_purchase_amount", 0) or 0) == 0
+                    )
+                ),
                 "active": t.active,
             }
             for t in items
@@ -1664,6 +1697,16 @@ def get_rules_ui_bundle(
                         "name": t.name,
                         "rank": t.rank,
                         "minStatusPoints": t.min_status_points,
+                        "minPurchaseCount": int(getattr(t, "min_purchase_count", 0) or 0),
+                        "minPurchaseAmount": int(getattr(t, "min_purchase_amount", 0) or 0),
+                        "isBase": bool(
+                            int(t.rank or 0) == 0
+                            or (
+                                int(t.min_status_points or 0) == 0
+                                and int(getattr(t, "min_purchase_count", 0) or 0) == 0
+                                and int(getattr(t, "min_purchase_amount", 0) or 0) == 0
+                            )
+                        ),
                         "active": t.active,
                     }
                     for t in tiers

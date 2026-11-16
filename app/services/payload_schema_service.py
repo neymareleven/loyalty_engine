@@ -57,6 +57,47 @@ TRANSACTION_TYPE_RULE_HINTS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "purchase_recorded": {
+        "preferredCountPath": "payload.purchaseCount",
+        "preferredAmountPath": "payload.purchaseAmountTotal",
+        "orderAmountPath": "payload.orderAmount",
+        "couponGuidance": (
+            "Nth-order and cumulative-amount coupons belong here. "
+            "sale rules still see counters from before this sale."
+        ),
+        "examples": [
+            {
+                "id": "purchase.nth_order",
+                "label": "3e commande → coupon",
+                "condition": {"field": "payload.purchaseCount", "operator": "eq", "value": 3},
+            },
+            {
+                "id": "purchase.cumulative",
+                "label": "Cumul d'achats ≥ X → coupon",
+                "condition": {"field": "payload.purchaseAmountTotal", "operator": "gte", "value": 500000},
+            },
+        ],
+    },
+    "tier_changed": {
+        "couponGuidance": (
+            "Palier-atteint coupons: payload.cause == thresholds. "
+            "Do not attach coupons to QUALIFICATION_MODE_CHANGED."
+        ),
+        "causeValues": [
+            "thresholds",
+            "first_purchase_bypass",
+            "mode_switch",
+            "admin",
+            "expiration",
+        ],
+    },
+    "first_purchase_bypass": {
+        "couponGuidance": "Welcome / first-order bypass coupon. Separate from TIER_CHANGED cause thresholds.",
+    },
+    "qualification_mode_changed": {
+        "couponGuidance": "Do not issue coupons on mode switch by default.",
+        "discourageActions": ["issue_coupon"],
+    },
 }
 
 

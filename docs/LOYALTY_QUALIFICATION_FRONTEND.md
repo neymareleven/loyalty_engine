@@ -279,18 +279,33 @@ Dans `currentTier` / `nextTier` / liste `tiers` :
 | `first_purchase_bypass` | Bypass premier achat | upgrade |
 | `null` | — / inconnu | — |
 
-### Historique paliers
+### Historique des loyalty status (paliers)
+
+**Route à appeler** (fiche client, onglet historique palier) :
 
 ```http
-GET /customers/{brand}/{profileId}/loyalty/history
+GET /customers/{brand}/{profileId}/loyalty/history?limit=100&offset=0
+X-Brand: {brand}
 ```
 
-Inclut désormais aussi les types :
+Query optionnelle : `email`. Réponse camelCase : `{ brand, profileId, count, items[] }` avec `transactionType`, `payload` (`fromTier`, `toTier`, `cause`, `earnedTier`, …), `createdAt`.
 
-- `QUALIFICATION_MODE_CHANGED`
-- `FIRST_PURCHASE_BYPASS`
+| `transactionType` | Afficher dans la timeline palier ? | Label |
+|-------------------|--------------------------------------|--------|
+| `TIER_UPGRADED` | oui | Montée de palier |
+| `TIER_DOWNGRADED` | oui | Descente de palier |
+| `TIER_RENEWED` | oui | Renouvellement |
+| `FIRST_PURCHASE_BYPASS` | oui | Bypass premier achat |
+| `QUALIFICATION_MODE_CHANGED` | oui | Changement de mode |
+| `ADMIN_SET_TIER` | oui | Modification admin |
+| `STATUS_RESET` | oui | Reset points statut |
+| `CUSTOMER_REGISTRATION` | optionnel | Inscription |
+| `TIER_CHANGED` | **non** (doublon du type précis, `payload.cause` identique) | — |
+| `PURCHASE_RECORDED` | **non** dans la timeline palier | C’est un achat, pas un changement de palier |
 
-Mapper ces types aux mêmes labels que `lastChange` (`mode_changed`, `first_purchase_bypass`).
+Ne pas utiliser `GET /transactions?profileId=` (rate le matching aliases/email). Pour tout l’historique d’événements : `GET /transactions/by-user?brand=&profileId=`. Pour un type : `GET /transactions/by-user-and-type?brand=&profileId=&transactionType=PURCHASE_RECORDED`.
+
+Statut **courant** (pas l’historique) : `GET /customers/{brand}/{profileId}/loyalty` → `loyaltyStatus`, `earnedTier`, `guarantees[]`, `lastChange`.
 
 ### Mouvements d’achats (ledger)
 
@@ -312,7 +327,7 @@ Champs utiles : `quantity`, `amount`, `type` (`EARN` | `DEDUCT` | `EXPIRE`), `ex
 | `issue_coupon` | Oui | Non |
 | `reset_status_points` | Oui | Impact POINTS |
 
-**Aucune nouvelle action de règle** n’est requise pour PURCHASES ni pour le bypass.
+**Aucune nouvelle action de règle** n’est requise pour PURCHASES ni pour le bypass. Nouveaux **types d’événement** à proposer dans l’éditeur : `PURCHASE_RECORDED` (Nème commande / cumul), `TIER_CHANGED` (tout palier, filtrer `payload.cause`).
 
 UX rules (recommandation) :
 
@@ -435,3 +450,6 @@ Immersion totale dans `qualification_mode` (POINTS | PURCHASES). L’autre mode 
 
 **Règles (suite)**
 - En PURCHASES : bandeau « les règles earn_points n’attribuent plus le palier ».
+- Coupons Nème commande / cumul d’achats : événement **`PURCHASE_RECORDED`** (compteurs **après** la vente). Ne pas les coller sur `sale` (les compteurs y sont encore ceux d’avant).
+- Coupon palier : `TIER_CHANGED` + `payload.cause == thresholds`. Coupon bienvenue bypass : `FIRST_PURCHASE_BYPASS`. Pas de coupon sur `QUALIFICATION_MODE_CHANGED`.
+- Fréquence « un coupon par client » : `ONCE_PER_CUSTOMER`. « Un coupon par palier » : pas de fréquence native après descente puis remontée — à valider métier (souvent `ALWAYS` + condition `payload.toTier` + `cause`).

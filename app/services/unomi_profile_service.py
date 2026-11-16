@@ -105,6 +105,7 @@ _INTERNAL_TRANSACTION_TYPES_NO_UNOMI_SYNC = frozenset(
         "FIRST_PURCHASE_BYPASS",
         "ADMIN_SET_TIER",
         "TIER_CHANGED",
+        "PURCHASE_RECORDED",
     }
 )
 

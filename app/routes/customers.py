@@ -755,6 +755,7 @@ def get_customer_loyalty_history(
         "STATUS_RESET",
         "ADMIN_SET_TIER",
         "TIER_CHANGED",
+        "PURCHASE_RECORDED",
     ]
 
     q = (

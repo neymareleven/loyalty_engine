@@ -37,6 +37,11 @@ def ensure_system_transaction_types(db: Session, *, brand: str) -> None:
             "thresholds | first_purchase_bypass | mode_switch | admin | expiration. "
             "Subscribe to this type for any palier change, or to a specific type for one cause."
         ),
+        "PURCHASE_RECORDED": (
+            "System event emitted after a sale is recorded as a purchase lot. "
+            "Counters in payload and on the customer include this sale. "
+            "Use this type for Nth-order and cumulative-amount coupon rules — not sale."
+        ),
         "CUSTOMER_REGISTRATION": (
             "System event emitted once when a customer is created (first ingestion), not on updates."
         ),
@@ -50,6 +55,7 @@ def ensure_system_transaction_types(db: Session, *, brand: str) -> None:
         "STATUS_RESET": "Status reset",
         "ADMIN_SET_TIER": "Admin set tier",
         "TIER_CHANGED": "Tier changed",
+        "PURCHASE_RECORDED": "Purchase recorded",
         "CUSTOMER_REGISTRATION": "Customer registration",
     }
     system_types = [
