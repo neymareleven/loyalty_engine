@@ -12,7 +12,7 @@ def _active_point_movement_filters(*, today: date | None = None):
     today = today or date.today()
     return (
         PointMovement.type != "EXPIRE",
-        (PointMovement.expires_at.is_(None)) | (PointMovement.expires_at >= today),
+        (PointMovement.expires_at.is_(None)) | (PointMovement.expires_at > today),
     )
 
 
@@ -46,7 +46,7 @@ def get_next_points_expiry_date(db: Session, customer_id) -> date | None:
             PointMovement.points > 0,
             PointMovement.type != "EXPIRE",
             PointMovement.expires_at.isnot(None),
-            PointMovement.expires_at >= today,
+            PointMovement.expires_at > today,
         )
         .scalar()
     )
@@ -72,7 +72,7 @@ def is_point_movement_expired(movement: PointMovement, *, today: date | None = N
         return False
     if movement.expires_at is None:
         return False
-    return movement.expires_at < today
+    return movement.expires_at <= today
 
 
 def serialize_point_movement_out(movement: PointMovement, *, today: date | None = None) -> dict:

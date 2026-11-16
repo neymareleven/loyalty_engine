@@ -273,7 +273,8 @@ Dans `currentTier` / `nextTier` / liste `tiers` :
 |------------|------------------|------------------------|
 | `upgrade` | Montée de palier | — |
 | `downgrade` | Descente de palier | — |
-| `no_change` | Renouvellement | — |
+| `renewed` | Renouvellement | — |
+| `registration` | Inscription | — |
 | `admin_override` | Modification admin | — |
 | `mode_changed` | Changement de mode de qualification | upgrade / downgrade |
 | `first_purchase_bypass` | Bypass premier achat | upgrade |
@@ -288,7 +289,7 @@ GET /customers/{brand}/{profileId}/loyalty/history?limit=100&offset=0
 X-Brand: {brand}
 ```
 
-Query optionnelle : `email`. Réponse camelCase : `{ brand, profileId, count, items[] }` avec `transactionType`, `payload` (`fromTier`, `toTier`, `cause`, `earnedTier`, …), `createdAt`.
+Query optionnelle : `email`. Réponse camelCase : `{ brand, profileId, count, items[] }` avec `transactionType`, `payload`, `fromTier`, `toTier`, `cause`, `createdAt`. `TIER_CHANGED` n’est **pas** renvoyé (doublon du type précis) ; les règles coupon palier écoutent toujours `TIER_CHANGED` via ingest, pas via cet historique.
 
 | `transactionType` | Afficher dans la timeline palier ? | Label |
 |-------------------|--------------------------------------|--------|
@@ -300,7 +301,6 @@ Query optionnelle : `email`. Réponse camelCase : `{ brand, profileId, count, it
 | `ADMIN_SET_TIER` | oui | Modification admin |
 | `STATUS_RESET` | oui | Reset points statut |
 | `CUSTOMER_REGISTRATION` | optionnel | Inscription |
-| `TIER_CHANGED` | **non** (doublon du type précis, `payload.cause` identique) | — |
 | `PURCHASE_RECORDED` | **non** dans la timeline palier | C’est un achat, pas un changement de palier |
 
 Ne pas utiliser `GET /transactions?profileId=` (rate le matching aliases/email). Pour tout l’historique d’événements : `GET /transactions/by-user?brand=&profileId=`. Pour un type : `GET /transactions/by-user-and-type?brand=&profileId=&transactionType=PURCHASE_RECORDED`.

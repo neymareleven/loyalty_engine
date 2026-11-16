@@ -82,6 +82,8 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
         "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS": "Maintenance: Recompute Customers Loyalty Status",
         "MAINT_RECOMPUTE_CUSTOMER_METRICS": "Maintenance: Recompute Customer Metrics",
         "MAINT_RECOMPUTE_SEGMENTS": "Maintenance: Recompute Segments",
+        "MAINT_EXPIRE_RESERVATIONS": "Maintenance: Expire Storefront Reservations",
+        "MAINT_DISPATCH_WEBHOOKS": "Maintenance: Dispatch Outgoing Webhooks",
     }
 
     created_any = False
@@ -95,6 +97,8 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
             "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS",
             "MAINT_RECOMPUTE_CUSTOMER_METRICS",
             "MAINT_RECOMPUTE_SEGMENTS",
+            "MAINT_EXPIRE_RESERVATIONS",
+            "MAINT_DISPATCH_WEBHOOKS",
         ]:
             exists = (
                 db.query(InternalJob.id)
@@ -108,6 +112,9 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
             schedule = default_schedule
             active = True
             next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=default_schedule)
+            if job_key in {"MAINT_EXPIRE_RESERVATIONS", "MAINT_DISPATCH_WEBHOOKS"}:
+                schedule = on_demand_schedule
+                next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=on_demand_schedule)
             if job_key == "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS":
                 # On-demand job: created inactive and without a next_run_at. It will be enqueued by
                 # setting next_run_at=now (and optionally selector cursor) when tiers change.

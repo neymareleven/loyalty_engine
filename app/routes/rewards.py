@@ -68,6 +68,13 @@ def _serialize_reward_out(*, db: Session, reward: Reward) -> dict:
             for ct in coupon_types
         ],
         "created_at": getattr(reward, "created_at", None),
+        "benefit_type": getattr(reward, "benefit_type", None) or "CUSTOM",
+        "benefit_value": getattr(reward, "benefit_value", None),
+        "max_discount_amount": getattr(reward, "max_discount_amount", None),
+        "min_cart_amount": getattr(reward, "min_cart_amount", None),
+        "applies_to": getattr(reward, "applies_to", None) or "CART",
+        "free_product_quantity": int(getattr(reward, "free_product_quantity", 1) or 1),
+        "stackable": bool(getattr(reward, "stackable", False)),
         "products": [
             {
                 "product_id": l.product_id,
@@ -162,6 +169,13 @@ def create_reward(
         name=payload.name,
         description=payload.description,
         active=payload.active,
+        benefit_type=payload.benefit_type or "CUSTOM",
+        benefit_value=payload.benefit_value,
+        max_discount_amount=payload.max_discount_amount,
+        min_cart_amount=payload.min_cart_amount,
+        applies_to=payload.applies_to or "CART",
+        free_product_quantity=payload.free_product_quantity or 1,
+        stackable=bool(payload.stackable),
     )
     db.add(reward)
     try:

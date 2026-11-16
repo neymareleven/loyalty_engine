@@ -12,10 +12,11 @@ from app.models.transaction import Transaction
 from app.services.contact_service import get_customer
 from app.services.catalog_invalidation_service import coupon_admin_allowed_transitions
 
-ALLOWED_COUPON_STATUSES = frozenset({"ISSUED", "USED", "EXPIRED", "INVALIDATED"})
+ALLOWED_COUPON_STATUSES = frozenset({"ISSUED", "RESERVED", "USED", "EXPIRED", "INVALIDATED"})
 
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    "ISSUED": frozenset({"USED", "EXPIRED"}),
+    "ISSUED": frozenset({"USED", "EXPIRED", "RESERVED"}),
+    "RESERVED": frozenset({"ISSUED", "USED", "EXPIRED"}),
     "USED": frozenset({"ISSUED", "EXPIRED"}),
     "EXPIRED": frozenset(),
     "INVALIDATED": frozenset(),
@@ -29,7 +30,7 @@ def _utcnow() -> datetime:
 
 
 def _assert_transition(*, from_status: str, to_status: str) -> None:
-    if to_status not in {"ISSUED", "USED", "EXPIRED"}:
+    if to_status not in {"ISSUED", "USED", "EXPIRED", "RESERVED"}:
         raise HTTPException(status_code=400, detail=f"Invalid status: {to_status}")
     allowed = ALLOWED_TRANSITIONS.get(from_status, frozenset())
     if to_status not in allowed:

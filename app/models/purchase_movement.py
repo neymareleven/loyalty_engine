@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, Date, Integer, String, TIMESTAMP, ForeignKey
+from sqlalchemy import Column, Date, Index, Integer, String, TIMESTAMP, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -11,6 +11,10 @@ class PurchaseMovement(Base):
     """One sale (or admin adjustment) contributing to purchase-count + purchase-amount qualification."""
 
     __tablename__ = "purchase_movements"
+
+    __table_args__ = (
+        Index("ix_purchase_movements_customer_expires", "customer_id", "expires_at"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 

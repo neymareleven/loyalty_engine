@@ -7,8 +7,10 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.customer import Customer
 from app.models.purchase_movement import PurchaseMovement
 from app.models.transaction import Transaction
 from app.services.loyalty_settings_service import get_loyalty_settings
@@ -118,7 +120,7 @@ def _active_purchase_filters(*, today: date | None = None):
     today = today or date.today()
     return (
         PurchaseMovement.type != "EXPIRE",
-        (PurchaseMovement.expires_at.is_(None)) | (PurchaseMovement.expires_at >= today),
+        (PurchaseMovement.expires_at.is_(None)) | (PurchaseMovement.expires_at > today),
     )
 
 
@@ -148,7 +150,7 @@ def get_next_purchase_expiry_date(db: Session, customer_id) -> date | None:
             PurchaseMovement.customer_id == customer_id,
             PurchaseMovement.type != "EXPIRE",
             PurchaseMovement.expires_at.isnot(None),
-            PurchaseMovement.expires_at >= today,
+            PurchaseMovement.expires_at > today,
             (PurchaseMovement.quantity > 0) | (PurchaseMovement.amount > 0),
         )
         .scalar()
@@ -272,6 +274,13 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
     if not status.startswith("PROCESSED"):
         return None
 
+    customer = (
+        db.query(Customer)
+        .filter(Customer.id == customer.id)
+        .with_for_update()
+        .one()
+    )
+
     existing = (
         db.query(PurchaseMovement.id)
         .filter(PurchaseMovement.source_transaction_id == transaction.id)
@@ -281,97 +290,133 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
     if existing:
         return None
 
-    is_first_purchase = is_first_purchase_sale(
-        db, customer, transaction
-    )
-
-    previous_purchase_count, previous_purchase_amount_total = get_purchase_balances(db, customer.id)
-
-    payload = transaction.payload if isinstance(transaction.payload, dict) else {}
-    amount = extract_purchase_amount(payload)
-    settings = get_loyalty_settings(db, brand=customer.brand)
-    validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
-    occurred_at = transaction_occurred_at(transaction)
-    expires_at = purchase_expires_on(occurred_at, validity_days)
-
-    bypass_tier_key = None
-    if settings and first_purchase_bypass_eligible(
-        enabled=bool(getattr(settings, "first_purchase_bypass_enabled", False)),
-        min_amount=getattr(settings, "first_purchase_bypass_min_amount", None),
-        purchase_amount=amount,
-        is_first_purchase=is_first_purchase,
-        tier_key=getattr(settings, "first_purchase_bypass_tier_key", None),
-    ):
-        bypass_tier_key = (getattr(settings, "first_purchase_bypass_tier_key", None) or "").strip() or None
-        from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
-        from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
-
-        status_days = getattr(settings, "loyalty_status_validity_days", None)
-        now = datetime.utcnow()
-        guarantee_expires_at = (
-            (now + timedelta(days=int(status_days))) if status_days is not None else None
+    try:
+        is_first_purchase = is_first_purchase_sale(
+            db, customer, transaction
         )
-        grant_loyalty_guarantee(
+
+        previous_purchase_count, previous_purchase_amount_total = get_purchase_balances(db, customer.id)
+
+        payload = transaction.payload if isinstance(transaction.payload, dict) else {}
+        amount = extract_purchase_amount(payload)
+        settings = get_loyalty_settings(db, brand=customer.brand)
+        validity_days = getattr(settings, "purchase_validity_days", None) if settings else None
+        occurred_at = transaction_occurred_at(transaction)
+        expires_at = purchase_expires_on(occurred_at, validity_days)
+
+        bypass_tier_key = None
+        if settings and first_purchase_bypass_eligible(
+            enabled=bool(getattr(settings, "first_purchase_bypass_enabled", False)),
+            min_amount=getattr(settings, "first_purchase_bypass_min_amount", None),
+            purchase_amount=amount,
+            is_first_purchase=is_first_purchase,
+            tier_key=getattr(settings, "first_purchase_bypass_tier_key", None),
+        ):
+            bypass_tier_key = (getattr(settings, "first_purchase_bypass_tier_key", None) or "").strip() or None
+            from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
+            from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
+
+            status_days = getattr(settings, "loyalty_status_validity_days", None)
+            now = datetime.utcnow()
+            guarantee_expires_at = (
+                (now + timedelta(days=int(status_days))) if status_days is not None else None
+            )
+            grant_loyalty_guarantee(
+                db,
+                customer=customer,
+                source=GUARANTEE_BYPASS,
+                floor_tier_key=bypass_tier_key,
+                expires_at=guarantee_expires_at,
+            )
+
+        movement = PurchaseMovement(
+            customer_id=customer.id,
+            quantity=1,
+            amount=amount,
+            type="EARN",
+            source_transaction_id=transaction.id,
+            created_at=occurred_at,
+            expires_at=expires_at,
+        )
+        with db.begin_nested():
+            db.add(movement)
+            db.flush()
+        sync_customer_purchase_counters(db, customer)
+
+        from app.services.loyalty_status_service import update_customer_status
+
+        # Tier / bypass events first (TIER_CHANGED, FIRST_PURCHASE_BYPASS), then PURCHASE_RECORDED.
+        sale_depth = 0
+        if isinstance(payload, dict):
+            try:
+                sale_depth = int(payload.get("_ruleDepth") or 0)
+            except (TypeError, ValueError):
+                sale_depth = 0
+
+        update_customer_status(
+            db,
+            customer,
+            reason="PURCHASE_RECORDED",
+            source_transaction_id=transaction.id,
+            depth=sale_depth,
+            refresh_window=bool(bypass_tier_key),
+            emit_events=True,
+            sync_unomi=False,
+            min_tier_key=bypass_tier_key,
+            allow_downgrade_before_expiry=bool(bypass_tier_key),
+        )
+
+        purchase_count, purchase_amount_total = get_purchase_balances(db, customer.id)
+        emit_purchase_recorded_event(
             db,
             customer=customer,
-            source=GUARANTEE_BYPASS,
-            floor_tier_key=bypass_tier_key,
-            expires_at=guarantee_expires_at,
+            source_transaction=transaction,
+            order_amount=amount,
+            purchase_count=purchase_count,
+            purchase_amount_total=purchase_amount_total,
+            previous_purchase_count=previous_purchase_count,
+            previous_purchase_amount_total=previous_purchase_amount_total,
+            is_first_purchase=is_first_purchase,
+            depth=sale_depth,
         )
-
-    movement = PurchaseMovement(
-        customer_id=customer.id,
-        quantity=1,
-        amount=amount,
-        type="EARN",
-        source_transaction_id=transaction.id,
-        created_at=occurred_at,
-        expires_at=expires_at,
-    )
-    db.add(movement)
-    db.flush()
-    sync_customer_purchase_counters(db, customer)
-
-    from app.services.loyalty_status_service import update_customer_status
-
-    # Tier / bypass events first (TIER_CHANGED, FIRST_PURCHASE_BYPASS), then PURCHASE_RECORDED.
-    sale_depth = 0
-    if isinstance(payload, dict):
-        try:
-            sale_depth = int(payload.get("_ruleDepth") or 0)
-        except (TypeError, ValueError):
-            sale_depth = 0
-
-    update_customer_status(
-        db,
-        customer,
-        reason="PURCHASE_RECORDED",
-        source_transaction_id=transaction.id,
-        depth=sale_depth,
-        refresh_window=bool(bypass_tier_key),
-        emit_events=True,
-        sync_unomi=False,
-        min_tier_key=bypass_tier_key,
-        allow_downgrade_before_expiry=bool(bypass_tier_key),
-    )
-
-    purchase_count, purchase_amount_total = get_purchase_balances(db, customer.id)
-    emit_purchase_recorded_event(
-        db,
-        customer=customer,
-        source_transaction=transaction,
-        order_amount=amount,
-        purchase_count=purchase_count,
-        purchase_amount_total=purchase_amount_total,
-        previous_purchase_count=previous_purchase_count,
-        previous_purchase_amount_total=previous_purchase_amount_total,
-        is_first_purchase=is_first_purchase,
-        depth=sale_depth,
-    )
-    return movement
+        return movement
+    except IntegrityError:
+        return None
+    except Exception as exc:
+        emit_purchase_record_failed(
+            db,
+            customer=customer,
+            source_transaction=transaction,
+            error=exc,
+        )
+        return None
 
 
 PURCHASE_RECORDED_TYPE = "PURCHASE_RECORDED"
+PURCHASE_RECORD_FAILED_TYPE = "PURCHASE_RECORD_FAILED"
+
+
+def emit_purchase_record_failed(db: Session, *, customer, source_transaction, error: Exception):
+    from app.services.transaction_service import create_internal_transaction
+
+    tx_id = getattr(source_transaction, "id", None)
+    if tx_id is None or customer is None:
+        return None
+    return create_internal_transaction(
+        db,
+        brand=customer.brand,
+        profile_id=customer.profile_id,
+        transaction_type=PURCHASE_RECORD_FAILED_TYPE,
+        transaction_id=f"purchase_record_failed:{tx_id}",
+        payload={
+            "sourceTransactionId": str(tx_id),
+            "error": type(error).__name__,
+            "_ruleDepth": 1,
+        },
+        source="INTERNAL",
+        depth=1,
+        commit=False,
+    )
 
 
 def emit_purchase_recorded_event(
@@ -584,7 +629,7 @@ def serialize_purchase_movement_out(movement: PurchaseMovement, *, today: date |
     expired = bool(
         movement.type != "EXPIRE"
         and movement.expires_at is not None
-        and movement.expires_at < today
+        and movement.expires_at <= today
         and (int(movement.quantity or 0) > 0 or int(movement.amount or 0) > 0)
     )
     if movement.type == "EXPIRE" or expired:

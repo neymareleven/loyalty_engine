@@ -79,11 +79,11 @@ def test_tier_sort_key_orders_higher_thresholds_last():
 def test_last_change_does_not_treat_mode_switch_as_tier_move():
     assert last_change_from_tier_event("TIER_UPGRADED") == "upgrade"
     assert last_change_from_tier_event("TIER_DOWNGRADED") == "downgrade"
-    assert last_change_from_tier_event("TIER_RENEWED") == "no_change"
+    assert last_change_from_tier_event("TIER_RENEWED") == "renewed"
     assert last_change_from_tier_event("ADMIN_SET_TIER") == "admin_override"
     assert last_change_from_tier_event(QUALIFICATION_MODE_CHANGED_REASON) == "mode_changed"
     assert last_change_from_tier_event(FIRST_PURCHASE_BYPASS_REASON) == "first_purchase_bypass"
-    assert last_change_from_tier_event("CUSTOMER_REGISTRATION") is None
+    assert last_change_from_tier_event("CUSTOMER_REGISTRATION") == "registration"
 
 
 def test_first_purchase_bypass_eligible_only_first_sale_over_threshold():

@@ -265,7 +265,9 @@ def customer_transaction_filters(db: Session, *, brand: str, customer: Customer)
     Each transaction keeps the profile_id from ingest time; listing spans master + aliases + email.
     """
     profile_ids = list_customer_unomi_profile_ids(db, customer)
-    clauses = [Transaction.profile_id.in_(profile_ids)] if profile_ids else []
+    clauses = [Transaction.customer_id == customer.id]
+    if profile_ids:
+        clauses.append(Transaction.profile_id.in_(profile_ids))
 
     email = (customer.email or "").strip().lower()
     if email:

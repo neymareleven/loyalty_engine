@@ -44,6 +44,7 @@ def test_catalog_tier_changed_cause_options():
         "mode_switch",
         "admin",
         "expiration",
+        "tier_config_changed",
     ]
 
 

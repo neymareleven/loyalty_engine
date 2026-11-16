@@ -89,6 +89,17 @@ def build_customer_reward_snapshot_payload(
         "name": reward.name,
         "description": reward.description,
         "rewardId": str(reward.id),
+        "benefit": {
+            "id": str(reward.id),
+            "name": reward.name,
+            "benefitType": getattr(reward, "benefit_type", None) or "CUSTOM",
+            "benefitValue": getattr(reward, "benefit_value", None),
+            "maxDiscountAmount": getattr(reward, "max_discount_amount", None),
+            "minCartAmount": getattr(reward, "min_cart_amount", None),
+            "appliesTo": getattr(reward, "applies_to", None) or "CART",
+            "freeProductQuantity": int(getattr(reward, "free_product_quantity", 1) or 1),
+            "stackable": bool(getattr(reward, "stackable", False)),
+        },
     }
     if coupon_type is not None:
         payload["couponTypeSnapshot"] = {

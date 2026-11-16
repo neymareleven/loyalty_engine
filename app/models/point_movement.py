@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, Integer, String, TIMESTAMP, ForeignKey
+from sqlalchemy import Column, Index, Integer, String, TIMESTAMP, ForeignKey
 from sqlalchemy import Date
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
@@ -8,6 +8,10 @@ from app.db import Base
 
 class PointMovement(Base):
     __tablename__ = "point_movements"
+
+    __table_args__ = (
+        Index("ix_point_movements_customer_expires", "customer_id", "expires_at"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 

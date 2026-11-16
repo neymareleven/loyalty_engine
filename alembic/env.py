@@ -36,6 +36,12 @@ from app.models.segment_member import SegmentMember  # noqa: F401
 from app.models.customer_unomi_profile_alias import CustomerUnomiProfileAlias  # noqa: F401
 from app.models.transaction import Transaction  # noqa: F401
 from app.models.transaction_rule_execution import TransactionRuleExecution  # noqa: F401
+from app.models.api_client import ApiClient  # noqa: F401
+from app.models.redemption import Redemption  # noqa: F401
+from app.models.customer_loyalty_guarantee import CustomerLoyaltyGuarantee  # noqa: F401
+from app.models.webhook_endpoint import WebhookEndpoint  # noqa: F401
+from app.models.webhook_outbox import WebhookOutbox  # noqa: F401
+from app.models.storefront_audit_event import StorefrontAuditEvent  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

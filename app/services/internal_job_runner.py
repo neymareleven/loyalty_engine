@@ -155,6 +155,18 @@ def run_internal_job_once(
         expired = expire_purchases(db, brand=job.brand)
         return MaintenanceJobRunStats(expired=int(expired))
 
+    if job.job_key == "MAINT_DISPATCH_WEBHOOKS":
+        from app.services.webhook_service import dispatch_due_webhooks
+
+        sent = dispatch_due_webhooks(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(sent))
+
+    if job.job_key == "MAINT_EXPIRE_RESERVATIONS":
+        from app.services.redemption_service import expire_stale_reservations
+
+        expired = expire_stale_reservations(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(expired))
+
     if job.job_key == "MAINT_EXPIRE_LOYALTY_STATUS":
         if not job.brand:
             raise ValueError("MAINT_EXPIRE_LOYALTY_STATUS requires job.brand")

@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, JSON, String, TIMESTAMP, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Index, JSON, String, TIMESTAMP, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
@@ -8,12 +8,17 @@ from app.db import Base
 class Transaction(Base):
     __tablename__ = "transactions"
 
-    __table_args__ = (UniqueConstraint("brand", "event_id", name="uq_transactions_brand_event_id"),)
+    __table_args__ = (
+        UniqueConstraint("brand", "event_id", name="uq_transactions_brand_event_id"),
+        Index("ix_transactions_brand_profile_created", "brand", "profile_id", "created_at"),
+        Index("ix_transactions_customer_id", "customer_id"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     brand = Column(String(50), nullable=False)
     profile_id = Column(String(100), nullable=False)
+    customer_id = Column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=True)
     transaction_type = Column(String(50), nullable=False)
     transaction_id = Column("event_id", String(100), nullable=False)
 

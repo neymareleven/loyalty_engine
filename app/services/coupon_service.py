@@ -86,6 +86,10 @@ def issue_coupon(
     if not ct:
         raise HTTPException(status_code=404, detail="Coupon type not found")
 
+    from app.models.customer import Customer
+
+    db.query(Customer).filter(Customer.id == customer.id).with_for_update().one()
+
     now = datetime.utcnow()
 
     def _mark_issued_reward_ids(coupon_obj, ids: list[str]):
@@ -129,10 +133,13 @@ def issue_coupon(
     if validity_days is not None:
         expires_at = now + timedelta(days=int(validity_days))
 
+    from app.services.coupon_code import allocate_unique_coupon_code
+
     coupon = CustomerCoupon(
         customer_id=customer.id,
         coupon_type_id=ct.id,
         status="ISSUED",
+        code=allocate_unique_coupon_code(db),
         expires_at=expires_at,
         source_transaction_id=transaction.id if transaction is not None else None,
         rule_id=_coerce_uuid(rule_id),
@@ -223,6 +230,19 @@ def issue_coupon(
         raise
 
     _mark_issued_reward_ids(coupon, getattr(coupon, "_issued_reward_ids", []))
+    from app.services.webhook_service import enqueue_webhook_event
+
+    enqueue_webhook_event(
+        db,
+        brand=customer.brand,
+        event="coupon.issued",
+        payload={
+            "couponId": str(coupon.id),
+            "code": coupon.code,
+            "profileId": customer.profile_id,
+            "status": coupon.status,
+        },
+    )
     return coupon
 
 
@@ -314,8 +334,19 @@ def expire_coupons(db: Session, *, brand: str):
         .all()
     )
 
+    from app.models.customer import Customer
+    from app.services.webhook_service import enqueue_webhook_event
+
     for cc in expiring:
         cc.status = "EXPIRED"
+        owner = db.query(Customer).filter(Customer.id == cc.customer_id).first()
+        if owner:
+            enqueue_webhook_event(
+                db,
+                brand=brand,
+                event="coupon.expired",
+                payload={"couponId": str(cc.id), "code": cc.code, "profileId": owner.profile_id},
+            )
 
         rewards = (
             db.query(CustomerReward)

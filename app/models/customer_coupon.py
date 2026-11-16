@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, ForeignKey, Integer, JSON, String, TIMESTAMP, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, JSON, String, TIMESTAMP, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -12,6 +12,9 @@ class CustomerCoupon(Base):
 
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_customer_coupons_idempotency_key"),
+        UniqueConstraint("code", name="uq_customer_coupons_code"),
+        Index("ix_customer_coupons_customer_type_issued", "customer_id", "coupon_type_id", "issued_at"),
+        Index("ix_customer_coupons_code", "code"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -24,7 +27,12 @@ class CustomerCoupon(Base):
     )
 
     status = Column(String(20), nullable=False, default="ISSUED")
-    # ISSUED | USED | EXPIRED | INVALIDATED
+    # ISSUED | RESERVED | USED | EXPIRED | INVALIDATED
+
+    code = Column(String(32), nullable=True)
+    shareable = Column(Boolean, nullable=False, default=False)
+    reserved_until = Column(TIMESTAMP, nullable=True)
+    reserved_by_redemption_id = Column(UUID(as_uuid=True), nullable=True)
 
     issued_at = Column(TIMESTAMP, server_default=func.now())
     expires_at = Column(TIMESTAMP, nullable=True)

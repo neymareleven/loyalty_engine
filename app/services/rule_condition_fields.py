@@ -26,6 +26,7 @@ TIER_CHANGED_CAUSE_VALUES = (
     "mode_switch",
     "admin",
     "expiration",
+    "tier_config_changed",
 )
 
 

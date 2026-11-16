@@ -36,6 +36,13 @@ class RewardCreate(BaseModel):
         min_length=1,
         description="Types de coupon existants auxquels rattacher cette récompense.",
     )
+    benefit_type: str = "CUSTOM"
+    benefit_value: Optional[int] = None
+    max_discount_amount: Optional[int] = None
+    min_cart_amount: Optional[int] = None
+    applies_to: str = "CART"
+    free_product_quantity: int = 1
+    stackable: bool = False
 
 
 class RewardCouponTypesReplace(BaseModel):
@@ -56,6 +63,13 @@ class RewardUpdate(BaseModel):
         default=None,
         description="Si fourni, remplace tous les liens coupon ↔ reward pour cette récompense.",
     )
+    benefit_type: Optional[str] = None
+    benefit_value: Optional[int] = None
+    max_discount_amount: Optional[int] = None
+    min_cart_amount: Optional[int] = None
+    applies_to: Optional[str] = None
+    free_product_quantity: Optional[int] = None
+    stackable: Optional[bool] = None
 
 
 class RewardOut(BaseModel):
@@ -68,6 +82,13 @@ class RewardOut(BaseModel):
     coupon_types: list[CouponTypeLinkSummary] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     products: list[RewardProductItemOut] = []
+    benefit_type: Optional[str] = None
+    benefit_value: Optional[int] = None
+    max_discount_amount: Optional[int] = None
+    min_cart_amount: Optional[int] = None
+    applies_to: Optional[str] = None
+    free_product_quantity: Optional[int] = None
+    stackable: Optional[bool] = None
 
     class Config:
         from_attributes = True

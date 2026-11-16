@@ -2,6 +2,8 @@ import base64
 import hmac
 import os
 import re
+import time
+import uuid
 
 import logging
 
@@ -28,6 +30,11 @@ from app.models.event_type import TransactionType
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.brand_loyalty_settings import BrandLoyaltySettings
 from app.models.customer_loyalty_guarantee import CustomerLoyaltyGuarantee
+from app.models.api_client import ApiClient  # noqa: F401
+from app.models.redemption import Redemption  # noqa: F401
+from app.models.webhook_endpoint import WebhookEndpoint  # noqa: F401
+from app.models.webhook_outbox import WebhookOutbox  # noqa: F401
+from app.models.storefront_audit_event import StorefrontAuditEvent  # noqa: F401
 
 from app.routes.customers import router as customers_router
 from app.routes.transactions import router as transactions_router
@@ -43,8 +50,23 @@ from app.routes.internal_jobs import router as internal_jobs_router
 from app.routes.event_types import router as transaction_types_router
 from app.routes.loyalty_tiers import router as loyalty_tiers_router
 from app.routes.unomi_integrations import router as unomi_integrations_router
+from app.routes.storefront import router as storefront_router
 
-app = FastAPI(title="Loyalty Engine")
+def _environment() -> str:
+    return (os.getenv("ENVIRONMENT") or os.getenv("ENV") or "development").strip().lower()
+
+
+def _is_production() -> bool:
+    return _environment() in {"production", "prod"}
+
+
+_docs_enabled = not _is_production()
+app = FastAPI(
+    title="Loyalty Engine",
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
 
 # ─── CORS ─────────────────────────────────────────────────────────
 _DEFAULT_CORS_ORIGINS = [
@@ -102,10 +124,14 @@ def _cors_headers_for_request(request: Request) -> dict[str, str]:
     return {}
 
 
-def _db_error_response(request: Request, *, status_code: int, detail: str, error: str) -> JSONResponse:
+def _error_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _db_error_response(request: Request, *, status_code: int, detail: str, error_id: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
-        content={"detail": detail, "error": error},
+        content={"detail": detail, "error_id": error_id},
         headers=_cors_headers_for_request(request),
     )
 
@@ -113,7 +139,8 @@ def _db_error_response(request: Request, *, status_code: int, detail: str, error
 @app.exception_handler(ProgrammingError)
 async def db_programming_error_handler(request: Request, exc: ProgrammingError):
     """Missing tables/columns on prod (migrations not applied) surfaces as 500 otherwise."""
-    orig = str(getattr(exc, "orig", exc))
+    error_id = _error_id()
+    logging.exception("Database schema error error_id=%s on %s %s", error_id, request.method, request.url.path)
     return _db_error_response(
         request,
         status_code=503,
@@ -121,18 +148,19 @@ async def db_programming_error_handler(request: Request, exc: ProgrammingError):
             "Database schema is out of date for this API version. "
             "On the server run: alembic upgrade head"
         ),
-        error=orig,
+        error_id=error_id,
     )
 
 
 @app.exception_handler(IntegrityError)
 async def db_integrity_error_handler(request: Request, exc: IntegrityError):
-    orig = str(getattr(exc, "orig", exc))
+    error_id = _error_id()
+    logging.exception("Integrity error error_id=%s on %s %s", error_id, request.method, request.url.path)
     return _db_error_response(
         request,
         status_code=409,
         detail="Database integrity constraint violated",
-        error=orig,
+        error_id=error_id,
     )
 
 
@@ -140,33 +168,52 @@ async def db_integrity_error_handler(request: Request, exc: IntegrityError):
 async def db_sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
     if isinstance(exc, (ProgrammingError, IntegrityError)):
         raise exc
-    orig = str(getattr(exc, "orig", exc))
+    error_id = _error_id()
+    logging.exception("Database error error_id=%s on %s %s", error_id, request.method, request.url.path)
     return _db_error_response(
         request,
         status_code=503,
         detail="Database error",
-        error=orig,
+        error_id=error_id,
     )
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    logging.exception("Unhandled error on %s %s", request.method, request.url.path)
+    error_id = _error_id()
+    logging.exception("Unhandled error error_id=%s on %s %s", error_id, request.method, request.url.path)
     return JSONResponse(
         status_code=500,
         content={
             "detail": "Internal server error",
-            "error": str(exc),
-            "type": type(exc).__name__,
+            "error_id": error_id,
         },
         headers=_cors_headers_for_request(request),
     )
 
 
 @app.middleware("http")
+async def timing_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    if elapsed_ms >= 500:
+        logging.warning(
+            "slow request %s %s %.0fms",
+            request.method,
+            request.url.path,
+            elapsed_ms,
+        )
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.0f}"
+    return response
+
+
+@app.middleware("http")
 async def basic_auth_middleware(request: Request, call_next):
-    public_paths = {"/", "/docs", "/openapi.json", "/redoc", "/favicon.ico"}
-    if request.url.path in public_paths:
+    public_paths = {"/", "/favicon.ico"}
+    if _docs_enabled:
+        public_paths.update({"/docs", "/openapi.json", "/redoc"})
+    if request.url.path in public_paths or request.url.path.startswith("/v1/storefront"):
         return await call_next(request)
 
     # Always allow CORS preflight requests — browsers never send credentials on OPTIONS
@@ -174,7 +221,15 @@ async def basic_auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     username = os.getenv("API_BASIC_AUTH_USERNAME", "karaf")
-    password = os.getenv("API_BASIC_AUTH_PASSWORD", "karaf")
+    password = os.getenv("API_BASIC_AUTH_PASSWORD")
+    if not password:
+        if _is_production():
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Authentication is not configured"},
+                headers=_cors_headers_for_request(request),
+            )
+        password = "karaf"
 
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("basic "):
@@ -219,7 +274,21 @@ async def basic_auth_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 def startup():
-    Base.metadata.create_all(bind=engine)
+    if _is_production():
+        password = (os.getenv("API_BASIC_AUTH_PASSWORD") or "").strip()
+        if not password or password == "karaf":
+            raise RuntimeError("API_BASIC_AUTH_PASSWORD must be set in production")
+        if not (os.getenv("UNOMI_WEBHOOK_SECRET") or "").strip():
+            raise RuntimeError("UNOMI_WEBHOOK_SECRET must be set in production")
+        return
+    auto_create = (os.getenv("AUTO_CREATE_SCHEMA", "true") or "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if auto_create:
+        Base.metadata.create_all(bind=engine)
 
 
 app.include_router(customers_router)
@@ -236,6 +305,7 @@ app.include_router(internal_jobs_router)
 app.include_router(transaction_types_router)
 app.include_router(loyalty_tiers_router)
 app.include_router(unomi_integrations_router)
+app.include_router(storefront_router)
 
 
 @app.get("/")

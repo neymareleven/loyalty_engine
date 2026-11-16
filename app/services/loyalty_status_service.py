@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,9 @@ def last_change_from_tier_event(transaction_type: str | None) -> str | None:
     if transaction_type == "TIER_DOWNGRADED":
         return "downgrade"
     if transaction_type == "TIER_RENEWED":
-        return "no_change"
+        return "renewed"
+    if transaction_type == "CUSTOMER_REGISTRATION":
+        return "registration"
     if transaction_type == "ADMIN_SET_TIER":
         return "admin_override"
     if transaction_type == "QUALIFICATION_MODE_CHANGED":
@@ -27,6 +29,24 @@ def last_change_from_tier_event(transaction_type: str | None) -> str | None:
     if transaction_type == FIRST_PURCHASE_BYPASS_REASON:
         return "first_purchase_bypass"
     return None
+
+
+def status_window_expires_at(now: datetime, status_days: int) -> datetime:
+    """Midnight UTC of assigned calendar day + validity days.
+
+    A window assigned on day J with 1 day of validity expires when the job
+    runs at 00:00:00 on J+1 (expires_at.date() <= today).
+    """
+    return datetime.combine(now.date() + timedelta(days=int(status_days)), time.min)
+
+
+def loyalty_status_expired_on(*, expires_at: datetime | date | None, now: datetime | None = None) -> bool:
+    if expires_at is None:
+        return False
+    today = (now or datetime.utcnow()).date()
+    if isinstance(expires_at, datetime):
+        return expires_at.date() <= today
+    return expires_at <= today
 
 
 def _tier_sort_key(tier: LoyaltyTier) -> tuple[int, int, int]:
@@ -159,7 +179,7 @@ def _apply_status_window(customer, *, now: datetime, status_days, is_base_tier: 
         return
     customer.loyalty_status_assigned_at = now
     if status_days is not None:
-        customer.loyalty_status_expires_at = now + timedelta(days=int(status_days))
+        customer.loyalty_status_expires_at = status_window_expires_at(now, int(status_days))
     else:
         customer.loyalty_status_expires_at = None
 
@@ -197,6 +217,21 @@ def _emit_tier_transactions(
             payload=dict(payload),
             depth=depth,
             commit=False,
+        )
+    if also_generic or transaction_type == TIER_CHANGED_REASON:
+        from app.services.webhook_service import enqueue_webhook_event
+
+        enqueue_webhook_event(
+            db,
+            brand=customer.brand,
+            event="tier.changed",
+            payload={
+                "profileId": customer.profile_id,
+                "fromTier": payload.get("fromTier"),
+                "toTier": payload.get("toTier"),
+                "cause": payload.get("cause"),
+                "transactionType": transaction_type,
+            },
         )
 
 
@@ -294,13 +329,24 @@ def update_customer_status(
         and new_rank is not None
         and new_rank < old_rank
     )
+    is_new_assignment = (not customer.loyalty_status) or str(customer.loyalty_status).upper() == "UNCONFIGURED"
     is_upgrade = bool(
         customer.loyalty_status != new_status
         and new_rank is not None
-        and (old_rank is None or new_rank > old_rank)
+        and (
+            (old_rank is not None and new_rank > old_rank)
+            or (old_rank is None and is_new_assignment)
+        )
+    )
+    deleted_or_inactive_old_tier = bool(
+        customer.loyalty_status
+        and customer.loyalty_status != new_status
+        and old_rank is None
+        and not is_new_assignment
     )
     not_expired = bool(
-        customer.loyalty_status_expires_at is not None and customer.loyalty_status_expires_at > now
+        customer.loyalty_status_expires_at is not None
+        and not loyalty_status_expired_on(expires_at=customer.loyalty_status_expires_at, now=now)
     )
     if is_downgrade and not allow_downgrade_before_expiry and not_expired:
         new_status = customer.loyalty_status
@@ -314,7 +360,7 @@ def update_customer_status(
     if is_base_tier:
         if customer.loyalty_status_expires_at is not None or customer.loyalty_status_assigned_at is None:
             _apply_status_window(customer, now=now, status_days=status_days, is_base_tier=True)
-    elif status_will_change and (is_upgrade or is_downgrade):
+    elif status_will_change and (is_upgrade or is_downgrade or deleted_or_inactive_old_tier):
         should_refresh_window = True
         _apply_status_window(customer, now=now, status_days=status_days, is_base_tier=False)
     elif (
@@ -352,17 +398,24 @@ def update_customer_status(
             transaction_type = FIRST_PURCHASE_BYPASS_REASON
         elif status_changed and reason in ("ADMIN_OVERRIDE", "ADMIN_SET_TIER"):
             transaction_type = "ADMIN_SET_TIER"
+        elif status_changed and deleted_or_inactive_old_tier:
+            transaction_type = TIER_CHANGED_REASON
         elif status_changed:
             transaction_type = "TIER_UPGRADED" if is_upgrade else "TIER_DOWNGRADED"
         elif did_refresh_window_without_tier_change:
             transaction_type = "TIER_RENEWED"
 
         if transaction_type:
+            event_cause = (
+                "tier_config_changed"
+                if deleted_or_inactive_old_tier
+                else cause_from_reason(reason)
+            )
             payload = {
                 "fromTier": old_status,
                 "toTier": new_status,
                 "reason": reason,
-                "cause": cause_from_reason(reason),
+                "cause": event_cause,
                 "earnedTier": earned_status,
                 "qualificationMode": mode,
                 "statusPoints": int(customer.status_points or 0),
@@ -391,7 +444,7 @@ def update_customer_status(
                 transaction_type=transaction_type,
                 payload=payload,
                 depth=depth,
-                also_generic=status_changed,
+                also_generic=status_changed and transaction_type != TIER_CHANGED_REASON,
             )
 
     if sync_unomi:

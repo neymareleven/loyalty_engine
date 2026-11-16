@@ -453,6 +453,21 @@ def update_loyalty_settings(
             )
         obj.mode_switch_policy = policy
 
+    if "max_discount_benefits_per_cart" in data and data["max_discount_benefits_per_cart"] is not None:
+        try:
+            n = int(data["max_discount_benefits_per_cart"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="max_discount_benefits_per_cart must be an integer >= 1")
+        if n < 1:
+            raise HTTPException(status_code=400, detail="max_discount_benefits_per_cart must be >= 1")
+        obj.max_discount_benefits_per_cart = n
+
+    if "discount_base" in data and data["discount_base"] is not None:
+        base = str(data["discount_base"]).strip().upper()
+        if base not in {"SUBTOTAL_EXCL_TAX", "SUBTOTAL_INCL_TAX"}:
+            raise HTTPException(status_code=400, detail="discount_base must be SUBTOTAL_EXCL_TAX or SUBTOTAL_INCL_TAX")
+        obj.discount_base = base
+
     should_backfill_points = obj.points_validity_days is not None and prev_points_days is None
     should_backfill_status = obj.loyalty_status_validity_days is not None and prev_status_days is None
     should_backfill_purchases = obj.purchase_validity_days is not None and prev_purchase_days is None
@@ -1719,3 +1734,66 @@ def get_rules_ui_bundle(
 @router.get("/rule-conditions")
 def list_rule_conditions_catalog():
     return get_rule_conditions_catalog()
+
+
+@router.post("/api-clients")
+def create_api_client(
+    payload: dict,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    from app.models.api_client import ApiClient
+    from app.services.storefront_auth import STOREFRONT_SCOPE, generate_api_key, hash_api_key
+
+    name = str((payload or {}).get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    raw = generate_api_key()
+    client = ApiClient(
+        brand=active_brand,
+        name=name,
+        key_hash=hash_api_key(raw),
+        key_prefix=raw[:12],
+        scopes=[STOREFRONT_SCOPE],
+        active=True,
+    )
+    db.add(client)
+    db.commit()
+    db.refresh(client)
+    return {
+        "id": str(client.id),
+        "brand": client.brand,
+        "name": client.name,
+        "key": raw,
+        "keyPrefix": client.key_prefix,
+        "scopes": client.scopes,
+        "active": client.active,
+    }
+
+
+@router.post("/webhook-endpoints")
+def create_webhook_endpoint(
+    payload: dict,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    from app.models.webhook_endpoint import WebhookEndpoint
+    from app.services.webhook_service import WEBHOOK_EVENTS
+
+    url = str((payload or {}).get("url") or "").strip()
+    secret = str((payload or {}).get("secret") or "").strip()
+    events = (payload or {}).get("events") or list(WEBHOOK_EVENTS)
+    if not url.startswith("https://") and not url.startswith("http://"):
+        raise HTTPException(status_code=400, detail="url must be an http(s) URL")
+    if not secret:
+        raise HTTPException(status_code=400, detail="secret is required")
+    if not isinstance(events, list) or not events:
+        raise HTTPException(status_code=400, detail="events must be a non-empty list")
+    unknown = [e for e in events if e not in WEBHOOK_EVENTS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown events: {unknown}")
+    row = WebhookEndpoint(brand=active_brand, url=url, secret=secret, events=events, active=True)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": str(row.id), "brand": row.brand, "url": row.url, "events": row.events, "active": row.active}

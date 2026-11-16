@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
-from app.models.loyalty_tier import LoyaltyTier
 from app.models.point_movement import PointMovement
 from app.models.purchase_movement import PurchaseMovement
 from app.services.loyalty_settings_service import get_loyalty_settings
-from app.services.loyalty_status_service import update_customer_status
+from app.services.loyalty_status_service import (
+    _get_base_tier_key,
+    status_window_expires_at,
+    update_customer_status,
+)
 from app.services.purchase_service import get_purchase_balances, sync_customer_purchase_counters
 from app.services.wallet_service import get_status_points_balance, sync_customer_points_expires_at
+
+logger = logging.getLogger(__name__)
+
+_EXPIRE_COMMIT_EVERY = 200
 
 
 def initialize_validity_windows_for_existing_customers(db: Session, *, brand: str) -> dict[str, int]:
@@ -46,14 +54,7 @@ def initialize_validity_windows_for_existing_customers(db: Session, *, brand: st
         )
 
     if status_days is not None:
-        base_row = (
-            db.query(LoyaltyTier.key)
-            .filter(LoyaltyTier.brand == brand)
-            .filter(LoyaltyTier.active.is_(True))
-            .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
-            .first()
-        )
-        base_key = base_row[0] if base_row else None
+        base_key = _get_base_tier_key(db, brand)
 
         # Non-base tiers: initialize assigned+expires.
         q = (
@@ -74,7 +75,7 @@ def initialize_validity_windows_for_existing_customers(db: Session, *, brand: st
         updated_status = q.update(
             {
                 Customer.loyalty_status_assigned_at: now,
-                Customer.loyalty_status_expires_at: now + timedelta(days=int(status_days)),
+                Customer.loyalty_status_expires_at: status_window_expires_at(now, int(status_days)),
             }
         )
 
@@ -125,7 +126,7 @@ def expire_points(db: Session, *, brand: str) -> int:
         .join(Customer, Customer.id == PointMovement.customer_id)
         .filter(Customer.brand == brand)
         .filter(PointMovement.expires_at.isnot(None))
-        .filter(PointMovement.expires_at < today)
+        .filter(PointMovement.expires_at <= today)
         .group_by(PointMovement.customer_id)
         .all()
     )
@@ -141,36 +142,42 @@ def expire_points(db: Session, *, brand: str) -> int:
     )
 
     updated = 0
-    for c in customers:
-        before = int(c.status_points or 0)
-        balance = max(0, int(get_status_points_balance(db, c.id) or 0))
-        expired_points = max(0, before - balance)
-        if expired_points > 0:
-            db.add(
-                PointMovement(
-                    customer_id=c.id,
-                    points=-expired_points,
-                    type="EXPIRE",
+    for i, c in enumerate(customers, start=1):
+        try:
+            with db.begin_nested():
+                before = int(c.status_points or 0)
+                balance = max(0, int(get_status_points_balance(db, c.id) or 0))
+                expired_points = max(0, before - balance)
+                if expired_points > 0:
+                    db.add(
+                        PointMovement(
+                            customer_id=c.id,
+                            points=-expired_points,
+                            type="EXPIRE",
+                            source_transaction_id=None,
+                            expires_at=None,
+                        )
+                    )
+                if balance != before:
+                    c.status_points = balance
+                    c.status_points_reset_at = now
+
+                sync_customer_points_expires_at(db, c)
+
+                update_customer_status(
+                    db,
+                    c,
+                    reason="POINTS_EXPIRED",
                     source_transaction_id=None,
-                    expires_at=None,
+                    depth=0,
+                    refresh_window=False,
+                    emit_events=True,
                 )
-            )
-        if balance != before:
-            c.status_points = balance
-            c.status_points_reset_at = now
-
-        sync_customer_points_expires_at(db, c)
-
-        update_customer_status(
-            db,
-            c,
-            reason="POINTS_EXPIRED",
-            source_transaction_id=None,
-            depth=0,
-            refresh_window=False,
-            emit_events=True,
-        )
-        updated += 1
+            updated += 1
+        except Exception:
+            logger.exception("expire_points failed for customer %s brand %s", c.id, brand)
+        if i % _EXPIRE_COMMIT_EVERY == 0:
+            db.flush()
 
     db.flush()
     return updated
@@ -189,7 +196,7 @@ def expire_purchases(db: Session, *, brand: str) -> int:
         .join(Customer, Customer.id == PurchaseMovement.customer_id)
         .filter(Customer.brand == brand)
         .filter(PurchaseMovement.expires_at.isnot(None))
-        .filter(PurchaseMovement.expires_at < today)
+        .filter(PurchaseMovement.expires_at <= today)
         .group_by(PurchaseMovement.customer_id)
         .all()
     )
@@ -205,36 +212,42 @@ def expire_purchases(db: Session, *, brand: str) -> int:
     )
 
     updated = 0
-    for c in customers:
-        before_count = int(c.purchase_count or 0)
-        before_amount = int(c.purchase_amount_total or 0)
-        balance_count, balance_amount = get_purchase_balances(db, c.id)
-        expired_count = max(0, before_count - balance_count)
-        expired_amount = max(0, before_amount - balance_amount)
-        if expired_count > 0 or expired_amount > 0:
-            db.add(
-                PurchaseMovement(
-                    customer_id=c.id,
-                    quantity=-expired_count,
-                    amount=-expired_amount,
-                    type="EXPIRE",
-                    source_transaction_id=None,
-                    expires_at=None,
-                )
-            )
-        if balance_count != before_count or balance_amount != before_amount:
-            sync_customer_purchase_counters(db, c)
+    for i, c in enumerate(customers, start=1):
+        try:
+            with db.begin_nested():
+                before_count = int(c.purchase_count or 0)
+                before_amount = int(c.purchase_amount_total or 0)
+                balance_count, balance_amount = get_purchase_balances(db, c.id)
+                expired_count = max(0, before_count - balance_count)
+                expired_amount = max(0, before_amount - balance_amount)
+                if expired_count > 0 or expired_amount > 0:
+                    db.add(
+                        PurchaseMovement(
+                            customer_id=c.id,
+                            quantity=-expired_count,
+                            amount=-expired_amount,
+                            type="EXPIRE",
+                            source_transaction_id=None,
+                            expires_at=None,
+                        )
+                    )
+                if balance_count != before_count or balance_amount != before_amount:
+                    sync_customer_purchase_counters(db, c)
 
-        update_customer_status(
-            db,
-            c,
-            reason="PURCHASES_EXPIRED",
-            source_transaction_id=None,
-            depth=0,
-            refresh_window=False,
-            emit_events=True,
-        )
-        updated += 1
+                update_customer_status(
+                    db,
+                    c,
+                    reason="PURCHASES_EXPIRED",
+                    source_transaction_id=None,
+                    depth=0,
+                    refresh_window=False,
+                    emit_events=True,
+                )
+            updated += 1
+        except Exception:
+            logger.exception("expire_purchases failed for customer %s brand %s", c.id, brand)
+        if i % _EXPIRE_COMMIT_EVERY == 0:
+            db.flush()
 
     db.flush()
     return updated
@@ -248,38 +261,37 @@ def expire_loyalty_status(db: Session, *, brand: str) -> int:
     if status_days is None:
         return 0
 
-    base_row = (
-        db.query(LoyaltyTier.key)
-        .filter(LoyaltyTier.brand == brand)
-        .filter(LoyaltyTier.active.is_(True))
-        .order_by(LoyaltyTier.min_status_points.asc(), LoyaltyTier.created_at.asc())
-        .first()
-    )
-    base_key = base_row[0] if base_row else None
+    base_key = _get_base_tier_key(db, brand)
 
     q = (
         db.query(Customer)
         .filter(Customer.brand == brand)
         .filter(Customer.loyalty_status_expires_at.isnot(None))
-        .filter(Customer.loyalty_status_expires_at < now)
+        .filter(func.date(Customer.loyalty_status_expires_at) <= now.date())
     )
     if base_key:
         q = q.filter(Customer.loyalty_status != base_key)
 
-    expired_customers = q.all()
+    expired_customers = q.with_for_update(skip_locked=True).all()
 
     updated = 0
-    for c in expired_customers:
-        update_customer_status(
-            db,
-            c,
-            reason="LOYALTY_STATUS_EXPIRED",
-            source_transaction_id=None,
-            depth=0,
-            refresh_window=True,
-            emit_events=True,
-        )
-        updated += 1
+    for i, c in enumerate(expired_customers, start=1):
+        try:
+            with db.begin_nested():
+                update_customer_status(
+                    db,
+                    c,
+                    reason="LOYALTY_STATUS_EXPIRED",
+                    source_transaction_id=None,
+                    depth=0,
+                    refresh_window=True,
+                    emit_events=True,
+                )
+            updated += 1
+        except Exception:
+            logger.exception("expire_loyalty_status failed for customer %s brand %s", c.id, brand)
+        if i % _EXPIRE_COMMIT_EVERY == 0:
+            db.flush()
 
     db.flush()
     return updated

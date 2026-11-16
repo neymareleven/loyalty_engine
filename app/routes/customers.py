@@ -44,6 +44,7 @@ from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
 from app.services.loyalty_guarantee_service import serialize_guarantees
+from app.services.loyalty_history_service import serialize_loyalty_history_item
 from app.services.loyalty_status_service import (
     compute_loyalty_status_from_tiers,
     last_change_from_tier_event,
@@ -586,7 +587,7 @@ def get_customer_loyalty(
     brand: str,
     profile_id: str,
     email: str | None = None,
-    sync_unomi: bool = True,
+    sync_unomi: bool = False,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
@@ -600,17 +601,6 @@ def get_customer_loyalty(
     )
 
     qualification_mode = get_qualification_mode(db, brand=brand)
-    backfill_customer_purchase_movements_from_sales(db, customer)
-    update_customer_status(
-        db,
-        customer,
-        reason="PURCHASE_HISTORY_BACKFILL",
-        refresh_window=False,
-        emit_events=True,
-        allow_downgrade_before_expiry=False,
-    )
-    db.commit()
-    db.refresh(customer)
     purchase_count, purchase_amount = get_purchase_balances(db, customer.id)
 
     tiers = (
@@ -754,7 +744,6 @@ def get_customer_loyalty_history(
         "FIRST_PURCHASE_BYPASS",
         "STATUS_RESET",
         "ADMIN_SET_TIER",
-        "TIER_CHANGED",
         "PURCHASE_RECORDED",
     ]
 
@@ -779,13 +768,7 @@ def get_customer_loyalty_history(
         "count": total,
         "items": [
             {
-                "id": str(tx.id),
-                "transactionType": tx.transaction_type,
-                "transactionId": tx.transaction_id,
-                "status": tx.status,
-                "source": tx.source,
-                "createdAt": tx.created_at,
-                "payload": tx.payload,
+                **serialize_loyalty_history_item(db, tx, brand=brand),
                 "canDelete": transaction_deletion_meta(tx)["can_delete"],
                 "isSystemManaged": transaction_deletion_meta(tx)["is_system_managed"],
             }

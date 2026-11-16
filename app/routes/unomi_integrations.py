@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -26,10 +27,14 @@ class UnomiProfileEvent(BaseModel):
 
 def _verify_webhook_secret(request: Request) -> None:
     expected = (os.getenv("UNOMI_WEBHOOK_SECRET") or "").strip()
+    env = (os.getenv("ENVIRONMENT") or os.getenv("ENV") or "development").strip().lower()
+    production = env in {"production", "prod"}
     if not expected:
+        if production:
+            raise HTTPException(status_code=503, detail="Unomi webhook is not configured")
         return
     provided = (request.headers.get("X-Unomi-Webhook-Secret") or "").strip()
-    if provided != expected:
+    if not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="Invalid Unomi webhook secret")
 
 

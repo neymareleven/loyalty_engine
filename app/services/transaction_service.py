@@ -3,6 +3,7 @@ import os
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.services.contact_service import resolve_customer_for_transaction
@@ -84,6 +85,13 @@ def create_internal_transaction(
     if existing:
         return existing
 
+    linked_customer = (
+        db.query(Customer)
+        .filter(Customer.brand == brand)
+        .filter(Customer.profile_id == profile_id)
+        .first()
+    )
+
     transaction = Transaction(
         transaction_id=transaction_id,
         brand=brand,
@@ -92,6 +100,7 @@ def create_internal_transaction(
         source=source,
         payload=payload or {"_ruleDepth": depth + 1},
         status="PENDING",
+        customer_id=linked_customer.id if linked_customer is not None else None,
     )
     db.add(transaction)
     if commit:
@@ -101,7 +110,16 @@ def create_internal_transaction(
         db.flush()
 
     try:
-        process_transaction_rules(db, transaction)
+        with db.begin_nested():
+            process_transaction_rules(db, transaction)
+            transaction.processed_at = datetime.utcnow()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
+    except IntegrityError as e:
+        transaction.status = "FAILED"
+        transaction.error_message = str(e)
         transaction.processed_at = datetime.utcnow()
         if commit:
             db.commit()
@@ -275,6 +293,7 @@ def create_transaction(db: Session, event_data):
             return transaction
 
         customer.last_activity_at = datetime.utcnow()
+        transaction.customer_id = customer.id
         db.commit()
 
         # If tiers are configured after some customers were created, they may still be

@@ -1,0 +1,151 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Loyalty Engine Storefront API",
+    "version": "1.0.0",
+    "description": "Site-facing API. Authenticate with Authorization: Bearer <api key>. The brand is taken from the key, not X-Brand. Write routes require Idempotency-Key."
+  },
+  "servers": [{ "url": "/" }],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    },
+    "schemas": {
+      "Cart": {
+        "type": "object",
+        "properties": {
+          "cartRef": { "type": "string", "example": "wc_cart_abc123" },
+          "currency": { "type": "string", "example": "XAF" },
+          "subtotal": { "type": "integer", "example": 50000 },
+          "shippingAmount": { "type": "integer", "example": 2500 },
+          "taxIncluded": { "type": "boolean" },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "productId": { "type": "string" },
+                "sku": { "type": "string" },
+                "categoryIds": { "type": "array", "items": { "type": "string" } },
+                "unitPrice": { "type": "integer" },
+                "quantity": { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "ValidateRequest": {
+        "type": "object",
+        "required": ["profileId"],
+        "properties": {
+          "profileId": { "type": "string", "example": "wp_699" },
+          "email": { "type": "string" },
+          "code": { "type": "string", "example": "LOY-8K2F-9QXA" },
+          "customerRewardId": { "type": "string" },
+          "cart": { "$ref": "#/components/schemas/Cart" },
+          "appliedRedemptionIds": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "ValidateResponse": {
+        "type": "object",
+        "properties": {
+          "applicable": { "type": "boolean", "example": true },
+          "benefits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "example": "PERCENT_DISCOUNT" },
+                "discountAmount": { "type": "integer", "example": 5000 },
+                "shippingDiscount": { "type": "integer", "example": 0 },
+                "freeItems": { "type": "array", "items": { "type": "object" } }
+              }
+            }
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["NOT_FOUND", "NOT_OWNER", "EXPIRED", "ALREADY_USED", "RESERVED_ELSEWHERE", "MIN_CART_NOT_REACHED", "NO_ELIGIBLE_ITEMS", "NOT_STACKABLE"]
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v1/storefront/customers/{profile_id}/wallet": {
+      "get": {
+        "summary": "Customer wallet (coupons and rewards)",
+        "parameters": [
+          { "name": "profile_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "email", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Wallet" },
+          "401": { "description": "Missing or invalid API key" },
+          "404": { "description": "CUSTOMER_NOT_FOUND" }
+        }
+      }
+    },
+    "/v1/storefront/customers/{profile_id}/summary": {
+      "get": {
+        "summary": "Loyalty summary for the customer page (read-only, no recalc)",
+        "parameters": [
+          { "name": "profile_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "email", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Summary" }, "404": { "description": "CUSTOMER_NOT_FOUND" } }
+      }
+    },
+    "/v1/storefront/customers/{profile_id}/history": {
+      "get": {
+        "summary": "Normalized palier history without TIER_CHANGED duplicates",
+        "parameters": [
+          { "name": "profile_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": { "200": { "description": "History" } }
+      }
+    },
+    "/v1/storefront/redemptions/validate": {
+      "post": {
+        "summary": "Validate a coupon or reward against a cart (no write)",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ValidateRequest" } } } },
+        "responses": { "200": { "description": "Validation result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ValidateResponse" } } } } }
+      }
+    },
+    "/v1/storefront/redemptions/reserve": {
+      "post": {
+        "summary": "Reserve a coupon or reward for a cart",
+        "parameters": [{ "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ValidateRequest" } } } },
+        "responses": { "200": { "description": "Reservation" } }
+      }
+    },
+    "/v1/storefront/redemptions/{redemption_id}/commit": {
+      "post": {
+        "summary": "Commit a reservation after order payment",
+        "parameters": [
+          { "name": "redemption_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "orderRef": { "type": "string", "example": "wc_order_5521" } } } } } },
+        "responses": { "200": { "description": "Committed" } }
+      }
+    },
+    "/v1/storefront/redemptions/{redemption_id}/release": {
+      "post": {
+        "summary": "Release or refund a reservation",
+        "parameters": [
+          { "name": "redemption_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "reason": { "type": "string", "enum": ["cart_abandoned", "order_cancelled", "order_refunded"] } } } } } },
+        "responses": { "200": { "description": "Released" } }
+      }
+    }
+  }
+}

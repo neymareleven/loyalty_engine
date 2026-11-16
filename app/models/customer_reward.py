@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, TIMESTAMP, ForeignKey, JSON
+from sqlalchemy import Boolean, Column, ForeignKey, JSON, String, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
@@ -20,7 +20,11 @@ class CustomerReward(Base):
     )
 
     status = Column(String(20), nullable=False, default="ISSUED")
-    # ISSUED | USED | EXPIRED | INVALIDATED | CANCELLED (legacy)
+    # ISSUED | RESERVED | USED | EXPIRED | INVALIDATED | CANCELLED (legacy)
+
+    shareable = Column(Boolean, nullable=False, default=False)
+    reserved_until = Column(TIMESTAMP, nullable=True)
+    reserved_by_redemption_id = Column(UUID(as_uuid=True), nullable=True)
 
     issued_at = Column(TIMESTAMP, server_default=func.now())
     expires_at = Column(TIMESTAMP, nullable=True)
