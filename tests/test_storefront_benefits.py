@@ -148,6 +148,9 @@ def test_not_owner_when_coupon_belongs_to_other_customer(monkeypatch):
         def __init__(self, result):
             self.result = result
 
+        def join(self, *args, **kwargs):
+            return self
+
         def filter(self, *args, **kwargs):
             return self
 
@@ -199,6 +202,9 @@ def test_customer_not_found_code():
     from app.services.redemption_service import resolve_storefront_customer
 
     class Q:
+        def join(self, *a, **k):
+            return self
+
         def filter(self, *a, **k):
             return self
 
@@ -240,6 +246,9 @@ def test_second_discount_is_not_stackable_by_default(monkeypatch):
     class Q:
         def __init__(self, result):
             self.result = result
+
+        def join(self, *args, **kwargs):
+            return self
 
         def filter(self, *args, **kwargs):
             return self
@@ -316,6 +325,9 @@ def test_percent_plus_free_product_can_stack(monkeypatch):
         def __init__(self, result):
             self.result = result
 
+        def join(self, *a, **k):
+            return self
+
         def filter(self, *a, **k):
             return self
 
@@ -391,6 +403,9 @@ def test_expired_coupon_reason(monkeypatch):
         def __init__(self, result):
             self.result = result
 
+        def join(self, *a, **k):
+            return self
+
         def filter(self, *a, **k):
             return self
 
@@ -422,3 +437,496 @@ def test_expired_coupon_reason(monkeypatch):
     )
     assert result["applicable"] is False
     assert "EXPIRED" in result["reasons"]
+
+
+def test_commit_other_brand_is_404():
+    from app.services.redemption_service import commit, release
+
+    class Q:
+        def filter(self, *a, **k):
+            return self
+
+        def with_for_update(self):
+            return self
+
+        def first(self):
+            return None
+
+    class DB:
+        def query(self, *a, **k):
+            return Q()
+
+    rid = str(uuid4())
+    try:
+        commit(DB(), redemption_id=rid, order_ref="ord-1", idempotency_key="k1", brand="brand-a")
+        assert False, "expected 404"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+    try:
+        release(DB(), redemption_id=rid, reason="abandoned", brand="brand-a")
+        assert False, "expected 404"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+
+
+def test_reserve_never_moves_used_to_reserved(monkeypatch):
+    from app.services.redemption_service import reserve
+
+    customer_id = uuid4()
+    coupon_id = uuid4()
+    issued = SimpleNamespace(
+        id=coupon_id,
+        customer_id=customer_id,
+        code="LOY-USED-LOCK",
+        shareable=False,
+        expires_at=None,
+        status="ISSUED",
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+        coupon_type_id=None,
+        payload=None,
+    )
+    used = SimpleNamespace(
+        id=coupon_id,
+        customer_id=customer_id,
+        code="LOY-USED-LOCK",
+        shareable=False,
+        expires_at=None,
+        status="USED",
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+    )
+    owner = SimpleNamespace(id=customer_id, brand="batira")
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+
+    class CouponQ:
+        def __init__(self):
+            self._locked = False
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def with_for_update(self):
+            self._locked = True
+            return self
+
+        def first(self):
+            return issued
+
+        def one(self):
+            return used if self._locked else issued
+
+    class Q:
+        def __init__(self, result=None):
+            self.result = result
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return []
+
+    class DB:
+        def query(self, model):
+            from app.models.customer import Customer
+            from app.models.customer_coupon import CustomerCoupon
+            from app.models.redemption import Redemption
+
+            if model is CustomerCoupon:
+                return CouponQ()
+            if model is Customer:
+                return Q(owner)
+            if model is Redemption:
+                return Q(None)
+            return Q(None)
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(max_discount_benefits_per_cart=1, discount_base="SUBTOTAL_INCL_TAX"),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service.coupon_reward_snapshots",
+        lambda db, coupon: [
+            {
+                "benefitType": "PERCENT_DISCOUNT",
+                "benefitValue": 10,
+                "maxDiscountAmount": None,
+                "minCartAmount": None,
+                "appliesTo": "CART",
+                "freeProductQuantity": 1,
+                "stackable": False,
+            }
+        ],
+    )
+    result = reserve(
+        DB(),
+        brand="batira",
+        site_id="site-1",
+        customer=customer,
+        code="LOY-USED-LOCK",
+        customer_reward_id=None,
+        cart={"subtotal": 50000, "cartRef": "cart-used"},
+        ttl_minutes=15,
+        idempotency_key="idemp-used",
+    )
+    assert result["applicable"] is False
+    assert "ALREADY_USED" in result["reasons"]
+    assert used.status == "USED"
+
+
+def test_stale_reservation_can_be_reserved_again(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.services.redemption_service import reserve
+
+    customer_id = uuid4()
+    coupon_id = uuid4()
+    previous = SimpleNamespace(id=uuid4(), status="RESERVED", cart_ref="old-cart")
+    stale_until = datetime.utcnow() - timedelta(minutes=5)
+    coupon = SimpleNamespace(
+        id=coupon_id,
+        customer_id=customer_id,
+        code="LOY-STALE-0001",
+        shareable=False,
+        expires_at=None,
+        status="RESERVED",
+        reserved_until=stale_until,
+        reserved_by_redemption_id=previous.id,
+        coupon_type_id=None,
+        payload=None,
+    )
+    owner = SimpleNamespace(id=customer_id, brand="batira")
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+    added = []
+
+    class CouponQ:
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def with_for_update(self):
+            return self
+
+        def first(self):
+            return coupon
+
+        def one(self):
+            return coupon
+
+    class RedemptionQ:
+        def __init__(self):
+            self.n = 0
+
+        def filter(self, *a, **k):
+            self.n += 1
+            return self
+
+        def first(self):
+            if self.n <= 1:
+                return None
+            return previous
+
+    class Q:
+        def __init__(self, result=None):
+            self.result = result
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return []
+
+    class DB:
+        def __init__(self):
+            self._redemptions = RedemptionQ()
+
+        def query(self, model):
+            from app.models.customer import Customer
+            from app.models.customer_coupon import CustomerCoupon
+            from app.models.redemption import Redemption
+
+            if model is CustomerCoupon:
+                return CouponQ()
+            if model is Customer:
+                return Q(owner)
+            if model is Redemption:
+                return self._redemptions
+            return Q(None)
+
+        def add(self, obj):
+            added.append(obj)
+
+        def flush(self):
+            if added and getattr(added[0], "id", None) is None:
+                added[0].id = uuid4()
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(max_discount_benefits_per_cart=1, discount_base="SUBTOTAL_INCL_TAX"),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service.coupon_reward_snapshots",
+        lambda db, coupon: [
+            {
+                "benefitType": "PERCENT_DISCOUNT",
+                "benefitValue": 10,
+                "maxDiscountAmount": None,
+                "minCartAmount": None,
+                "appliesTo": "CART",
+                "freeProductQuantity": 1,
+                "stackable": False,
+            }
+        ],
+    )
+    result = reserve(
+        DB(),
+        brand="batira",
+        site_id="site-1",
+        customer=customer,
+        code="LOY-STALE-0001",
+        customer_reward_id=None,
+        cart={"subtotal": 50000, "cartRef": "new-cart"},
+        ttl_minutes=15,
+        idempotency_key="idemp-stale",
+    )
+    assert result["applicable"] is True
+    assert result.get("status") == "RESERVED"
+    assert previous.status == "EXPIRED"
+    assert coupon.status == "RESERVED"
+    assert coupon.reserved_by_redemption_id == added[0].id
+
+
+def test_applied_cart_reservation_blocks_second_discount(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.services.redemption_service import applied_benefits_for_cart
+
+    customer_id = uuid4()
+    reserved = SimpleNamespace(
+        id=uuid4(),
+        reserved_until=datetime.utcnow() + timedelta(minutes=20),
+        benefit=[{"type": "PERCENT_DISCOUNT", "discountAmount": 3000}],
+    )
+    coupon = SimpleNamespace(
+        id=uuid4(),
+        customer_id=customer_id,
+        code="LOY-STACK-0002",
+        shareable=False,
+        expires_at=None,
+        status="ISSUED",
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+        coupon_type_id=None,
+        payload=None,
+    )
+    owner = SimpleNamespace(id=customer_id, brand="batira")
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+
+    class CouponQ:
+        def __init__(self, result):
+            self.result = result
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return []
+
+    class RedemptionQ:
+        def filter(self, *a, **k):
+            return self
+
+        def all(self):
+            return [reserved]
+
+    class DB:
+        def query(self, model):
+            from app.models.customer import Customer
+            from app.models.customer_coupon import CustomerCoupon
+            from app.models.redemption import Redemption
+
+            if model is Redemption:
+                return RedemptionQ()
+            if model is CustomerCoupon:
+                return CouponQ(coupon)
+            if model is Customer:
+                return CouponQ(owner)
+            return CouponQ(None)
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(max_discount_benefits_per_cart=1, discount_base="SUBTOTAL_INCL_TAX"),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service.coupon_reward_snapshots",
+        lambda db, coupon: [
+            {
+                "benefitType": "PERCENT_DISCOUNT",
+                "benefitValue": 15,
+                "maxDiscountAmount": None,
+                "minCartAmount": None,
+                "appliesTo": "CART",
+                "freeProductQuantity": 1,
+                "stackable": False,
+            }
+        ],
+    )
+    applied = applied_benefits_for_cart(
+        DB(),
+        brand="batira",
+        customer_id=customer_id,
+        cart_ref="same-cart",
+        extra_ids=None,
+    )
+    result = evaluate_coupon_or_reward(
+        DB(),
+        brand="batira",
+        customer=customer,
+        code="LOY-STACK-0002",
+        customer_reward_id=None,
+        cart={"subtotal": 50000, "cartRef": "same-cart"},
+        applied_benefits=applied,
+    )
+    assert result["applicable"] is False
+    assert "NOT_STACKABLE" in result["reasons"]
+
+
+def test_empty_scopes_forbidden():
+    from starlette.requests import Request
+
+    from app.services.storefront_auth import require_storefront_client
+
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "headers": [(b"authorization", b"Bearer le_live_test")],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+    )
+
+    class Q:
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return SimpleNamespace(
+                id=uuid4(),
+                brand="batira",
+                scopes=[],
+                active=True,
+                last_used_at=None,
+            )
+
+    class DB:
+        def query(self, *a, **k):
+            return Q()
+
+    try:
+        require_storefront_client(request, DB())
+        assert False, "expected 403"
+    except HTTPException as exc:
+        assert exc.status_code == 403
+
+
+def test_last_used_at_throttled_and_validate_audit_commits():
+    from datetime import datetime, timedelta
+
+    from starlette.requests import Request
+
+    from app.models.storefront_audit_event import StorefrontAuditEvent
+    from app.services.storefront_audit import record_storefront_audit
+    from app.services.storefront_auth import persist_storefront_session, require_storefront_client
+
+    recent = datetime.utcnow() - timedelta(seconds=10)
+    client = SimpleNamespace(
+        id=uuid4(),
+        brand="batira",
+        scopes=["storefront"],
+        active=True,
+        last_used_at=recent,
+    )
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "headers": [(b"authorization", b"Bearer le_live_test")],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+    )
+
+    class Q:
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return client
+
+    class DB:
+        def query(self, *a, **k):
+            return Q()
+
+        def add(self, obj):
+            self.added = obj
+
+        def flush(self):
+            self.flushed = True
+
+        def commit(self):
+            self.committed = True
+
+    db = DB()
+    require_storefront_client(request, db)
+    assert client.last_used_at == recent
+    assert request.state.storefront_dirty is False
+
+    record_storefront_audit(
+        db,
+        brand="batira",
+        site_id=str(client.id),
+        action="validate",
+        profile_id="wp_1",
+        request={"code": "LOY-AAAA-BBBB"},
+        response={"applicable": True},
+    )
+    persist_storefront_session(db, request, force=True)
+    assert isinstance(db.added, StorefrontAuditEvent)
+    assert db.added.action == "validate"
+    assert db.committed is True

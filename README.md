@@ -82,6 +82,20 @@ Expected: `{"ok":true,...}`. If `503` with `missingChecks`, apply migrations.
  ```
  
  Note: the app also calls `Base.metadata.create_all()` on startup (see `app/main.py`). In production, prefer Alembic-managed schema.
+
+ ## Production storefront (ops)
+
+ 1. Set `ENVIRONMENT=production` so `/docs`, `/redoc`, and `/openapi.json` stay off.
+ 2. Apply schema with `alembic upgrade head` (do not rely on `create_all` in production).
+ 3. Create a Batira storefront API key (the plaintext `key` is shown once):
+
+ ```powershell
+ curl -s -u user:pass -H "X-Brand: batira" -H "Content-Type: application/json" `
+   https://loyalty.qilinsa.com/admin/api-clients `
+   -d '{"name":"batira-storefront"}'
+ ```
+
+ Use that `key` as `Authorization: Bearer ...` on `/v1/storefront/*`. Scopes must include `storefront`; an empty scope list is rejected with 403.
  
  ## Running the API locally
  

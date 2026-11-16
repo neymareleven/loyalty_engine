@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime
 
 from fastapi import Depends, HTTPException, Request
@@ -12,6 +16,10 @@ from app.db import get_db
 from app.models.api_client import ApiClient
 
 STOREFRONT_SCOPE = "storefront"
+_RATE_LIMIT_PER_MINUTE = 60
+_rate_lock = threading.Lock()
+_rate_hits: dict[str, deque[float]] = defaultdict(deque)
+logger = logging.getLogger(__name__)
 
 
 def hash_api_key(raw: str) -> str:
@@ -39,12 +47,37 @@ def require_storefront_client(request: Request, db: Session = Depends(get_db)) -
     if not client:
         raise HTTPException(status_code=401, detail="Invalid API key")
     scopes = client.scopes if isinstance(client.scopes, list) else []
-    if STOREFRONT_SCOPE not in scopes and scopes:
+    if STOREFRONT_SCOPE not in scopes:
         raise HTTPException(status_code=403, detail="Insufficient scope")
-    client.last_used_at = datetime.utcnow()
+    now = datetime.utcnow()
+    last = client.last_used_at
+    if last is None or (now - last).total_seconds() >= 60:
+        client.last_used_at = now
+        request.state.storefront_dirty = True
+    else:
+        request.state.storefront_dirty = False
     request.state.api_client = client
     request.state.brand = client.brand
     return client
+
+
+def enforce_storefront_rate_limit(client: ApiClient) -> None:
+    key = str(client.id)
+    now = time.monotonic()
+    window_start = now - 60
+    with _rate_lock:
+        hits = _rate_hits[key]
+        while hits and hits[0] < window_start:
+            hits.popleft()
+        if len(hits) >= _RATE_LIMIT_PER_MINUTE:
+            logger.warning("storefront rate limit exceeded client=%s brand=%s", client.id, client.brand)
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        hits.append(now)
+
+
+def persist_storefront_session(db: Session, request: Request | None = None, *, force: bool = False) -> None:
+    if force or (request is not None and getattr(request.state, "storefront_dirty", False)):
+        db.commit()
 
 
 def require_idempotency_key(request: Request) -> str:

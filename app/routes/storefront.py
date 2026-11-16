@@ -13,11 +13,14 @@ from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.transaction import Transaction
-from app.services.contact_service import customer_transaction_filters
+from sqlalchemy import and_, or_
+
+from app.services.contact_service import list_customer_unomi_profile_ids
 from app.services.loyalty_history_service import serialize_loyalty_history_item
 from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
 from app.services.purchase_service import get_purchase_balances, get_qualification_mode
 from app.services.redemption_service import (
+    applied_benefits_for_cart,
     commit as commit_redemption,
     coupon_reward_snapshots,
     evaluate_coupon_or_reward,
@@ -26,7 +29,12 @@ from app.services.redemption_service import (
     resolve_storefront_customer,
 )
 from app.services.storefront_audit import record_storefront_audit
-from app.services.storefront_auth import require_idempotency_key, require_storefront_client
+from app.services.storefront_auth import (
+    enforce_storefront_rate_limit,
+    persist_storefront_session,
+    require_idempotency_key,
+    require_storefront_client,
+)
 from app.services.wallet_service import get_status_points_balance, resolve_points_expires_at
 
 router = APIRouter(prefix="/v1/storefront", tags=["storefront"])
@@ -130,6 +138,7 @@ def _wallet_coupon(db: Session, coupon: CustomerCoupon) -> dict:
 @router.get("/customers/{profile_id}/wallet")
 def storefront_wallet(
     profile_id: str,
+    request: Request,
     email: str | None = Query(default=None),
     client: ApiClient = Depends(require_storefront_client),
     db: Session = Depends(get_db),
@@ -156,7 +165,7 @@ def storefront_wallet(
         .filter(CustomerReward.status.in_(("ISSUED", "RESERVED")))
         .all()
     )
-    return {
+    payload = {
         "profileId": customer.profile_id,
         "tier": _tier_brief(current),
         "coupons": [_wallet_coupon(db, c) for c in coupons if c.expires_at is None or c.expires_at > now],
@@ -173,11 +182,14 @@ def storefront_wallet(
             for r in standalone
         ],
     }
+    persist_storefront_session(db, request)
+    return payload
 
 
 @router.get("/customers/{profile_id}/summary")
 def storefront_summary(
     profile_id: str,
+    request: Request,
     email: str | None = Query(default=None),
     client: ApiClient = Depends(require_storefront_client),
     db: Session = Depends(get_db),
@@ -256,12 +268,14 @@ def storefront_summary(
     }
     if mode != "PURCHASES":
         data["pointsBalance"] = get_status_points_balance(db, customer.id)
+    persist_storefront_session(db, request)
     return data
 
 
 @router.get("/customers/{profile_id}/history")
 def storefront_history(
     profile_id: str,
+    request: Request,
     email: str | None = Query(default=None),
     limit: int = 20,
     offset: int = 0,
@@ -271,29 +285,50 @@ def storefront_history(
     customer = resolve_storefront_customer(db, brand=client.brand, profile_id=profile_id, email=email)
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
+    profile_ids = list_customer_unomi_profile_ids(db, customer)
     q = (
         db.query(Transaction)
         .filter(Transaction.brand == client.brand)
-        .filter(customer_transaction_filters(db, brand=client.brand, customer=customer))
         .filter(Transaction.transaction_type.in_(_HISTORY_TYPES))
+        .filter(
+            or_(
+                Transaction.customer_id == customer.id,
+                and_(
+                    Transaction.customer_id.is_(None),
+                    Transaction.profile_id.in_(profile_ids or [customer.profile_id]),
+                ),
+            )
+        )
     )
     total = q.count()
     items = q.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
-    return {
+    payload = {
         "profileId": customer.profile_id,
         "count": total,
         "items": [serialize_loyalty_history_item(db, tx, brand=client.brand) for tx in items],
     }
+    persist_storefront_session(db, request)
+    return payload
 
 
 @router.post("/redemptions/validate")
 def storefront_validate(
     body: ValidateIn,
+    request: Request,
     client: ApiClient = Depends(require_storefront_client),
     db: Session = Depends(get_db),
 ):
+    enforce_storefront_rate_limit(client)
     customer = resolve_storefront_customer(
         db, brand=client.brand, profile_id=body.profileId, email=body.email
+    )
+    cart = _cart_dict(body.cart)
+    applied = applied_benefits_for_cart(
+        db,
+        brand=client.brand,
+        customer_id=customer.id,
+        cart_ref=cart.get("cartRef"),
+        extra_ids=body.appliedRedemptionIds,
     )
     result = evaluate_coupon_or_reward(
         db,
@@ -301,7 +336,8 @@ def storefront_validate(
         customer=customer,
         code=body.code,
         customer_reward_id=body.customerRewardId,
-        cart=_cart_dict(body.cart),
+        cart=cart,
+        applied_benefits=applied,
     )
     out = {
         "applicable": bool(result.get("applicable")),
@@ -317,6 +353,7 @@ def storefront_validate(
         request=body.model_dump() if hasattr(body, "model_dump") else None,
         response=out,
     )
+    persist_storefront_session(db, request, force=True)
     return out
 
 
@@ -327,9 +364,18 @@ def storefront_reserve(
     client: ApiClient = Depends(require_storefront_client),
     db: Session = Depends(get_db),
 ):
+    enforce_storefront_rate_limit(client)
     idempotency_key = require_idempotency_key(request)
     customer = resolve_storefront_customer(
         db, brand=client.brand, profile_id=body.profileId, email=body.email
+    )
+    cart = _cart_dict(body.cart)
+    applied = applied_benefits_for_cart(
+        db,
+        brand=client.brand,
+        customer_id=customer.id,
+        cart_ref=cart.get("cartRef"),
+        extra_ids=body.appliedRedemptionIds,
     )
     result = reserve_redemption(
         db,
@@ -338,9 +384,10 @@ def storefront_reserve(
         customer=customer,
         code=body.code,
         customer_reward_id=body.customerRewardId,
-        cart=_cart_dict(body.cart),
+        cart=cart,
         ttl_minutes=body.ttlMinutes,
         idempotency_key=f"{client.id}:{idempotency_key}",
+        applied_benefits=applied,
     )
     record_storefront_audit(
         db,
@@ -375,6 +422,8 @@ def storefront_commit(
         redemption_id=redemption_id,
         order_ref=body.orderRef,
         idempotency_key=f"{client.id}:{idempotency_key}",
+        brand=client.brand,
+        site_id=str(client.id),
     )
     record_storefront_audit(
         db,
@@ -398,12 +447,12 @@ def storefront_release(
     client: ApiClient = Depends(require_storefront_client),
     db: Session = Depends(get_db),
 ):
-    require_idempotency_key(request)
     result = release_redemption(
         db,
         redemption_id=redemption_id,
         reason=body.reason,
-        idempotency_key="",
+        brand=client.brand,
+        site_id=str(client.id),
     )
     record_storefront_audit(
         db,

@@ -95,6 +95,77 @@ def _count_discount_benefits(applied: list[dict]) -> int:
     return n
 
 
+def _reservation_is_stale(reserved_until, now: datetime | None = None) -> bool:
+    now = now or datetime.utcnow()
+    return reserved_until is None or reserved_until <= now
+
+
+def _benefits_from_row(row: Redemption) -> list[dict]:
+    raw = row.benefit
+    if isinstance(raw, list):
+        return [b for b in raw if isinstance(b, dict)]
+    if isinstance(raw, dict):
+        inner = raw.get("benefits")
+        if isinstance(inner, list):
+            return [b for b in inner if isinstance(b, dict)]
+        return [raw]
+    return []
+
+
+def applied_benefits_for_cart(
+    db: Session,
+    *,
+    brand: str,
+    customer_id,
+    cart_ref: str | None,
+    extra_ids: list[str] | None = None,
+) -> list[dict]:
+    now = datetime.utcnow()
+    rows: list[Redemption] = []
+    if cart_ref:
+        rows.extend(
+            db.query(Redemption)
+            .filter(Redemption.brand == brand)
+            .filter(Redemption.customer_id == customer_id)
+            .filter(Redemption.status == "RESERVED")
+            .filter(Redemption.cart_ref == cart_ref)
+            .all()
+        )
+    ids: list[UUID] = []
+    for raw in extra_ids or []:
+        try:
+            ids.append(UUID(str(raw)))
+        except Exception:
+            continue
+    if ids:
+        extra = (
+            db.query(Redemption)
+            .filter(Redemption.brand == brand)
+            .filter(Redemption.customer_id == customer_id)
+            .filter(Redemption.status == "RESERVED")
+            .filter(Redemption.id.in_(ids))
+            .all()
+        )
+        seen = {r.id for r in rows}
+        for row in extra:
+            if row.id not in seen:
+                rows.append(row)
+    benefits: list[dict] = []
+    for row in rows:
+        if row.reserved_until is not None and row.reserved_until <= now:
+            continue
+        benefits.extend(_benefits_from_row(row))
+    return benefits
+
+
+def _deny_locked_status(status: str, *, expired: bool) -> str | None:
+    if status == "USED":
+        return "ALREADY_USED"
+    if status in {"EXPIRED", "INVALIDATED"} or expired:
+        return "EXPIRED" if status != "INVALIDATED" else "INVALIDATED"
+    return None
+
+
 def evaluate_coupon_or_reward(
     db: Session,
     *,
@@ -117,7 +188,9 @@ def evaluate_coupon_or_reward(
     if code:
         coupon = (
             db.query(CustomerCoupon)
+            .join(Customer, Customer.id == CustomerCoupon.customer_id)
             .filter(CustomerCoupon.code == code.strip().upper())
+            .filter(Customer.brand == brand)
             .first()
         )
         if not coupon:
@@ -133,7 +206,7 @@ def evaluate_coupon_or_reward(
             return {"applicable": False, "benefits": [], "reasons": ["ALREADY_USED"]}
         if coupon.status in {"EXPIRED", "INVALIDATED"}:
             return {"applicable": False, "benefits": [], "reasons": [coupon.status]}
-        if coupon.status == "RESERVED" and coupon.reserved_until and coupon.reserved_until > now:
+        if coupon.status == "RESERVED" and not _reservation_is_stale(coupon.reserved_until, now):
             cart_ref = (cart or {}).get("cartRef")
             linked = (
                 db.query(Redemption)
@@ -155,7 +228,9 @@ def evaluate_coupon_or_reward(
             return {"applicable": False, "benefits": [], "reasons": ["EXPIRED"]}
         if customer_reward.status == "USED":
             return {"applicable": False, "benefits": [], "reasons": ["ALREADY_USED"]}
-        if customer_reward.status == "RESERVED":
+        if customer_reward.status == "RESERVED" and not _reservation_is_stale(
+            customer_reward.reserved_until, now
+        ):
             return {"applicable": False, "benefits": [], "reasons": ["RESERVED_ELSEWHERE"]}
         reward = db.query(Reward).filter(Reward.id == customer_reward.reward_id).first() if customer_reward.reward_id else None
         snapshots = [_snapshot_from_reward(reward)]
@@ -295,12 +370,25 @@ def reserve(
             .with_for_update()
             .one()
         )
-        if coupon.status == "RESERVED" and coupon.reserved_by_redemption_id:
-            previous = db.query(Redemption).filter(Redemption.id == coupon.reserved_by_redemption_id).first()
-            if previous and previous.cart_ref == cart_ref and previous.status == "RESERVED":
+        expired = coupon.expires_at is not None and coupon.expires_at <= now
+        locked_reason = _deny_locked_status(coupon.status, expired=expired)
+        if locked_reason:
+            return {"applicable": False, "benefits": [], "reasons": [locked_reason]}
+        if coupon.status == "RESERVED":
+            previous = (
+                db.query(Redemption).filter(Redemption.id == coupon.reserved_by_redemption_id).first()
+                if coupon.reserved_by_redemption_id
+                else None
+            )
+            stale = _reservation_is_stale(coupon.reserved_until, now)
+            if previous and previous.status == "RESERVED" and stale:
+                previous.status = "EXPIRED"
+            elif previous and previous.status == "RESERVED" and previous.cart_ref == cart_ref:
                 previous.status = "RELEASED"
-        elif coupon.status == "RESERVED":
-            raise HTTPException(status_code=409, detail={"code": "RESERVED_ELSEWHERE"})
+            elif not stale:
+                raise HTTPException(status_code=409, detail={"code": "RESERVED_ELSEWHERE", "reasons": ["RESERVED_ELSEWHERE"]})
+        elif coupon.status != "ISSUED":
+            return {"applicable": False, "benefits": [], "reasons": [coupon.status]}
         coupon.status = "RESERVED"
         coupon.reserved_until = reserved_until
 
@@ -311,8 +399,25 @@ def reserve(
             .with_for_update()
             .one()
         )
+        expired = customer_reward.expires_at is not None and customer_reward.expires_at <= now
+        locked_reason = _deny_locked_status(customer_reward.status, expired=expired)
+        if locked_reason:
+            return {"applicable": False, "benefits": [], "reasons": [locked_reason]}
         if customer_reward.status == "RESERVED":
-            raise HTTPException(status_code=409, detail={"code": "RESERVED_ELSEWHERE"})
+            previous = (
+                db.query(Redemption).filter(Redemption.id == customer_reward.reserved_by_redemption_id).first()
+                if customer_reward.reserved_by_redemption_id
+                else None
+            )
+            stale = _reservation_is_stale(customer_reward.reserved_until, now)
+            if previous and previous.status == "RESERVED" and stale:
+                previous.status = "EXPIRED"
+            elif previous and previous.status == "RESERVED" and previous.cart_ref == cart_ref:
+                previous.status = "RELEASED"
+            elif not stale:
+                raise HTTPException(status_code=409, detail={"code": "RESERVED_ELSEWHERE", "reasons": ["RESERVED_ELSEWHERE"]})
+        elif customer_reward.status != "ISSUED":
+            return {"applicable": False, "benefits": [], "reasons": [customer_reward.status]}
         customer_reward.status = "RESERVED"
         customer_reward.reserved_until = reserved_until
 
@@ -340,13 +445,32 @@ def reserve(
     return _redemption_payload(row, extra={"applicable": True, "benefits": evaluation.get("benefits")})
 
 
-def commit(db: Session, *, redemption_id: str, order_ref: str, idempotency_key: str) -> dict:
-    existing = db.query(Redemption).filter(Redemption.idempotency_key == idempotency_key).first()
+def commit(
+    db: Session,
+    *,
+    redemption_id: str,
+    order_ref: str,
+    idempotency_key: str,
+    brand: str,
+    site_id: str | None = None,
+) -> dict:
+    existing = (
+        db.query(Redemption)
+        .filter(Redemption.idempotency_key == idempotency_key)
+        .filter(Redemption.brand == brand)
+        .first()
+    )
     try:
         rid = UUID(str(redemption_id))
     except Exception:
         raise HTTPException(status_code=404, detail="Redemption not found")
-    row = db.query(Redemption).filter(Redemption.id == rid).with_for_update().first()
+    row = (
+        db.query(Redemption)
+        .filter(Redemption.id == rid)
+        .filter(Redemption.brand == brand)
+        .with_for_update()
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Redemption not found")
     if row.status == "COMMITTED":
@@ -395,12 +519,25 @@ def commit(db: Session, *, redemption_id: str, order_ref: str, idempotency_key: 
     return _redemption_payload(row)
 
 
-def release(db: Session, *, redemption_id: str, reason: str, idempotency_key: str) -> dict:
+def release(
+    db: Session,
+    *,
+    redemption_id: str,
+    reason: str,
+    brand: str,
+    site_id: str | None = None,
+) -> dict:
     try:
         rid = UUID(str(redemption_id))
     except Exception:
         raise HTTPException(status_code=404, detail="Redemption not found")
-    row = db.query(Redemption).filter(Redemption.id == rid).with_for_update().first()
+    row = (
+        db.query(Redemption)
+        .filter(Redemption.id == rid)
+        .filter(Redemption.brand == brand)
+        .with_for_update()
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Redemption not found")
     if row.status == "RELEASED":
