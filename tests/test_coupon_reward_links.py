@@ -88,3 +88,24 @@ def test_link_reward_empty_list_clears_all_when_replace():
         )
     assert out == []
     query.delete.assert_called()
+
+
+def test_reward_create_accepts_null_applies_to_and_quantity():
+    from app.schemas.reward import RewardCreate
+
+    payload = RewardCreate.model_validate(
+        {
+            "name": "-10 %",
+            "coupon_type_ids": [uuid4()],
+            "benefit_type": "PERCENT_DISCOUNT",
+            "benefit_value": 10,
+            "max_discount_amount": 5000,
+            "min_cart_amount": 20000,
+            "applies_to": None,
+            "free_product_quantity": None,
+        }
+    )
+    assert payload.applies_to is None
+    assert payload.free_product_quantity is None
+    assert (payload.applies_to or "CART") == "CART"
+    assert (payload.free_product_quantity or 1) == 1

@@ -40,8 +40,8 @@ class RewardCreate(BaseModel):
     benefit_value: Optional[int] = None
     max_discount_amount: Optional[int] = None
     min_cart_amount: Optional[int] = None
-    applies_to: str = "CART"
-    free_product_quantity: int = 1
+    applies_to: Optional[str] = "CART"
+    free_product_quantity: Optional[int] = 1
     stackable: bool = False
 
 
