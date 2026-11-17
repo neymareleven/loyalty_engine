@@ -930,3 +930,434 @@ def test_last_used_at_throttled_and_validate_audit_commits():
     assert isinstance(db.added, StorefrontAuditEvent)
     assert db.added.action == "validate"
     assert db.committed is True
+
+
+def _percent_snapshot():
+    return [
+        {
+            "benefitType": "PERCENT_DISCOUNT",
+            "benefitValue": 10,
+            "maxDiscountAmount": None,
+            "minCartAmount": None,
+            "appliesTo": "CART",
+            "freeProductQuantity": 1,
+            "stackable": False,
+        }
+    ]
+
+
+def test_revalidate_same_reserved_coupon_recalculates(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.services.redemption_service import applied_benefits_for_cart
+
+    coupon_id = uuid4()
+    customer_id = uuid4()
+    reserved = SimpleNamespace(
+        id=uuid4(),
+        customer_coupon_id=coupon_id,
+        customer_reward_id=None,
+        cart_ref="cart-x",
+        reserved_until=datetime.utcnow() + timedelta(minutes=20),
+        benefit=[{"type": "PERCENT_DISCOUNT", "discountAmount": 5000}],
+    )
+    coupon = SimpleNamespace(
+        id=coupon_id,
+        customer_id=customer_id,
+        code="LOY-SAME-0001",
+        shareable=False,
+        expires_at=None,
+        status="RESERVED",
+        reserved_until=reserved.reserved_until,
+        reserved_by_redemption_id=reserved.id,
+        coupon_type_id=None,
+        payload=None,
+    )
+    owner = SimpleNamespace(id=customer_id, brand="batira")
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+
+    class Q:
+        def __init__(self, result=None, rows=None):
+            self.result = result
+            self.rows = rows or []
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return self.rows
+
+    class DB:
+        def query(self, model):
+            from app.models.customer import Customer
+            from app.models.customer_coupon import CustomerCoupon
+            from app.models.redemption import Redemption
+
+            if model is CustomerCoupon:
+                return Q(coupon)
+            if model is Customer:
+                return Q(owner)
+            if model is Redemption:
+                return Q(reserved, rows=[reserved])
+            return Q(None)
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(max_discount_benefits_per_cart=1, discount_base="SUBTOTAL_INCL_TAX"),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service.coupon_reward_snapshots",
+        lambda db, coupon: _percent_snapshot(),
+    )
+    applied = applied_benefits_for_cart(
+        DB(),
+        brand="batira",
+        customer_id=customer_id,
+        cart_ref="cart-x",
+        exclude_coupon_id=coupon_id,
+    )
+    assert applied == []
+    result = evaluate_coupon_or_reward(
+        DB(),
+        brand="batira",
+        customer=customer,
+        code="LOY-SAME-0001",
+        customer_reward_id=None,
+        cart={"subtotal": 80000, "cartRef": "cart-x"},
+        applied_benefits=applied,
+    )
+    assert result["applicable"] is True
+    assert result["benefits"][0]["discountAmount"] == 8000
+
+
+def test_rereserve_same_coupon_replaces_reservation(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.services.redemption_service import applied_benefits_for_cart, reserve
+
+    coupon_id = uuid4()
+    customer_id = uuid4()
+    previous = SimpleNamespace(
+        id=uuid4(),
+        status="RESERVED",
+        cart_ref="cart-x",
+        order_ref=None,
+        customer_coupon_id=coupon_id,
+        customer_reward_id=None,
+        reserved_until=datetime.utcnow() + timedelta(minutes=20),
+        benefit=[{"type": "PERCENT_DISCOUNT", "discountAmount": 5000}],
+    )
+    coupon = SimpleNamespace(
+        id=coupon_id,
+        customer_id=customer_id,
+        code="LOY-SAME-0002",
+        shareable=False,
+        expires_at=None,
+        status="RESERVED",
+        reserved_until=previous.reserved_until,
+        reserved_by_redemption_id=previous.id,
+        coupon_type_id=None,
+        payload=None,
+    )
+    owner = SimpleNamespace(id=customer_id, brand="batira")
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+    added = []
+
+    class CouponQ:
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def with_for_update(self):
+            return self
+
+        def first(self):
+            return coupon
+
+        def one(self):
+            return coupon
+
+    class RedemptionQ:
+        def __init__(self):
+            self.firsts = 0
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            self.firsts += 1
+            if self.firsts == 1:
+                return None
+            return previous
+
+        def all(self):
+            return [previous]
+
+    class Q:
+        def __init__(self, result=None):
+            self.result = result
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return []
+
+    class DB:
+        def __init__(self):
+            self._redemptions = RedemptionQ()
+
+        def query(self, model):
+            from app.models.customer import Customer
+            from app.models.customer_coupon import CustomerCoupon
+            from app.models.redemption import Redemption
+
+            if model is CustomerCoupon:
+                return CouponQ()
+            if model is Customer:
+                return Q(owner)
+            if model is Redemption:
+                return self._redemptions
+            return Q(None)
+
+        def add(self, obj):
+            added.append(obj)
+
+        def flush(self):
+            if added and getattr(added[0], "id", None) is None:
+                added[0].id = uuid4()
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(max_discount_benefits_per_cart=1, discount_base="SUBTOTAL_INCL_TAX"),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service.coupon_reward_snapshots",
+        lambda db, coupon: _percent_snapshot(),
+    )
+    db = DB()
+    applied = applied_benefits_for_cart(
+        db,
+        brand="batira",
+        customer_id=customer_id,
+        cart_ref="cart-x",
+        exclude_coupon_id=coupon_id,
+    )
+    assert applied == []
+    result = reserve(
+        db,
+        brand="batira",
+        site_id="site-1",
+        customer=customer,
+        code="LOY-SAME-0002",
+        customer_reward_id=None,
+        cart={"subtotal": 80000, "cartRef": "cart-x"},
+        ttl_minutes=15,
+        idempotency_key="idemp-rereserve",
+        applied_benefits=applied,
+    )
+    assert "NOT_STACKABLE" not in (result.get("reasons") or [])
+    assert result["applicable"] is True
+    assert result.get("status") == "RESERVED"
+    assert previous.status == "RELEASED"
+    assert coupon.status == "RESERVED"
+    assert coupon.reserved_by_redemption_id == added[0].id
+
+
+def test_second_coupon_on_same_cart_is_not_stackable(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.services.redemption_service import applied_benefits_for_cart
+
+    coupon_a_id = uuid4()
+    coupon_b_id = uuid4()
+    customer_id = uuid4()
+    reserved_a = SimpleNamespace(
+        id=uuid4(),
+        customer_coupon_id=coupon_a_id,
+        customer_reward_id=None,
+        reserved_until=datetime.utcnow() + timedelta(minutes=20),
+        benefit=[{"type": "PERCENT_DISCOUNT", "discountAmount": 3000}],
+    )
+    coupon_b = SimpleNamespace(
+        id=coupon_b_id,
+        customer_id=customer_id,
+        code="LOY-B-0001",
+        shareable=False,
+        expires_at=None,
+        status="ISSUED",
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+        coupon_type_id=None,
+        payload=None,
+    )
+    owner = SimpleNamespace(id=customer_id, brand="batira")
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+
+    class Q:
+        def __init__(self, result=None, rows=None):
+            self.result = result
+            self.rows = rows or []
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return self.rows
+
+    class DB:
+        def query(self, model):
+            from app.models.customer import Customer
+            from app.models.customer_coupon import CustomerCoupon
+            from app.models.redemption import Redemption
+
+            if model is CustomerCoupon:
+                return Q(coupon_b)
+            if model is Customer:
+                return Q(owner)
+            if model is Redemption:
+                return Q(reserved_a, rows=[reserved_a])
+            return Q(None)
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(max_discount_benefits_per_cart=1, discount_base="SUBTOTAL_INCL_TAX"),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service.coupon_reward_snapshots",
+        lambda db, coupon: _percent_snapshot(),
+    )
+    applied = applied_benefits_for_cart(
+        DB(),
+        brand="batira",
+        customer_id=customer_id,
+        cart_ref="cart-x",
+        exclude_coupon_id=coupon_b_id,
+    )
+    result = evaluate_coupon_or_reward(
+        DB(),
+        brand="batira",
+        customer=customer,
+        code="LOY-B-0001",
+        customer_reward_id=None,
+        cart={"subtotal": 50000, "cartRef": "cart-x"},
+        applied_benefits=applied,
+    )
+    assert result["applicable"] is False
+    assert "NOT_STACKABLE" in result["reasons"]
+
+
+def test_free_shipping_reward_accepted_with_reserved_discount(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.services.redemption_service import applied_benefits_for_cart
+
+    coupon_a_id = uuid4()
+    customer_id = uuid4()
+    reward_id = uuid4()
+    reserved_a = SimpleNamespace(
+        id=uuid4(),
+        customer_coupon_id=coupon_a_id,
+        customer_reward_id=None,
+        reserved_until=datetime.utcnow() + timedelta(minutes=20),
+        benefit=[{"type": "PERCENT_DISCOUNT", "discountAmount": 3000}],
+    )
+    customer_reward = SimpleNamespace(
+        id=reward_id,
+        customer_id=customer_id,
+        expires_at=None,
+        status="ISSUED",
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+        reward_id=uuid4(),
+    )
+    shipping_reward = SimpleNamespace(
+        id=customer_reward.reward_id,
+        benefit_type="FREE_SHIPPING",
+        benefit_value=None,
+        max_discount_amount=None,
+        min_cart_amount=None,
+        applies_to="CART",
+        free_product_quantity=1,
+        stackable=False,
+        name="Livraison offerte",
+    )
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+
+    class Q:
+        def __init__(self, result=None, rows=None):
+            self.result = result
+            self.rows = rows or []
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return self.rows
+
+    class DB:
+        def query(self, model):
+            from app.models.customer_reward import CustomerReward
+            from app.models.redemption import Redemption
+            from app.models.reward import Reward
+
+            if model is Redemption:
+                return Q(reserved_a, rows=[reserved_a])
+            if model is CustomerReward:
+                return Q(customer_reward)
+            if model is Reward:
+                return Q(shipping_reward)
+            return Q(None)
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(max_discount_benefits_per_cart=1, discount_base="SUBTOTAL_INCL_TAX"),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service._reward_scope",
+        lambda db, reward: (set(), set()),
+    )
+    applied = applied_benefits_for_cart(
+        DB(),
+        brand="batira",
+        customer_id=customer_id,
+        cart_ref="cart-x",
+        exclude_customer_reward_id=reward_id,
+    )
+    result = evaluate_coupon_or_reward(
+        DB(),
+        brand="batira",
+        customer=customer,
+        code=None,
+        customer_reward_id=str(reward_id),
+        cart={"subtotal": 50000, "shippingAmount": 1500, "cartRef": "cart-x"},
+        applied_benefits=applied,
+    )
+    assert result["applicable"] is True
+    assert result["benefits"][0]["type"] == "FREE_SHIPPING"

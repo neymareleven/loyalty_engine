@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import os
 import secrets
 import threading
 import time
@@ -17,9 +18,27 @@ from app.models.api_client import ApiClient
 
 STOREFRONT_SCOPE = "storefront"
 _RATE_LIMIT_PER_MINUTE = 60
+# In-process only: each uvicorn/gunicorn worker keeps its own counter.
 _rate_lock = threading.Lock()
 _rate_hits: dict[str, deque[float]] = defaultdict(deque)
 logger = logging.getLogger(__name__)
+
+
+def storefront_rate_limit_per_minute(client: ApiClient) -> int:
+    override = getattr(client, "rate_limit_per_minute", None)
+    if override is None:
+        scopes = client.scopes if isinstance(getattr(client, "scopes", None), list) else []
+        for item in scopes:
+            if isinstance(item, str) and item.startswith("rl:"):
+                override = item[3:]
+                break
+    env = os.getenv("STOREFRONT_RATE_LIMIT_PER_MINUTE")
+    raw = override if override is not None else env
+    try:
+        value = int(raw) if raw is not None and raw != "" else _RATE_LIMIT_PER_MINUTE
+    except (TypeError, ValueError):
+        value = _RATE_LIMIT_PER_MINUTE
+    return max(1, min(value, 10_000))
 
 
 def hash_api_key(raw: str) -> str:
@@ -69,7 +88,7 @@ def enforce_storefront_rate_limit(client: ApiClient) -> None:
         hits = _rate_hits[key]
         while hits and hits[0] < window_start:
             hits.popleft()
-        if len(hits) >= _RATE_LIMIT_PER_MINUTE:
+        if len(hits) >= storefront_rate_limit_per_minute(client):
             logger.warning("storefront rate limit exceeded client=%s brand=%s", client.id, client.brand)
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
         hits.append(now)

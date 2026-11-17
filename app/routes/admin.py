@@ -1749,12 +1749,20 @@ def create_api_client(
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
     raw = generate_api_key()
+    scopes: list = [STOREFRONT_SCOPE]
+    rate_limit = (payload or {}).get("rateLimitPerMinute")
+    if rate_limit is not None and str(rate_limit).strip() != "":
+        try:
+            per_min = max(1, min(int(rate_limit), 10_000))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="rateLimitPerMinute must be an integer")
+        scopes.append(f"rl:{per_min}")
     client = ApiClient(
         brand=active_brand,
         name=name,
         key_hash=hash_api_key(raw),
         key_prefix=raw[:12],
-        scopes=[STOREFRONT_SCOPE],
+        scopes=scopes,
         active=True,
     )
     db.add(client)

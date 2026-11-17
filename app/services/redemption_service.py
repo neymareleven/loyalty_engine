@@ -112,6 +112,33 @@ def _benefits_from_row(row: Redemption) -> list[dict]:
     return []
 
 
+def lookup_offer_ids_for_exclusion(
+    db: Session,
+    *,
+    brand: str,
+    code: str | None,
+    customer_reward_id: str | None,
+) -> tuple[UUID | None, UUID | None]:
+    coupon_id = None
+    reward_id = None
+    if code and str(code).strip():
+        coupon = (
+            db.query(CustomerCoupon)
+            .join(Customer, Customer.id == CustomerCoupon.customer_id)
+            .filter(CustomerCoupon.code == str(code).strip().upper())
+            .filter(Customer.brand == brand)
+            .first()
+        )
+        if coupon is not None:
+            coupon_id = coupon.id
+    if customer_reward_id:
+        try:
+            reward_id = UUID(str(customer_reward_id))
+        except Exception:
+            reward_id = None
+    return coupon_id, reward_id
+
+
 def applied_benefits_for_cart(
     db: Session,
     *,
@@ -119,6 +146,8 @@ def applied_benefits_for_cart(
     customer_id,
     cart_ref: str | None,
     extra_ids: list[str] | None = None,
+    exclude_coupon_id=None,
+    exclude_customer_reward_id=None,
 ) -> list[dict]:
     now = datetime.utcnow()
     rows: list[Redemption] = []
@@ -153,6 +182,10 @@ def applied_benefits_for_cart(
     benefits: list[dict] = []
     for row in rows:
         if row.reserved_until is not None and row.reserved_until <= now:
+            continue
+        if exclude_coupon_id is not None and row.customer_coupon_id == exclude_coupon_id:
+            continue
+        if exclude_customer_reward_id is not None and row.customer_reward_id == exclude_customer_reward_id:
             continue
         benefits.extend(_benefits_from_row(row))
     return benefits

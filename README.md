@@ -96,6 +96,8 @@ Expected: `{"ok":true,...}`. If `503` with `missingChecks`, apply migrations.
  ```
 
  Use that `key` as `Authorization: Bearer ...` on `/v1/storefront/*`. Scopes must include `storefront`; an empty scope list is rejected with 403.
+
+ Validate/reserve are limited to **60 requests per minute per API key**, counted **in the current process only** (several uvicorn workers multiply the effective cap). WooCommerce cart recalculation can consume several calls per change. Raise the global cap with `STOREFRONT_RATE_LIMIT_PER_MINUTE`, or per key via `POST /admin/api-clients` `rateLimitPerMinute`. A shared Redis/DB counter is the later replacement. Do not ship `.env` or `.myvenv` in archives.
  
  ## Running the API locally
  

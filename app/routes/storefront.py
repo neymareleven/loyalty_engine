@@ -24,6 +24,7 @@ from app.services.redemption_service import (
     commit as commit_redemption,
     coupon_reward_snapshots,
     evaluate_coupon_or_reward,
+    lookup_offer_ids_for_exclusion,
     release as release_redemption,
     reserve as reserve_redemption,
     resolve_storefront_customer,
@@ -323,12 +324,20 @@ def storefront_validate(
         db, brand=client.brand, profile_id=body.profileId, email=body.email
     )
     cart = _cart_dict(body.cart)
+    exclude_coupon_id, exclude_reward_id = lookup_offer_ids_for_exclusion(
+        db,
+        brand=client.brand,
+        code=body.code,
+        customer_reward_id=body.customerRewardId,
+    )
     applied = applied_benefits_for_cart(
         db,
         brand=client.brand,
         customer_id=customer.id,
         cart_ref=cart.get("cartRef"),
         extra_ids=body.appliedRedemptionIds,
+        exclude_coupon_id=exclude_coupon_id,
+        exclude_customer_reward_id=exclude_reward_id,
     )
     result = evaluate_coupon_or_reward(
         db,
@@ -370,12 +379,20 @@ def storefront_reserve(
         db, brand=client.brand, profile_id=body.profileId, email=body.email
     )
     cart = _cart_dict(body.cart)
+    exclude_coupon_id, exclude_reward_id = lookup_offer_ids_for_exclusion(
+        db,
+        brand=client.brand,
+        code=body.code,
+        customer_reward_id=body.customerRewardId,
+    )
     applied = applied_benefits_for_cart(
         db,
         brand=client.brand,
         customer_id=customer.id,
         cart_ref=cart.get("cartRef"),
         extra_ids=body.appliedRedemptionIds,
+        exclude_coupon_id=exclude_coupon_id,
+        exclude_customer_reward_id=exclude_reward_id,
     )
     result = reserve_redemption(
         db,
