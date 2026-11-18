@@ -7,11 +7,21 @@
   },
   "servers": [{ "url": "/" }],
   "security": [{ "bearerAuth": [] }],
-  "components": {
+    "components": {
     "securitySchemes": {
       "bearerAuth": { "type": "http", "scheme": "bearer" }
     },
     "schemas": {
+      "TierBrief": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "name": { "type": "string" },
+          "rank": { "type": "integer" },
+          "assignedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "expiresAt": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
       "Cart": {
         "type": "object",
         "properties": {
@@ -80,10 +90,16 @@
         "summary": "Customer wallet (coupons and rewards)",
         "parameters": [
           { "name": "profile_id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "email", "in": "query", "schema": { "type": "string" } }
+          { "name": "email", "in": "query", "schema": { "type": "string" } },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["past"] },
+            "description": "With include=past, also return up to 20 USED/EXPIRED coupons and rewards."
+          }
         ],
         "responses": {
-          "200": { "description": "Wallet" },
+          "200": { "description": "Wallet. tier.rank is the numeric level rank." },
           "401": { "description": "Missing or invalid API key" },
           "404": { "description": "CUSTOMER_NOT_FOUND" }
         }

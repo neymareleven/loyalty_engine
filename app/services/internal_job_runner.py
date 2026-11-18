@@ -182,6 +182,7 @@ def run_internal_job_once(
 
         selector = dict(job.selector or {})
         apply_qualification_mode = bool(selector.get("apply_qualification_mode"))
+        apply_downgrades = bool(selector.get("apply_downgrades"))
         backfill_purchases = bool(selector.get("backfill_purchases"))
         try:
             batch_size = int(selector.get("batch_size") or 500)
@@ -278,7 +279,7 @@ def run_internal_job_once(
                 depth=0,
                 refresh_window=False,
                 emit_events=True,
-                allow_downgrade_before_expiry=bool(apply_qualification_mode),
+                allow_downgrade_before_expiry=bool(apply_qualification_mode or apply_downgrades),
             )
             if c.loyalty_status != before:
                 updated += 1
@@ -288,6 +289,8 @@ def run_internal_job_once(
         next_selector = {"batch_size": batch_size}
         if apply_qualification_mode and not finished:
             next_selector["apply_qualification_mode"] = True
+        if apply_downgrades and not finished:
+            next_selector["apply_downgrades"] = True
         if not finished:
             next_selector["after_id"] = str(last_id)
         job.selector = next_selector

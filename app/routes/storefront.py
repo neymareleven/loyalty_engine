@@ -101,14 +101,24 @@ def _cart_dict(cart: CartIn | None) -> dict:
 def _tier_brief(tier: LoyaltyTier | None, customer=None) -> dict | None:
     if not tier:
         return None
-    data = {"key": tier.key, "name": tier.name}
+    data = {"key": tier.key, "name": tier.name, "rank": int(tier.rank)}
     if customer is not None:
         data["assignedAt"] = customer.loyalty_status_assigned_at
         data["expiresAt"] = customer.loyalty_status_expires_at
     return data
 
 
-def _wallet_coupon(db: Session, coupon: CustomerCoupon) -> dict:
+def _wallet_effective_status(row, now: datetime) -> str:
+    status = str(getattr(row, "status", "") or "")
+    if status in {"USED", "EXPIRED"}:
+        return status
+    expires_at = getattr(row, "expires_at", None)
+    if status == "ISSUED" and expires_at is not None and expires_at <= now:
+        return "EXPIRED"
+    return status
+
+
+def _wallet_coupon(db: Session, coupon: CustomerCoupon, *, status: str | None = None) -> dict:
     ct = None
     if coupon.coupon_type_id:
         ct = db.query(CouponType).filter(CouponType.id == coupon.coupon_type_id).first()
@@ -119,8 +129,9 @@ def _wallet_coupon(db: Session, coupon: CustomerCoupon) -> dict:
         "id": str(coupon.id),
         "code": coupon.code,
         "name": name or (ct.name if ct else None),
-        "status": coupon.status,
+        "status": status or coupon.status,
         "expiresAt": coupon.expires_at,
+        "usedAt": coupon.used_at,
         "shareable": bool(coupon.shareable),
         "rewards": [
             {
@@ -141,6 +152,7 @@ def storefront_wallet(
     profile_id: str,
     request: Request,
     email: str | None = Query(default=None),
+    include: str | None = Query(default=None),
     client: ApiClient = Depends(require_storefront_client),
     db: Session = Depends(get_db),
 ):
@@ -166,22 +178,100 @@ def storefront_wallet(
         .filter(CustomerReward.status.in_(("ISSUED", "RESERVED")))
         .all()
     )
+    live_coupons = [_wallet_coupon(db, c) for c in coupons if c.expires_at is None or c.expires_at > now]
+    live_rewards = [
+        {
+            "id": str(r.id),
+            "name": (r.payload or {}).get("name") if isinstance(r.payload, dict) else None,
+            "status": r.status,
+            "benefitType": ((r.payload or {}).get("benefit") or {}).get("benefitType")
+            if isinstance(r.payload, dict)
+            else None,
+            "expiresAt": r.expires_at,
+            "usedAt": r.used_at,
+        }
+        for r in standalone
+        if r.expires_at is None or r.expires_at > now or r.status == "RESERVED"
+    ]
+    if (include or "").strip().lower() == "past":
+        past_coupons = (
+            db.query(CustomerCoupon)
+            .filter(CustomerCoupon.customer_id == customer.id)
+            .filter(
+                or_(
+                    CustomerCoupon.status.in_(("USED", "EXPIRED")),
+                    and_(
+                        CustomerCoupon.status == "ISSUED",
+                        CustomerCoupon.expires_at.isnot(None),
+                        CustomerCoupon.expires_at <= now,
+                    ),
+                )
+            )
+            .all()
+        )
+        past_rewards = (
+            db.query(CustomerReward)
+            .filter(CustomerReward.customer_id == customer.id)
+            .filter(CustomerReward.customer_coupon_id.is_(None))
+            .filter(
+                or_(
+                    CustomerReward.status.in_(("USED", "EXPIRED")),
+                    and_(
+                        CustomerReward.status == "ISSUED",
+                        CustomerReward.expires_at.isnot(None),
+                        CustomerReward.expires_at <= now,
+                    ),
+                )
+            )
+            .all()
+        )
+        def _recency(row):
+            return getattr(row, "used_at", None) or getattr(row, "expires_at", None) or getattr(row, "issued_at", None) or datetime.min
+
+        past_coupons.sort(key=_recency, reverse=True)
+        past_rewards.sort(key=_recency, reverse=True)
+        seen_c = {c["id"] for c in live_coupons}
+        extra_c = []
+        for row in past_coupons:
+            status = _wallet_effective_status(row, now)
+            if status not in {"USED", "EXPIRED"}:
+                continue
+            item = _wallet_coupon(db, row, status=status)
+            if item["id"] in seen_c:
+                continue
+            extra_c.append(item)
+            if len(extra_c) >= 20:
+                break
+        seen_r = {r["id"] for r in live_rewards}
+        extra_r = []
+        for row in past_rewards:
+            status = _wallet_effective_status(row, now)
+            if status not in {"USED", "EXPIRED"}:
+                continue
+            rid = str(row.id)
+            if rid in seen_r:
+                continue
+            extra_r.append(
+                {
+                    "id": rid,
+                    "name": (row.payload or {}).get("name") if isinstance(row.payload, dict) else None,
+                    "status": status,
+                    "benefitType": ((row.payload or {}).get("benefit") or {}).get("benefitType")
+                    if isinstance(row.payload, dict)
+                    else None,
+                    "expiresAt": row.expires_at,
+                    "usedAt": row.used_at,
+                }
+            )
+            if len(extra_r) >= 20:
+                break
+        live_coupons.extend(extra_c)
+        live_rewards.extend(extra_r)
     payload = {
         "profileId": customer.profile_id,
         "tier": _tier_brief(current),
-        "coupons": [_wallet_coupon(db, c) for c in coupons if c.expires_at is None or c.expires_at > now],
-        "rewards": [
-            {
-                "id": str(r.id),
-                "name": (r.payload or {}).get("name") if isinstance(r.payload, dict) else None,
-                "status": r.status,
-                "benefitType": ((r.payload or {}).get("benefit") or {}).get("benefitType")
-                if isinstance(r.payload, dict)
-                else None,
-                "expiresAt": r.expires_at,
-            }
-            for r in standalone
-        ],
+        "coupons": live_coupons,
+        "rewards": live_rewards,
     }
     persist_storefront_session(db, request)
     return payload

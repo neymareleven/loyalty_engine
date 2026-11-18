@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -50,6 +50,7 @@ class LoyaltyTierOut(BaseModel):
 
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    adjustedInactiveModeThresholds: Optional[list[dict[str, Any]]] = None
 
     class Config:
         from_attributes = True
