@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from app.services.benefit_service import compute_benefit
+from app.services.benefit_service import compute_benefit, describe_benefit
 from app.services.coupon_code import generate_coupon_code
 from app.services.loyalty_status_service import last_change_from_tier_event
 from app.services.redemption_service import evaluate_coupon_or_reward
@@ -1361,3 +1361,210 @@ def test_free_shipping_reward_accepted_with_reserved_discount(monkeypatch):
     )
     assert result["applicable"] is True
     assert result["benefits"][0]["type"] == "FREE_SHIPPING"
+    assert result["benefits"][0]["scope"] == "SHIPPING"
+
+
+def test_shipping_percent_fixed_and_zero_shipping():
+    cart = {"subtotal": 20000, "shippingAmount": 5000}
+    pct, reason = compute_benefit(
+        benefit_type="SHIPPING_PERCENT_DISCOUNT",
+        benefit_value=50,
+        max_discount_amount=1000,
+        min_cart_amount=None,
+        applies_to="CART",
+        free_product_quantity=1,
+        cart=cart,
+        product_ids=set(),
+        category_ids=set(),
+    )
+    assert reason is None
+    assert pct["discountAmount"] == 0
+    assert pct["shippingDiscount"] == 1000
+    assert pct["scope"] == "SHIPPING"
+    assert "livraison" in pct["description"]
+
+    fixed, _ = compute_benefit(
+        benefit_type="SHIPPING_FIXED_DISCOUNT",
+        benefit_value=8000,
+        max_discount_amount=None,
+        min_cart_amount=None,
+        applies_to="PRODUCTS",
+        free_product_quantity=3,
+        cart=cart,
+        product_ids=set(),
+        category_ids=set(),
+    )
+    assert fixed["shippingDiscount"] == 5000
+    assert fixed["scope"] == "SHIPPING"
+
+    methods, _ = compute_benefit(
+        benefit_type="SHIPPING_PERCENT_DISCOUNT",
+        benefit_value=10,
+        max_discount_amount=None,
+        min_cart_amount=None,
+        applies_to="CART",
+        free_product_quantity=1,
+        cart={"subtotal": 10000, "shippingAmount": 9999, "shippingMethods": [{"amount": 2000}, {"amount": 500}]},
+        product_ids=set(),
+        category_ids=set(),
+    )
+    assert methods["shippingDiscount"] == 250
+
+    zero, zreason = compute_benefit(
+        benefit_type="SHIPPING_PERCENT_DISCOUNT",
+        benefit_value=20,
+        max_discount_amount=None,
+        min_cart_amount=None,
+        applies_to="CART",
+        free_product_quantity=1,
+        cart={"subtotal": 10000, "shippingAmount": 0},
+        product_ids=set(),
+        category_ids=set(),
+    )
+    assert zreason is None
+    assert zero["shippingDiscount"] == 0
+
+
+def test_describe_benefit_french_without_currency():
+    text = describe_benefit(
+        benefit_type="PERCENT_DISCOUNT",
+        benefit_value=10,
+        max_discount_amount=5000,
+        min_cart_amount=20000,
+    )
+    assert text == "-10 % sur le panier, dès 20 000 de panier (plafonné à 5 000)"
+    assert "€" not in text
+    assert "XAF" not in text
+    assert describe_benefit(benefit_type="FREE_SHIPPING") == "Livraison offerte"
+    assert describe_benefit(benefit_type="SHIPPING_PERCENT_DISCOUNT", benefit_value=15) == "-15 % sur la livraison"
+    assert describe_benefit(benefit_type="FREE_PRODUCT", free_product_quantity=2) == "2 produits offerts"
+
+
+def test_free_product_prefers_storefront_refs():
+    ok, _ = compute_benefit(
+        benefit_type="FREE_PRODUCT",
+        benefit_value=None,
+        max_discount_amount=None,
+        min_cart_amount=None,
+        applies_to="PRODUCTS",
+        free_product_quantity=1,
+        cart={"subtotal": 10000},
+        product_ids={"engine-fallback"},
+        category_ids=set(),
+        product_refs=[{"productId": "woo-1", "name": "Mug", "quantity": 1}],
+    )
+    assert ok["freeItems"] == [{"productId": "woo-1", "name": "Mug", "quantity": 1}]
+    assert ok["scope"] == "PRODUCT"
+
+
+def test_shipping_not_stackable_against_free_shipping(monkeypatch):
+    customer_id = uuid4()
+    coupon = SimpleNamespace(
+        id=uuid4(),
+        customer_id=customer_id,
+        code="LOY-SHIP-0001",
+        shareable=True,
+        expires_at=None,
+        status="ISSUED",
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+        coupon_type_id=None,
+        payload=None,
+    )
+    owner = SimpleNamespace(id=customer_id, brand="batira")
+    customer = SimpleNamespace(id=customer_id, brand="batira")
+
+    class Q:
+        def __init__(self, result):
+            self.result = result
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self.result
+
+        def all(self):
+            return []
+
+    class DB:
+        def query(self, model):
+            from app.models.customer import Customer
+            from app.models.customer_coupon import CustomerCoupon
+
+            if model is CustomerCoupon:
+                return Q(coupon)
+            if model is Customer:
+                return Q(owner)
+            return Q(None)
+
+    monkeypatch.setattr(
+        "app.services.redemption_service.get_loyalty_settings",
+        lambda db, brand: SimpleNamespace(
+            max_discount_benefits_per_cart=1,
+            max_shipping_benefits_per_cart=1,
+            discount_base="SUBTOTAL_INCL_TAX",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.redemption_service.coupon_reward_snapshots",
+        lambda db, coupon: [
+            {
+                "benefitType": "SHIPPING_PERCENT_DISCOUNT",
+                "benefitValue": 50,
+                "appliesTo": "CART",
+                "freeProductQuantity": 1,
+                "stackable": False,
+            }
+        ],
+    )
+    blocked = evaluate_coupon_or_reward(
+        DB(),
+        brand="batira",
+        customer=customer,
+        code="LOY-SHIP-0001",
+        customer_reward_id=None,
+        cart={"subtotal": 50000, "shippingAmount": 4000},
+        applied_benefits=[{"type": "FREE_SHIPPING", "shippingDiscount": 4000}],
+    )
+    assert blocked["applicable"] is False
+    assert "NOT_STACKABLE" in blocked["reasons"]
+
+    stacked = evaluate_coupon_or_reward(
+        DB(),
+        brand="batira",
+        customer=customer,
+        code="LOY-SHIP-0001",
+        customer_reward_id=None,
+        cart={"subtotal": 50000, "shippingAmount": 4000},
+        applied_benefits=[{"type": "PERCENT_DISCOUNT", "discountAmount": 5000}],
+    )
+    assert stacked["applicable"] is True
+    assert stacked["benefits"][0]["type"] == "SHIPPING_PERCENT_DISCOUNT"
+    assert stacked["benefits"][0]["shippingDiscount"] == 2000
+
+
+def test_present_wallet_reward_includes_scope_and_products():
+    from app.services.redemption_service import present_wallet_reward
+
+    reward_id = str(uuid4())
+    presented = present_wallet_reward(
+        {
+            "id": reward_id,
+            "customerRewardId": str(uuid4()),
+            "name": "Mug offert",
+            "benefitType": "FREE_PRODUCT",
+            "freeProductQuantity": 1,
+            "appliesTo": "PRODUCTS",
+            "stackable": False,
+        },
+        {reward_id: [{"id": "woo-1", "name": "Mug", "quantity": 1}]},
+    )
+    assert presented["scope"] == "PRODUCT"
+    assert presented["appliesTo"] == "PRODUCTS"
+    assert presented["stackable"] is False
+    assert presented["products"] == [{"id": "woo-1", "name": "Mug", "quantity": 1}]
+    assert presented["description"] == "Produit offert"

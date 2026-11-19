@@ -28,6 +28,7 @@ class BrandLoyaltySettings(Base):
     # IMMEDIATE = apply earned palier now (guarantees still hold). HOLD_UNTIL_WINDOW = keep current palier until expiry.
     mode_switch_policy = Column(String(30), nullable=False, default="IMMEDIATE")
     max_discount_benefits_per_cart = Column(Integer, nullable=False, default=1)
+    max_shipping_benefits_per_cart = Column(Integer, nullable=False, default=1)
     discount_base = Column(String(30), nullable=False, default="SUBTOTAL_INCL_TAX")
 
     # Legacy columns (unused): Unomi is configured via .env — see UNOMI_* variables.

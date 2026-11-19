@@ -13,7 +13,14 @@ from app.models.product import Product
 from app.models.redemption import Redemption
 from app.models.reward import Reward
 from app.models.reward_product import RewardProduct
-from app.services.benefit_service import DISCOUNT_TYPES, compute_benefit
+from app.services.benefit_service import (
+    DISCOUNT_TYPES,
+    SHIPPING_TYPES,
+    benefit_scope,
+    compute_benefit,
+    describe_benefit,
+    storefront_product_ref,
+)
 from app.services.contact_service import resolve_customer_for_lookup
 from app.services.loyalty_settings_service import get_loyalty_settings
 
@@ -93,6 +100,81 @@ def _count_discount_benefits(applied: list[dict]) -> int:
         if btype in DISCOUNT_TYPES:
             n += 1
     return n
+
+
+def _count_shipping_benefits(applied: list[dict]) -> int:
+    n = 0
+    for item in applied:
+        btype = str((item or {}).get("type") or (item or {}).get("benefitType") or "")
+        if btype in SHIPPING_TYPES:
+            n += 1
+    return n
+
+
+def load_reward_products_map(db: Session, reward_ids: list) -> dict:
+    ids = []
+    for raw in reward_ids:
+        if raw is None:
+            continue
+        try:
+            ids.append(UUID(str(raw)))
+        except Exception:
+            continue
+    if not ids:
+        return {}
+    links = db.query(RewardProduct).filter(RewardProduct.reward_id.in_(ids)).all()
+    product_ids = [link.product_id for link in links]
+    products = db.query(Product).filter(Product.id.in_(product_ids)).all() if product_ids else []
+    by_id = {p.id: p for p in products}
+    out: dict = {}
+    for link in links:
+        product = by_id.get(link.product_id)
+        if product is None:
+            continue
+        ref = storefront_product_ref(product, int(link.quantity or 1))
+        wallet_item = {
+            "id": ref.get("productId") or ref.get("engineProductId") or str(product.id),
+            "name": ref.get("name") or product.name,
+            "quantity": int(link.quantity or 1),
+        }
+        out.setdefault(str(link.reward_id), []).append(wallet_item)
+        out.setdefault(link.reward_id, []).append(ref)
+    return out
+
+
+def present_wallet_reward(snap: dict, products_map: dict) -> dict:
+    btype = str(snap.get("benefitType") or "CUSTOM").upper()
+    reward_id = str(snap.get("id") or "")
+    products = []
+    if reward_id:
+        products = [
+            item
+            for item in (products_map.get(reward_id) or [])
+            if isinstance(item, dict) and "id" in item
+        ][:20]
+    applies = str(snap.get("appliesTo") or "CART")
+    return {
+        "id": snap.get("customerRewardId"),
+        "name": snap.get("name"),
+        "benefitType": btype,
+        "benefitValue": snap.get("benefitValue"),
+        "maxDiscountAmount": snap.get("maxDiscountAmount"),
+        "minCartAmount": snap.get("minCartAmount"),
+        "scope": benefit_scope(btype, applies),
+        "appliesTo": applies,
+        "stackable": bool(snap.get("stackable")),
+        "freeProductQuantity": int(snap.get("freeProductQuantity") or 1),
+        "products": products,
+        "description": describe_benefit(
+            benefit_type=btype,
+            benefit_value=snap.get("benefitValue"),
+            max_discount_amount=snap.get("maxDiscountAmount"),
+            min_cart_amount=snap.get("minCartAmount"),
+            name=snap.get("name"),
+            free_product_quantity=snap.get("freeProductQuantity"),
+            applies_to=applies,
+        ),
+    }
 
 
 def _reservation_is_stale(reserved_until, now: datetime | None = None) -> bool:
@@ -211,6 +293,7 @@ def evaluate_coupon_or_reward(
 ) -> dict:
     settings = get_loyalty_settings(db, brand=brand)
     max_discounts = int(getattr(settings, "max_discount_benefits_per_cart", 1) or 1) if settings else 1
+    max_shipping = int(getattr(settings, "max_shipping_benefits_per_cart", 1) or 1) if settings else 1
     discount_base = getattr(settings, "discount_base", None) if settings else "SUBTOTAL_INCL_TAX"
     discount_base = discount_base or "SUBTOTAL_INCL_TAX"
     applied = applied_benefits or []
@@ -274,10 +357,15 @@ def evaluate_coupon_or_reward(
     benefits = []
     reasons: list[str] = []
     discount_so_far = _count_discount_benefits(applied)
+    shipping_so_far = _count_shipping_benefits(applied)
+    products_map = load_reward_products_map(db, [snap.get("id") for snap in snapshots])
     for snap in snapshots:
         btype = str(snap.get("benefitType") or "CUSTOM").upper()
         stackable = bool(snap.get("stackable"))
         if btype in DISCOUNT_TYPES and discount_so_far >= max_discounts and not stackable:
+            reasons.append("NOT_STACKABLE")
+            continue
+        if btype in SHIPPING_TYPES and shipping_so_far >= max_shipping and not stackable:
             reasons.append("NOT_STACKABLE")
             continue
         reward = None
@@ -287,6 +375,16 @@ def evaluate_coupon_or_reward(
             except Exception:
                 reward = None
         product_ids, category_ids = _reward_scope(db, reward)
+        product_refs = []
+        if snap.get("id"):
+            try:
+                product_refs = [
+                    item
+                    for item in (products_map.get(UUID(str(snap["id"]))) or [])
+                    if isinstance(item, dict) and "productId" in item
+                ]
+            except Exception:
+                product_refs = []
         benefit, reason = compute_benefit(
             benefit_type=btype,
             benefit_value=snap.get("benefitValue"),
@@ -298,6 +396,8 @@ def evaluate_coupon_or_reward(
             product_ids=product_ids,
             category_ids=category_ids,
             discount_base=discount_base,
+            name=snap.get("name"),
+            product_refs=product_refs or None,
         )
         if reason:
             reasons.append(reason)
@@ -306,6 +406,8 @@ def evaluate_coupon_or_reward(
             benefits.append(benefit)
             if btype in DISCOUNT_TYPES:
                 discount_so_far += 1
+            if btype in SHIPPING_TYPES:
+                shipping_so_far += 1
 
     if not benefits:
         return {"applicable": False, "benefits": [], "reasons": reasons or ["NOT_FOUND"]}

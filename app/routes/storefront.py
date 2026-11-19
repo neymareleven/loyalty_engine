@@ -24,7 +24,9 @@ from app.services.redemption_service import (
     commit as commit_redemption,
     coupon_reward_snapshots,
     evaluate_coupon_or_reward,
+    load_reward_products_map,
     lookup_offer_ids_for_exclusion,
+    present_wallet_reward,
     release as release_redemption,
     reserve as reserve_redemption,
     resolve_storefront_customer,
@@ -118,13 +120,24 @@ def _wallet_effective_status(row, now: datetime) -> str:
     return status
 
 
-def _wallet_coupon(db: Session, coupon: CustomerCoupon, *, status: str | None = None) -> dict:
+def _wallet_products_map(db: Session, customer_id) -> dict:
+    ids = [
+        row.reward_id
+        for row in db.query(CustomerReward).filter(CustomerReward.customer_id == customer_id).all()
+    ]
+    return load_reward_products_map(db, ids)
+
+
+def _wallet_coupon(
+    db: Session, coupon: CustomerCoupon, *, status: str | None = None, products_map: dict | None = None
+) -> dict:
     ct = None
     if coupon.coupon_type_id:
         ct = db.query(CouponType).filter(CouponType.id == coupon.coupon_type_id).first()
     name = None
     if isinstance(coupon.payload, dict):
         name = (coupon.payload.get("couponType") or {}).get("name")
+    snaps = coupon_reward_snapshots(db, coupon)
     return {
         "id": str(coupon.id),
         "code": coupon.code,
@@ -133,18 +146,23 @@ def _wallet_coupon(db: Session, coupon: CustomerCoupon, *, status: str | None = 
         "expiresAt": coupon.expires_at,
         "usedAt": coupon.used_at,
         "shareable": bool(coupon.shareable),
-        "rewards": [
-            {
-                "id": snap.get("customerRewardId"),
-                "name": snap.get("name"),
-                "benefitType": snap.get("benefitType"),
-                "benefitValue": snap.get("benefitValue"),
-                "maxDiscountAmount": snap.get("maxDiscountAmount"),
-                "minCartAmount": snap.get("minCartAmount"),
-            }
-            for snap in coupon_reward_snapshots(db, coupon)
-        ],
+        "rewards": [present_wallet_reward(snap, products_map or {}) for snap in snaps],
     }
+
+
+def _wallet_standalone_reward(row: CustomerReward, products_map: dict, *, status: str | None = None) -> dict:
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    benefit = payload.get("benefit") if isinstance(payload.get("benefit"), dict) else {}
+    snap = dict(benefit)
+    if row.reward_id:
+        snap["id"] = str(row.reward_id)
+    snap["customerRewardId"] = str(row.id)
+    snap["name"] = snap.get("name") or payload.get("name")
+    item = present_wallet_reward(snap, products_map)
+    item["status"] = status or row.status
+    item["expiresAt"] = row.expires_at
+    item["usedAt"] = row.used_at
+    return item
 
 
 @router.get("/customers/{profile_id}/wallet")
@@ -178,18 +196,14 @@ def storefront_wallet(
         .filter(CustomerReward.status.in_(("ISSUED", "RESERVED")))
         .all()
     )
-    live_coupons = [_wallet_coupon(db, c) for c in coupons if c.expires_at is None or c.expires_at > now]
+    products_map = _wallet_products_map(db, customer.id)
+    live_coupons = [
+        _wallet_coupon(db, c, products_map=products_map)
+        for c in coupons
+        if c.expires_at is None or c.expires_at > now
+    ]
     live_rewards = [
-        {
-            "id": str(r.id),
-            "name": (r.payload or {}).get("name") if isinstance(r.payload, dict) else None,
-            "status": r.status,
-            "benefitType": ((r.payload or {}).get("benefit") or {}).get("benefitType")
-            if isinstance(r.payload, dict)
-            else None,
-            "expiresAt": r.expires_at,
-            "usedAt": r.used_at,
-        }
+        _wallet_standalone_reward(r, products_map)
         for r in standalone
         if r.expires_at is None or r.expires_at > now or r.status == "RESERVED"
     ]
@@ -236,7 +250,7 @@ def storefront_wallet(
             status = _wallet_effective_status(row, now)
             if status not in {"USED", "EXPIRED"}:
                 continue
-            item = _wallet_coupon(db, row, status=status)
+            item = _wallet_coupon(db, row, status=status, products_map=products_map)
             if item["id"] in seen_c:
                 continue
             extra_c.append(item)
@@ -251,18 +265,7 @@ def storefront_wallet(
             rid = str(row.id)
             if rid in seen_r:
                 continue
-            extra_r.append(
-                {
-                    "id": rid,
-                    "name": (row.payload or {}).get("name") if isinstance(row.payload, dict) else None,
-                    "status": status,
-                    "benefitType": ((row.payload or {}).get("benefit") or {}).get("benefitType")
-                    if isinstance(row.payload, dict)
-                    else None,
-                    "expiresAt": row.expires_at,
-                    "usedAt": row.used_at,
-                }
-            )
+            extra_r.append(_wallet_standalone_reward(row, products_map, status=status))
             if len(extra_r) >= 20:
                 break
         live_coupons.extend(extra_c)

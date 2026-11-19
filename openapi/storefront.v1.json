@@ -29,6 +29,16 @@
           "currency": { "type": "string", "example": "XAF" },
           "subtotal": { "type": "integer", "example": 50000 },
           "shippingAmount": { "type": "integer", "example": 2500 },
+          "shippingMethods": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "amount": { "type": "integer" }
+              }
+            }
+          },
           "taxIncluded": { "type": "boolean" },
           "items": {
             "type": "array",
@@ -57,21 +67,81 @@
           "appliedRedemptionIds": { "type": "array", "items": { "type": "string" } }
         }
       },
+      "Benefit": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "PERCENT_DISCOUNT",
+              "FIXED_DISCOUNT",
+              "FREE_SHIPPING",
+              "SHIPPING_PERCENT_DISCOUNT",
+              "SHIPPING_FIXED_DISCOUNT",
+              "FREE_PRODUCT",
+              "CUSTOM"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["CART", "PRODUCTS", "PRODUCT", "SHIPPING", "OTHER"]
+          },
+          "description": { "type": "string", "example": "-10 % sur le panier, dès 20 000 de panier" },
+          "discountAmount": { "type": "integer", "example": 5000 },
+          "shippingDiscount": { "type": "integer", "example": 0 },
+          "freeItems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "productId": { "type": "string", "description": "Storefront match_key when present" },
+                "engineProductId": { "type": "string" },
+                "sku": { "type": "string" },
+                "name": { "type": "string" },
+                "quantity": { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "WalletReward": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "benefitType": { "type": "string" },
+          "benefitValue": { "type": "integer", "nullable": true },
+          "maxDiscountAmount": { "type": "integer", "nullable": true },
+          "minCartAmount": { "type": "integer", "nullable": true },
+          "scope": { "type": "string" },
+          "appliesTo": { "type": "string" },
+          "stackable": { "type": "boolean" },
+          "freeProductQuantity": { "type": "integer" },
+          "products": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "quantity": { "type": "integer" }
+              }
+            }
+          },
+          "description": { "type": "string" },
+          "status": { "type": "string" },
+          "expiresAt": { "type": "string", "format": "date-time", "nullable": true },
+          "usedAt": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
       "ValidateResponse": {
         "type": "object",
         "properties": {
           "applicable": { "type": "boolean", "example": true },
           "benefits": {
             "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "type": { "type": "string", "example": "PERCENT_DISCOUNT" },
-                "discountAmount": { "type": "integer", "example": 5000 },
-                "shippingDiscount": { "type": "integer", "example": 0 },
-                "freeItems": { "type": "array", "items": { "type": "object" } }
-              }
-            }
+            "items": { "$ref": "#/components/schemas/Benefit" }
           },
           "reasons": {
             "type": "array",
@@ -99,7 +169,9 @@
           }
         ],
         "responses": {
-          "200": { "description": "Wallet. tier.rank is the numeric level rank." },
+          "200": {
+            "description": "Wallet. Coupons[].rewards and standalone rewards include scope, description, products, stackable. tier.rank is the numeric level rank."
+          },
           "401": { "description": "Missing or invalid API key" },
           "404": { "description": "CUSTOMER_NOT_FOUND" }
         }

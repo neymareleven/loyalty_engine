@@ -168,6 +168,7 @@ def serialize_loyalty_settings(obj: BrandLoyaltySettings) -> dict:
         "first_purchase_bypass_tier_key": (str(tier_key).strip() if tier_key else None) or None,
         "mode_switch_policy": str(getattr(obj, "mode_switch_policy", None) or "IMMEDIATE").upper(),
         "max_discount_benefits_per_cart": int(getattr(obj, "max_discount_benefits_per_cart", 1) or 1),
+        "max_shipping_benefits_per_cart": int(getattr(obj, "max_shipping_benefits_per_cart", 1) or 1),
         "discount_base": str(getattr(obj, "discount_base", None) or "SUBTOTAL_INCL_TAX"),
     }
 

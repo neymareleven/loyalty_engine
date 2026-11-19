@@ -109,3 +109,42 @@ def test_reward_create_accepts_null_applies_to_and_quantity():
     assert payload.free_product_quantity is None
     assert (payload.applies_to or "CART") == "CART"
     assert (payload.free_product_quantity or 1) == 1
+
+
+def test_shipping_reward_create_validates_and_forces_cart():
+    from pydantic import ValidationError
+
+    from app.schemas.reward import RewardCreate
+
+    coupon_id = uuid4()
+    ok = RewardCreate.model_validate(
+        {
+            "name": "-20 % livraison",
+            "coupon_type_ids": [coupon_id],
+            "benefit_type": "SHIPPING_PERCENT_DISCOUNT",
+            "benefit_value": 20,
+            "applies_to": "PRODUCTS",
+            "free_product_quantity": 4,
+        }
+    )
+    assert ok.applies_to == "CART"
+    assert ok.free_product_quantity == 1
+
+    with pytest.raises(ValidationError):
+        RewardCreate.model_validate(
+            {
+                "name": "bad pct",
+                "coupon_type_ids": [coupon_id],
+                "benefit_type": "SHIPPING_PERCENT_DISCOUNT",
+                "benefit_value": 150,
+            }
+        )
+    with pytest.raises(ValidationError):
+        RewardCreate.model_validate(
+            {
+                "name": "bad fixed",
+                "coupon_type_ids": [coupon_id],
+                "benefit_type": "SHIPPING_FIXED_DISCOUNT",
+                "benefit_value": -1,
+            }
+        )

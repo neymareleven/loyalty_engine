@@ -99,6 +99,9 @@ def admin_schema_health(db: Session = Depends(get_db)):
         "brand_loyalty_settings.mode_switch_policy": (
             "SELECT mode_switch_policy FROM brand_loyalty_settings LIMIT 1"
         ),
+        "brand_loyalty_settings.max_shipping_benefits_per_cart": (
+            "SELECT max_shipping_benefits_per_cart FROM brand_loyalty_settings LIMIT 1"
+        ),
     }
     missing: list[str] = []
     errors: dict[str, str] = {}
@@ -461,6 +464,15 @@ def update_loyalty_settings(
         if n < 1:
             raise HTTPException(status_code=400, detail="max_discount_benefits_per_cart must be >= 1")
         obj.max_discount_benefits_per_cart = n
+
+    if "max_shipping_benefits_per_cart" in data and data["max_shipping_benefits_per_cart"] is not None:
+        try:
+            n = int(data["max_shipping_benefits_per_cart"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="max_shipping_benefits_per_cart must be an integer >= 1")
+        if n < 1:
+            raise HTTPException(status_code=400, detail="max_shipping_benefits_per_cart must be >= 1")
+        obj.max_shipping_benefits_per_cart = n
 
     if "discount_base" in data and data["discount_base"] is not None:
         base = str(data["discount_base"]).strip().upper()
@@ -992,6 +1004,15 @@ def get_rewards_ui_catalog():
                     "Types de coupon existants (obligatoire à la création). Créer le coupon type avant la reward."
                 ),
             },
+            "benefitTypes": [
+                "PERCENT_DISCOUNT",
+                "FIXED_DISCOUNT",
+                "FREE_SHIPPING",
+                "SHIPPING_PERCENT_DISCOUNT",
+                "SHIPPING_FIXED_DISCOUNT",
+                "FREE_PRODUCT",
+                "CUSTOM",
+            ],
             "rewardTypes": [
                 _reward_type_catalog_item(
                     reward_type="ENTITLEMENT",

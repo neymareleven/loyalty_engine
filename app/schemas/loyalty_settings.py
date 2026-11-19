@@ -17,6 +17,7 @@ class LoyaltySettingsOut(BaseModel):
     first_purchase_bypass_tier_key: Optional[str] = None
     mode_switch_policy: str = "IMMEDIATE"
     max_discount_benefits_per_cart: int = 1
+    max_shipping_benefits_per_cart: int = 1
     discount_base: str = "SUBTOTAL_INCL_TAX"
 
 
@@ -54,5 +55,9 @@ class LoyaltySettingsUpdate(BaseModel):
     max_discount_benefits_per_cart: Optional[int] = Field(
         default=None,
         description="Nombre max d'avantages de type réduction par panier (défaut 1).",
+    )
+    max_shipping_benefits_per_cart: Optional[int] = Field(
+        default=None,
+        description="Nombre max d'avantages livraison par panier (défaut 1).",
     )
     discount_base: Optional[Literal["SUBTOTAL_EXCL_TAX", "SUBTOTAL_INCL_TAX"]] = None
