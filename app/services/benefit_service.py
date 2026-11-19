@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+from app.services.match_key import normalize_match_key
+
+logger = logging.getLogger(__name__)
 
 DISCOUNT_TYPES = frozenset({"PERCENT_DISCOUNT", "FIXED_DISCOUNT"})
 SHIPPING_TYPES = frozenset(
@@ -131,21 +136,50 @@ def cart_shipping(cart: dict) -> int:
     return _int(cart.get("shippingAmount"))
 
 
+def cart_item_match_candidates(item: dict) -> set[str]:
+    out: set[str] = set()
+    match_key = str(item.get("matchKey") or "").strip().lower()
+    if match_key:
+        out.add(match_key)
+    name_key = normalize_match_key(item.get("name"))
+    if name_key:
+        out.add(name_key)
+    sku = str(item.get("sku") or "").strip()
+    if sku:
+        out.add(sku)
+        sku_key = normalize_match_key(sku)
+        if sku_key:
+            out.add(sku_key)
+    pid = str(item.get("productId") or item.get("id") or "").strip()
+    if pid:
+        out.add(pid)
+    return out
+
+
+def cart_match_keys_for_log(cart: dict) -> list[str]:
+    items = cart.get("items") if isinstance(cart.get("items"), list) else []
+    keys: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        keys.extend(sorted(cart_item_match_candidates(item)))
+    return keys
+
+
 def eligible_amount(cart: dict, *, applies_to: str, product_ids: set[str], category_ids: set[str], discount_base: str) -> int:
     subtotal = cart_subtotal(cart, discount_base=discount_base)
     applies = (applies_to or "CART").upper()
     if applies == "CART" or not product_ids and not category_ids:
         return subtotal
+    expected = {str(x) for x in product_ids}
     items = cart.get("items") if isinstance(cart.get("items"), list) else []
     total = 0
     for item in items:
         if not isinstance(item, dict):
             continue
-        pid = str(item.get("productId") or item.get("id") or "")
-        sku = str(item.get("sku") or "")
         cats = {str(c) for c in (item.get("categoryIds") or [])}
         line = _int(item.get("unitPrice")) * max(1, _int(item.get("quantity"), 1))
-        if applies == "PRODUCTS" and (pid in product_ids or sku in product_ids):
+        if applies == "PRODUCTS" and cart_item_match_candidates(item).intersection(expected):
             total += line
         elif applies == "CATEGORIES" and cats.intersection(category_ids):
             total += line
@@ -160,7 +194,7 @@ def storefront_product_ref(product, quantity: int = 1) -> dict:
     external = match_key or sku or ""
     item = {
         "productId": external,
-        "name": name,
+        "name": (str(name).strip() if name else "") or match_key or sku or "",
         "quantity": max(1, int(quantity or 1)),
     }
     if sku:
@@ -199,6 +233,12 @@ def compute_benefit(
         discount_base=discount_base,
     )
     if btype in DISCOUNT_TYPES and eligible <= 0 and (applies_to or "CART").upper() != "CART":
+        if (applies_to or "CART").upper() == "PRODUCTS":
+            logger.info(
+                "NO_ELIGIBLE_ITEMS applies_to=PRODUCTS cart_keys=%s reward_keys=%s",
+                cart_match_keys_for_log(cart),
+                sorted(str(x) for x in product_ids),
+            )
         return None, "NO_ELIGIBLE_ITEMS"
 
     discount_amount = 0

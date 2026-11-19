@@ -24,7 +24,7 @@ from app.models.product import Product
 from app.models.transaction import Transaction
 from app.models.transaction_rule_execution import TransactionRuleExecution
 from app.services.contact_service import get_customer, list_customer_unomi_profile_ids
-from app.services.rule_engine import _normalize_match_key
+from app.services.match_key import normalize_match_key
 
 
 def _print_json(label: str, data) -> None:
@@ -174,7 +174,7 @@ def main() -> int:
             if isinstance(names, list):
                 print("\n=== Product catalog match ===")
                 for name in names:
-                    mk = _normalize_match_key(name)
+                    mk = normalize_match_key(name)
                     prod = (
                         db.query(Product)
                         .filter(Product.brand == args.brand)

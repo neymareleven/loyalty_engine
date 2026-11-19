@@ -57,6 +57,8 @@ _HISTORY_TYPES = [
 class CartItemIn(BaseModel):
     productId: str | None = None
     sku: str | None = None
+    matchKey: str | None = None
+    name: str | None = None
     categoryIds: list[str] = Field(default_factory=list)
     unitPrice: int = 0
     quantity: int = 1

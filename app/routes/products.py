@@ -1,4 +1,3 @@
-import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +16,7 @@ from app.services.catalog_invalidation_service import (
     apply_product_catalog_delete,
     preview_product_delete,
 )
+from app.services.match_key import normalize_match_key
 
 
 router = APIRouter(prefix="/admin/products", tags=["admin-products"])
@@ -28,17 +28,6 @@ def _pgcode(err: IntegrityError) -> str | None:
     if code:
         return str(code)
     return None
-
-
-def _normalize_match_key(value) -> str | None:
-    if value is None:
-        return None
-    s = str(value).strip().lower()
-    if not s:
-        return None
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = s.strip("-")
-    return s or None
 
 
 def _ensure_unique_match_key(*, db: Session, brand: str, base_key: str) -> str:
@@ -141,7 +130,7 @@ def create_product(
 
     match_key = payload.match_key
     if not match_key:
-        base = _normalize_match_key(payload.name)
+        base = normalize_match_key(payload.name)
         if not base:
             raise HTTPException(status_code=400, detail="match_key could not be generated from name")
         match_key = _ensure_unique_match_key(db=db, brand=active_brand, base_key=base)

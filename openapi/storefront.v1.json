@@ -47,6 +47,8 @@
               "properties": {
                 "productId": { "type": "string" },
                 "sku": { "type": "string" },
+                "matchKey": { "type": "string", "description": "Normalized match key from the shop (same rule as engine match_key)" },
+                "name": { "type": "string", "description": "Product name as shown in the shop" },
                 "categoryIds": { "type": "array", "items": { "type": "string" } },
                 "unitPrice": { "type": "integer" },
                 "quantity": { "type": "integer" }

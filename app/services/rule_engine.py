@@ -17,6 +17,7 @@ from app.models.product import Product
 from app.services.birthdate_targeting import compare_birthdate, format_customer_birthdate_wire
 from app.services.contact_service import resolve_customer_for_transaction
 from app.services.loyalty_service import earn_points, burn_points
+from app.services.match_key import normalize_match_key
 from app.services.reward_service import issue_reward
 from app.services.coupon_service import issue_coupon, use_coupon
 from app.services.rule_validity_service import rule_validity_status, transaction_evaluation_time
@@ -37,17 +38,6 @@ def _get_by_path(obj, path: str):
         else:
             current = getattr(current, part, None)
     return current
-
-
-def _normalize_match_key(value) -> str | None:
-    if value is None:
-        return None
-    s = str(value).strip().lower()
-    if not s:
-        return None
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = s.strip("-")
-    return s or None
 
 
 def _resolve_system_value(*, key: str, customer, preset: dict | None = None):
@@ -223,7 +213,7 @@ def _eval_expr(*, db: Session, customer, transaction, expr):
 
             pairs: list[tuple[str, int]] = []
             for name, qty in zip_longest(names, quantities, fillvalue=None):
-                mk = _normalize_match_key(name)
+                mk = normalize_match_key(name)
                 if not mk:
                     continue
                 q = _as_int(qty)
