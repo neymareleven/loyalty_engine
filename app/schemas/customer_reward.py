@@ -29,11 +29,25 @@ class CustomerRewardOut(BaseModel):
     reward_name: Optional[str] = None
     coupon_type_name: Optional[str] = None
     display_label: Optional[str] = None
+    description: Optional[str] = None
     catalog_removed: Optional[bool] = None
     status_label: Optional[str] = None
     allowed_admin_transitions: list[str] = Field(default_factory=list)
     admin_actions_enabled: bool = True
     products: list[dict] = Field(default_factory=list)
+    benefit_type: Optional[str] = None
+    benefit_type_label: Optional[str] = None
+    benefit_value: Optional[int] = None
+    max_discount_amount: Optional[int] = None
+    min_cart_amount: Optional[int] = None
+    applies_to: Optional[str] = None
+    applies_to_label: Optional[str] = None
+    scope: Optional[str] = None
+    free_product_quantity: Optional[int] = None
+    stackable: Optional[bool] = None
+    stackable_label: Optional[str] = None
+    benefit_description: Optional[str] = None
+    usage_conditions: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
