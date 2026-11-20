@@ -100,7 +100,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Unomi-Sync", "X-Unomi-Sync-Detail"],
+    expose_headers=["X-Unomi-Sync", "X-Unomi-Sync-Detail", "X-Total-Count"],
 )
 
 

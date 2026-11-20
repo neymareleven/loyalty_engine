@@ -544,6 +544,8 @@ alembic upgrade head
  
  - `GET /transactions`
    - Brand-scoped listing (via `X-Brand`).
+ - `GET /transactions/by-user` — list body unchanged; header `X-Total-Count` = total before `limit`/`offset`
+ - `GET /transactions/by-user-and-type` — same (`X-Total-Count`)
  
  - `GET /transactions/{transaction_id}`
  - `GET /transactions/{transaction_id}/executions`
@@ -553,11 +555,12 @@ alembic upgrade head
  
  - `GET /customers/{brand}/{profile_id}`
  - `GET /customers/{brand}/{profile_id}/wallet`
- - `GET /customers/{brand}/{profile_id}/point-movements`
+ - `GET /customers/{brand}/{profile_id}/point-movements` — list body unchanged; header `X-Total-Count` = total before `limit`/`offset`
+ - `GET /customers/{brand}/{profile_id}/purchase-movements` — same (`X-Total-Count`)
  - `GET /customers/{brand}/{profile_id}/rewards`
  - `POST /customers/{brand}/{profile_id}/rewards/{customer_reward_id}/use`
  - `GET /customers/{brand}/{profile_id}/coupons`
- - `GET /customers/{brand}/{profile_id}/coupons-with-rewards`
+ - `GET /customers/{brand}/{profile_id}/coupons-with-rewards` — same object; extra field `count` (total coupons matching `status`, before pagination)
  - `PATCH /customers/{brand}/{profile_id}/coupons/{customer_coupon_id}/status` — `{ "status": "ISSUED" | "USED" | "EXPIRED" }` (coupon + rewards liées)
  - `GET /customers/{brand}/{profile_id}/loyalty`
  - `GET /customers/{brand}/{profile_id}/loyalty/history` (inclut `ADMIN_SET_TIER`)

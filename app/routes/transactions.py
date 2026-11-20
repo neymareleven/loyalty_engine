@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -156,7 +156,20 @@ def _resolve_customer_for_transaction_list(
     return customer
 
 
-@router.get("/by-user", response_model=list[TransactionOut])
+_TOTAL_COUNT_HEADER = {
+    200: {
+        "description": "Page of matching rows. X-Total-Count is the total before limit/offset.",
+        "headers": {
+            "X-Total-Count": {
+                "description": "Total matching rows before limit and offset",
+                "schema": {"type": "integer"},
+            }
+        },
+    }
+}
+
+
+@router.get("/by-user", response_model=list[TransactionOut], responses=_TOTAL_COUNT_HEADER)
 def list_transactions_by_user(
     brand: str,
     profileId: str,
@@ -165,6 +178,7 @@ def list_transactions_by_user(
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
+    response: Response = None,
 ):
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
 
@@ -184,11 +198,18 @@ def list_transactions_by_user(
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
+    total = q.count()
+    if response is not None:
+        response.headers["X-Total-Count"] = str(int(total))
     rows = q.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
     return [_serialize_transaction_out(tx) for tx in rows]
 
 
-@router.get("/by-user-and-type", response_model=list[TransactionOut])
+@router.get(
+    "/by-user-and-type",
+    response_model=list[TransactionOut],
+    responses=_TOTAL_COUNT_HEADER,
+)
 def list_transactions_by_user_and_type(
     brand: str,
     transactionType: str,
@@ -198,6 +219,7 @@ def list_transactions_by_user_and_type(
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
+    response: Response = None,
 ):
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
 
@@ -218,6 +240,9 @@ def list_transactions_by_user_and_type(
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
+    total = q.count()
+    if response is not None:
+        response.headers["X-Total-Count"] = str(int(total))
     rows = q.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
     return [_serialize_transaction_out(tx) for tx in rows]
 

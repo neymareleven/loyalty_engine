@@ -313,6 +313,8 @@ Statut **courant** (pas l’historique) : `GET /customers/{brand}/{profileId}/lo
 GET /customers/{brand}/{profileId}/purchase-movements?limit=100&offset=0
 ```
 
+Le corps reste une **liste**. Lire `X-Total-Count` pour paginer (total avant `limit`/`offset`). Même en-tête sur `GET /customers/{brand}/{profileId}/point-movements`, `GET /transactions/by-user` et `GET /transactions/by-user-and-type`. `GET /customers/{brand}/{profileId}/coupons-with-rewards` expose `count` dans le JSON (à côté de `limit` / `offset`).
+
 Champs utiles : `quantity`, `amount`, `type` (`EARN` | `DEDUCT` | `EXPIRE`), `expires_at`, `status`, `isExpired`.
 
 **Masquer** ce ledger en mode POINTS. **Masquer** le ledger points dans le bloc qualification palier en mode PURCHASES.

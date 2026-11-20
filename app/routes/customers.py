@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.db import get_db
@@ -315,7 +315,24 @@ def delete_customer(
     return result
 
 
-@router.get("/{brand}/{profile_id}/point-movements", response_model=list[PointMovementOut])
+_TOTAL_COUNT_HEADER = {
+    200: {
+        "description": "Page of matching rows. X-Total-Count is the total before limit/offset.",
+        "headers": {
+            "X-Total-Count": {
+                "description": "Total matching rows before limit and offset",
+                "schema": {"type": "integer"},
+            }
+        },
+    }
+}
+
+
+@router.get(
+    "/{brand}/{profile_id}/point-movements",
+    response_model=list[PointMovementOut],
+    responses=_TOTAL_COUNT_HEADER,
+)
 def list_point_movements(
     brand: str,
     profile_id: str,
@@ -324,6 +341,7 @@ def list_point_movements(
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
+    response: Response = None,
 ):
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
@@ -332,20 +350,21 @@ def list_point_movements(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
+    q = db.query(PointMovement).filter(PointMovement.customer_id == customer.id)
+    total = q.count()
+    if response is not None:
+        response.headers["X-Total-Count"] = str(int(total))
     return [
         serialize_point_movement_out(row)
-        for row in (
-            db.query(PointMovement)
-            .filter(PointMovement.customer_id == customer.id)
-            .order_by(PointMovement.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
+        for row in q.order_by(PointMovement.created_at.desc()).offset(offset).limit(limit).all()
     ]
 
 
-@router.get("/{brand}/{profile_id}/purchase-movements", response_model=list[PurchaseMovementOut])
+@router.get(
+    "/{brand}/{profile_id}/purchase-movements",
+    response_model=list[PurchaseMovementOut],
+    responses=_TOTAL_COUNT_HEADER,
+)
 def list_purchase_movements(
     brand: str,
     profile_id: str,
@@ -354,6 +373,7 @@ def list_purchase_movements(
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
+    response: Response = None,
 ):
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
     customer = _require_customer(db, brand=brand, profile_id=profile_id, email=email)
@@ -365,16 +385,13 @@ def list_purchase_movements(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
+    q = db.query(PurchaseMovement).filter(PurchaseMovement.customer_id == customer.id)
+    total = q.count()
+    if response is not None:
+        response.headers["X-Total-Count"] = str(int(total))
     return [
         serialize_purchase_movement_out(row)
-        for row in (
-            db.query(PurchaseMovement)
-            .filter(PurchaseMovement.customer_id == customer.id)
-            .order_by(PurchaseMovement.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
+        for row in q.order_by(PurchaseMovement.created_at.desc()).offset(offset).limit(limit).all()
     ]
 
 
@@ -461,7 +478,17 @@ def get_customer_entitlements_history(
     )
 
 
-@router.get("/{brand}/{profile_id}/coupons-with-rewards")
+@router.get(
+    "/{brand}/{profile_id}/coupons-with-rewards",
+    responses={
+        200: {
+            "description": (
+                "Coupons with nested rewards. `count` is the total number of coupons "
+                "matching the status filter, before limit/offset. `items`, `limit` and `offset` are unchanged."
+            )
+        }
+    },
+)
 def list_customer_coupons_with_rewards(
     brand: str,
     profile_id: str,
@@ -481,6 +508,7 @@ def list_customer_coupons_with_rewards(
         q = q.filter(CustomerCoupon.status == status)
     coupon_limit = max(1, min(coupon_limit, 500))
     coupon_offset = max(0, coupon_offset)
+    total = q.count()
     coupons = (
         q.order_by(CustomerCoupon.issued_at.desc(), CustomerCoupon.created_at.desc())
         .offset(coupon_offset)
@@ -514,6 +542,7 @@ def list_customer_coupons_with_rewards(
         ],
         "limit": coupon_limit,
         "offset": coupon_offset,
+        "count": total,
     }
 
 
