@@ -40,6 +40,7 @@ Doit répondre `{"ok": true, ...}` et inclure notamment :
 | **Bypass premier achat** | Option marque : si activé, le **tout premier** `sale` d’un montant ≥ seuil accorde immédiatement un **palier existant** choisi. Ce n’est **pas** une règle. |
 | **Changement de mode** | Recalcule les paliers pour le **nouveau** mode (ce n’est **ni** upgrade, **ni** downgrade, **ni** renew). Les `sale` historiques sont d’abord converties en compteurs d’achats. |
 | **Upgrade / downgrade / renew** | Inchangés pour la vie normale d’un palier (upgrade immédiat ; downgrade seulement après expiration de fenêtre ; renew = même palier + fenêtre prolongée). |
+| **Garantie (plancher)** | Un client a **un seul statut** et **une seule durée** (`loyalty_status_expires_at`). Une garantie (`FIRST_PURCHASE_BYPASS`, `ADMIN_SET_TIER`, `MODE_SWITCH_HOLD`) n’est pas un deuxième statut : elle tient un palier **pendant la période du statut en cours**. Dès que le niveau mérité ≥ plancher, elle est révoquée (`GET …/loyalty` → `guarantees: []`). Tant qu’elle est active, `guarantees[].expiresAt` = expiration du statut. À la fin de la période, le moteur recompte : renouvellement si toujours qualifié (`TIER_RENEWED`, cause `expiration`), descente sinon. Plusieurs garanties actives : le plancher effectif est le plus haut. |
 
 ### Ce que le front ne doit PAS faire
 
@@ -259,6 +260,10 @@ Ne **pas** afficher les champs de l’autre mode (pas en secondaire non plus).
 | `PURCHASES` | palier, `purchaseCount`, `purchaseAmountTotal`, `purchasesExpiresAt`, `purchasesToNextTier` **et** `amountToNextTier`, ledger `purchase-movements` | `statusPoints` / `pointsBalance`, `pointsExpiresAt`, `pointsToNextTier`, onglet / ledger points (sauf si l’écran wallet points est un module séparé hors « qualification palier ») |
 
 Toujours afficher : `qualificationMode`, `loyaltyStatus` / palier courant, `lastChange`, `nextTier` **filtré** (libellés de seuils du mode actif seulement).
+
+`guarantees[]` (format inchangé : `source`, `floorTierKey`, `expiresAt`, `createdAt`) ne contient **que** les garanties encore actives, donc celles qui maintiennent réellement le client. Si le client a déjà mérité le palier, le tableau est vide. Ne pas afficher une date d’expiration de garantie distincte de celle du statut.
+
+À l’expiration de la période de statut, le moteur recompte. Un achat ou un gain de points **ne prolonge pas** la période en cours.
 
 Dans `currentTier` / `nextTier` / liste `tiers` :
 

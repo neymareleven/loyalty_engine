@@ -316,17 +316,12 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
             from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
             from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
 
-            status_days = getattr(settings, "loyalty_status_validity_days", None)
-            now = datetime.utcnow()
-            guarantee_expires_at = (
-                (now + timedelta(days=int(status_days))) if status_days is not None else None
-            )
             grant_loyalty_guarantee(
                 db,
                 customer=customer,
                 source=GUARANTEE_BYPASS,
                 floor_tier_key=bypass_tier_key,
-                expires_at=guarantee_expires_at,
+                expires_at=None,
             )
 
         movement = PurchaseMovement(

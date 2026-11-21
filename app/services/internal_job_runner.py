@@ -265,7 +265,7 @@ def run_internal_job_once(
                         customer=c,
                         source=GUARANTEE_MODE_HOLD,
                         floor_tier_key=c.loyalty_status,
-                        expires_at=c.loyalty_status_expires_at,
+                        expires_at=None,
                     )
             update_customer_status(
                 db,

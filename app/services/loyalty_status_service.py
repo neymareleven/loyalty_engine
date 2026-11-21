@@ -257,8 +257,10 @@ def update_customer_status(
     from app.services.loyalty_guarantee_service import (
         ACTIVITY_REASONS,
         active_guarantees,
+        align_guarantee_expiry_to_status,
         cause_from_reason,
         highest_guarantee_floor_key,
+        revoke_consumed_guarantees,
     )
     from app.services.purchase_service import (
         QUALIFICATION_PURCHASES,
@@ -283,6 +285,7 @@ def update_customer_status(
         purchase_amount=purchase_amount,
         qualification_mode=mode,
     )
+    revoke_consumed_guarantees(db, customer=customer, earned_status=earned_status)
     guarantee_floor = highest_guarantee_floor_key(
         db, customer_id=customer.id, brand=customer.brand
     )
@@ -356,6 +359,7 @@ def update_customer_status(
     is_base_tier = bool(base_tier_key) and (new_status == base_tier_key)
     status_will_change = customer.loyalty_status != new_status
     is_activity = reason in ACTIVITY_REASONS
+    is_status_expiry = reason == "LOYALTY_STATUS_EXPIRED"
     should_refresh_window = False
     if is_base_tier:
         if customer.loyalty_status_expires_at is not None or customer.loyalty_status_assigned_at is None:
@@ -365,10 +369,10 @@ def update_customer_status(
         _apply_status_window(customer, now=now, status_days=status_days, is_base_tier=False)
     elif (
         (not status_will_change)
-        and is_activity
         and refresh_window
         and (not is_base_tier)
         and status_days is not None
+        and (is_activity or is_status_expiry)
     ):
         should_refresh_window = True
         _apply_status_window(customer, now=now, status_days=status_days, is_base_tier=False)
@@ -446,6 +450,8 @@ def update_customer_status(
                 depth=depth,
                 also_generic=status_changed and transaction_type != TIER_CHANGED_REASON,
             )
+
+    align_guarantee_expiry_to_status(db, customer=customer)
 
     if sync_unomi:
         from app.services.unomi_profile_service import sync_customer_profile_to_unomi

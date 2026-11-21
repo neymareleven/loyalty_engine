@@ -593,6 +593,7 @@ alembic upgrade head
    - `qualification_mode` = `POINTS` | `PURCHASES`
    - Bypass premier achat : `first_purchase_bypass_enabled`, `first_purchase_bypass_min_amount`, `first_purchase_bypass_tier_key`
    - Validités : `points_validity_days`, `purchase_validity_days`, `loyalty_status_validity_days`
+   - Garanties (bypass / admin / maintien de mode) : un seul statut, une seule durée (`loyalty_status_expires_at`). Révoquées dès que le niveau mérité ≥ plancher. `GET /customers/.../loyalty` → `guarantees` = garanties encore actives seulement. À l’expiration du statut : recompte (`TIER_RENEWED` ou `TIER_DOWNGRADED`, cause `expiration`).
 
  - **Loyalty tiers**: `GET/POST/PATCH/DELETE /admin/loyalty-tiers`
    - Seuils duals : `min_status_points` (POINTS) + `min_purchase_count` / `min_purchase_amount` (PURCHASES)

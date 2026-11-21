@@ -149,15 +149,12 @@ def set_customer_loyalty_tier(
     from app.models.customer_loyalty_guarantee import GUARANTEE_ADMIN
     from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
 
-    settings = get_loyalty_settings(db, brand=customer.brand)
-    status_days = getattr(settings, "loyalty_status_validity_days", None) if settings else None
-    expires_at = (now + timedelta(days=int(status_days))) if status_days is not None else None
     grant_loyalty_guarantee(
         db,
         customer=customer,
         source=GUARANTEE_ADMIN,
         floor_tier_key=tier_key,
-        expires_at=expires_at,
+        expires_at=None,
     )
 
     update_customer_status(
