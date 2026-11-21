@@ -134,7 +134,43 @@
           "description": { "type": "string" },
           "status": { "type": "string" },
           "expiresAt": { "type": "string", "format": "date-time", "nullable": true },
-          "usedAt": { "type": "string", "format": "date-time", "nullable": true }
+          "usedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "reservedRedemptionId": {
+            "type": "string",
+            "description": "Latest RESERVED Redemption id. Present only when status is RESERVED."
+          },
+          "reservedUntil": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Present only when status is RESERVED."
+          }
+        }
+      },
+      "WalletCoupon": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "code": { "type": "string" },
+          "name": { "type": "string" },
+          "status": { "type": "string" },
+          "expiresAt": { "type": "string", "format": "date-time", "nullable": true },
+          "usedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "shareable": { "type": "boolean" },
+          "reservedRedemptionId": {
+            "type": "string",
+            "description": "Latest RESERVED Redemption id. Present only when status is RESERVED. Use with POST /v1/storefront/redemptions/{redemption_id}/release."
+          },
+          "reservedUntil": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Present only when status is RESERVED."
+          },
+          "rewards": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WalletReward" }
+          }
         }
       },
       "ValidateResponse": {
@@ -172,7 +208,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Wallet. Coupons[].rewards and standalone rewards include scope, description, products, stackable. tier.rank is the numeric level rank."
+            "description": "Wallet. Stale reservations (status RESERVED with reserved_until empty or in the past) are returned as ISSUED without a DB write. reservedRedemptionId and reservedUntil are present only for an active RESERVED coupon or reward. Nested coupon rewards follow the same rule. Coupons[].rewards and standalone rewards include scope, description, products, stackable. tier.rank is the numeric level rank."
           },
           "401": { "description": "Missing or invalid API key" },
           "404": { "description": "CUSTOMER_NOT_FOUND" }

@@ -12,6 +12,7 @@ from app.models.coupon_type import CouponType
 from app.models.customer_coupon import CustomerCoupon
 from app.models.customer_reward import CustomerReward
 from app.models.loyalty_tier import LoyaltyTier
+from app.models.redemption import Redemption
 from app.models.transaction import Transaction
 from sqlalchemy import and_, or_
 
@@ -30,6 +31,7 @@ from app.services.redemption_service import (
     release as release_redemption,
     reserve as reserve_redemption,
     resolve_storefront_customer,
+    _reservation_is_stale,
 )
 from app.services.storefront_audit import record_storefront_audit
 from app.services.storefront_auth import (
@@ -116,10 +118,48 @@ def _wallet_effective_status(row, now: datetime) -> str:
     status = str(getattr(row, "status", "") or "")
     if status in {"USED", "EXPIRED"}:
         return status
+    if status == "RESERVED" and _reservation_is_stale(getattr(row, "reserved_until", None), now):
+        status = "ISSUED"
     expires_at = getattr(row, "expires_at", None)
     if status == "ISSUED" and expires_at is not None and expires_at <= now:
         return "EXPIRED"
     return status
+
+
+def _wallet_reservation_index(db: Session, customer_id) -> tuple[dict, dict]:
+    rows = (
+        db.query(Redemption)
+        .filter(Redemption.customer_id == customer_id)
+        .filter(Redemption.status == "RESERVED")
+        .order_by(Redemption.created_at.desc())
+        .all()
+    )
+    by_coupon: dict = {}
+    by_reward: dict = {}
+    for row in rows:
+        if row.customer_coupon_id is not None:
+            by_coupon.setdefault(str(row.customer_coupon_id), row)
+        if row.customer_reward_id is not None:
+            by_reward.setdefault(str(row.customer_reward_id), row)
+    return by_coupon, by_reward
+
+
+def _wallet_reservation_fields(row, now: datetime, latest: dict | None = None) -> dict:
+    if _wallet_effective_status(row, now) != "RESERVED":
+        return {}
+    rid = getattr(row, "reserved_by_redemption_id", None)
+    until = getattr(row, "reserved_until", None)
+    if rid is None and latest:
+        found = latest.get(str(row.id))
+        if found is not None:
+            rid = found.id
+            until = until or getattr(found, "reserved_until", None)
+    if rid is None:
+        return {}
+    return {
+        "reservedRedemptionId": str(rid),
+        "reservedUntil": until,
+    }
 
 
 def _wallet_products_map(db: Session, customer_id) -> dict:
@@ -131,28 +171,59 @@ def _wallet_products_map(db: Session, customer_id) -> dict:
 
 
 def _wallet_coupon(
-    db: Session, coupon: CustomerCoupon, *, status: str | None = None, products_map: dict | None = None
+    db: Session,
+    coupon: CustomerCoupon,
+    *,
+    status: str | None = None,
+    products_map: dict | None = None,
+    now: datetime | None = None,
+    latest_by_coupon: dict | None = None,
+    latest_by_reward: dict | None = None,
 ) -> dict:
+    now = now or datetime.utcnow()
     ct = None
     if coupon.coupon_type_id:
         ct = db.query(CouponType).filter(CouponType.id == coupon.coupon_type_id).first()
     name = None
     if isinstance(coupon.payload, dict):
         name = (coupon.payload.get("couponType") or {}).get("name")
+    nested = (
+        db.query(CustomerReward).filter(CustomerReward.customer_coupon_id == coupon.id).all()
+    )
+    nested_by_id = {str(row.id): row for row in nested}
     snaps = coupon_reward_snapshots(db, coupon)
-    return {
+    rewards = []
+    for snap in snaps:
+        item = present_wallet_reward(snap, products_map or {})
+        nested_row = nested_by_id.get(str(snap.get("customerRewardId") or ""))
+        if nested_row is not None:
+            nested_status = _wallet_effective_status(nested_row, now)
+            item["status"] = nested_status
+            item.update(_wallet_reservation_fields(nested_row, now, latest_by_reward))
+        rewards.append(item)
+    data = {
         "id": str(coupon.id),
         "code": coupon.code,
         "name": name or (ct.name if ct else None),
-        "status": status or coupon.status,
+        "status": status or _wallet_effective_status(coupon, now),
         "expiresAt": coupon.expires_at,
         "usedAt": coupon.used_at,
         "shareable": bool(coupon.shareable),
-        "rewards": [present_wallet_reward(snap, products_map or {}) for snap in snaps],
+        "rewards": rewards,
     }
+    data.update(_wallet_reservation_fields(coupon, now, latest_by_coupon))
+    return data
 
 
-def _wallet_standalone_reward(row: CustomerReward, products_map: dict, *, status: str | None = None) -> dict:
+def _wallet_standalone_reward(
+    row: CustomerReward,
+    products_map: dict,
+    *,
+    status: str | None = None,
+    now: datetime | None = None,
+    latest_by_reward: dict | None = None,
+) -> dict:
+    now = now or datetime.utcnow()
     payload = row.payload if isinstance(row.payload, dict) else {}
     benefit = payload.get("benefit") if isinstance(payload.get("benefit"), dict) else {}
     snap = dict(benefit)
@@ -161,9 +232,10 @@ def _wallet_standalone_reward(row: CustomerReward, products_map: dict, *, status
     snap["customerRewardId"] = str(row.id)
     snap["name"] = snap.get("name") or payload.get("name")
     item = present_wallet_reward(snap, products_map)
-    item["status"] = status or row.status
+    item["status"] = status or _wallet_effective_status(row, now)
     item["expiresAt"] = row.expires_at
     item["usedAt"] = row.used_at
+    item.update(_wallet_reservation_fields(row, now, latest_by_reward))
     return item
 
 
@@ -199,23 +271,44 @@ def storefront_wallet(
         .all()
     )
     products_map = _wallet_products_map(db, customer.id)
-    live_coupons = [
-        _wallet_coupon(db, c, products_map=products_map)
-        for c in coupons
-        if c.expires_at is None or c.expires_at > now
-    ]
-    live_rewards = [
-        _wallet_standalone_reward(r, products_map)
-        for r in standalone
-        if r.expires_at is None or r.expires_at > now or r.status == "RESERVED"
-    ]
+    latest_by_coupon, latest_by_reward = _wallet_reservation_index(db, customer.id)
+    live_coupons = []
+    for c in coupons:
+        status = _wallet_effective_status(c, now)
+        if status not in {"ISSUED", "RESERVED"}:
+            continue
+        live_coupons.append(
+            _wallet_coupon(
+                db,
+                c,
+                status=status,
+                products_map=products_map,
+                now=now,
+                latest_by_coupon=latest_by_coupon,
+                latest_by_reward=latest_by_reward,
+            )
+        )
+    live_rewards = []
+    for r in standalone:
+        status = _wallet_effective_status(r, now)
+        if status not in {"ISSUED", "RESERVED"}:
+            continue
+        live_rewards.append(
+            _wallet_standalone_reward(
+                r,
+                products_map,
+                status=status,
+                now=now,
+                latest_by_reward=latest_by_reward,
+            )
+        )
     if (include or "").strip().lower() == "past":
         past_coupons = (
             db.query(CustomerCoupon)
             .filter(CustomerCoupon.customer_id == customer.id)
             .filter(
                 or_(
-                    CustomerCoupon.status.in_(("USED", "EXPIRED")),
+                    CustomerCoupon.status.in_(("USED", "EXPIRED", "RESERVED")),
                     and_(
                         CustomerCoupon.status == "ISSUED",
                         CustomerCoupon.expires_at.isnot(None),
@@ -231,7 +324,7 @@ def storefront_wallet(
             .filter(CustomerReward.customer_coupon_id.is_(None))
             .filter(
                 or_(
-                    CustomerReward.status.in_(("USED", "EXPIRED")),
+                    CustomerReward.status.in_(("USED", "EXPIRED", "RESERVED")),
                     and_(
                         CustomerReward.status == "ISSUED",
                         CustomerReward.expires_at.isnot(None),
@@ -252,7 +345,15 @@ def storefront_wallet(
             status = _wallet_effective_status(row, now)
             if status not in {"USED", "EXPIRED"}:
                 continue
-            item = _wallet_coupon(db, row, status=status, products_map=products_map)
+            item = _wallet_coupon(
+                db,
+                row,
+                status=status,
+                products_map=products_map,
+                now=now,
+                latest_by_coupon=latest_by_coupon,
+                latest_by_reward=latest_by_reward,
+            )
             if item["id"] in seen_c:
                 continue
             extra_c.append(item)
@@ -267,7 +368,15 @@ def storefront_wallet(
             rid = str(row.id)
             if rid in seen_r:
                 continue
-            extra_r.append(_wallet_standalone_reward(row, products_map, status=status))
+            extra_r.append(
+                _wallet_standalone_reward(
+                    row,
+                    products_map,
+                    status=status,
+                    now=now,
+                    latest_by_reward=latest_by_reward,
+                )
+            )
             if len(extra_r) >= 20:
                 break
         live_coupons.extend(extra_c)

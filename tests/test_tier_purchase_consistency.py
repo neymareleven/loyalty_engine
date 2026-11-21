@@ -9,7 +9,12 @@ from app.routes.loyalty_tiers import (
     target_mode_threshold_errors,
     _validate_tier_payload,
 )
-from app.routes.storefront import _tier_brief, _wallet_effective_status
+from app.routes.storefront import (
+    _tier_brief,
+    _wallet_effective_status,
+    _wallet_reservation_fields,
+    _wallet_standalone_reward,
+)
 
 
 def _rows(*pairs):
@@ -275,7 +280,188 @@ def test_wallet_effective_status_expired_issued():
     now = datetime.utcnow()
     row = SimpleNamespace(status="ISSUED", expires_at=now - timedelta(days=1))
     assert _wallet_effective_status(row, now) == "EXPIRED"
-    live = SimpleNamespace(status="RESERVED", expires_at=now - timedelta(days=1))
+    live = SimpleNamespace(
+        status="RESERVED",
+        expires_at=now - timedelta(days=1),
+        reserved_until=now + timedelta(hours=1),
+    )
     assert _wallet_effective_status(live, now) == "RESERVED"
     used = SimpleNamespace(status="USED", expires_at=None)
     assert _wallet_effective_status(used, now) == "USED"
+
+
+def test_wallet_effective_status_stale_reservation():
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    stale_empty = SimpleNamespace(status="RESERVED", expires_at=now + timedelta(days=1), reserved_until=None)
+    assert _wallet_effective_status(stale_empty, now) == "ISSUED"
+    stale_past = SimpleNamespace(
+        status="RESERVED",
+        expires_at=now + timedelta(days=1),
+        reserved_until=now - timedelta(minutes=1),
+    )
+    assert _wallet_effective_status(stale_past, now) == "ISSUED"
+    stale_and_expired = SimpleNamespace(
+        status="RESERVED",
+        expires_at=now - timedelta(days=1),
+        reserved_until=now - timedelta(minutes=1),
+    )
+    assert _wallet_effective_status(stale_and_expired, now) == "EXPIRED"
+
+
+def test_wallet_reservation_fields_only_when_active():
+    from datetime import datetime, timedelta
+    from uuid import uuid4
+
+    now = datetime.utcnow()
+    rid = uuid4()
+    until = now + timedelta(minutes=20)
+    active = SimpleNamespace(
+        id=uuid4(),
+        status="RESERVED",
+        expires_at=None,
+        reserved_until=until,
+        reserved_by_redemption_id=rid,
+    )
+    fields = _wallet_reservation_fields(active, now, {})
+    assert fields["reservedRedemptionId"] == str(rid)
+    assert fields["reservedUntil"] == until
+    stale = SimpleNamespace(
+        id=uuid4(),
+        status="RESERVED",
+        expires_at=None,
+        reserved_until=now - timedelta(minutes=1),
+        reserved_by_redemption_id=rid,
+    )
+    assert _wallet_reservation_fields(stale, now, {}) == {}
+
+
+def test_wallet_standalone_reward_stale_vs_active_reservation():
+    from datetime import datetime, timedelta
+    from uuid import uuid4
+
+    now = datetime.utcnow()
+    rid = uuid4()
+    until = now + timedelta(minutes=10)
+    payload = {"name": "Gift", "benefit": {"benefitType": "PERCENT_DISCOUNT", "benefitValue": 10}}
+    active = SimpleNamespace(
+        id=uuid4(),
+        reward_id=None,
+        payload=payload,
+        status="RESERVED",
+        expires_at=None,
+        used_at=None,
+        reserved_until=until,
+        reserved_by_redemption_id=rid,
+    )
+    presented = _wallet_standalone_reward(active, {}, now=now)
+    assert presented["status"] == "RESERVED"
+    assert presented["reservedRedemptionId"] == str(rid)
+    assert presented["reservedUntil"] == until
+    stale = SimpleNamespace(
+        id=uuid4(),
+        reward_id=None,
+        payload=payload,
+        status="RESERVED",
+        expires_at=None,
+        used_at=None,
+        reserved_until=now - timedelta(minutes=1),
+        reserved_by_redemption_id=rid,
+    )
+    presented_stale = _wallet_standalone_reward(stale, {}, now=now)
+    assert presented_stale["status"] == "ISSUED"
+    assert "reservedRedemptionId" not in presented_stale
+    assert "reservedUntil" not in presented_stale
+
+
+def test_wallet_reservation_fields_uses_latest_redemption():
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    until = now + timedelta(minutes=5)
+    rid = uuid4()
+    row = SimpleNamespace(
+        id=uuid4(),
+        status="RESERVED",
+        expires_at=None,
+        reserved_until=until,
+        reserved_by_redemption_id=None,
+    )
+    fields = _wallet_reservation_fields(
+        row,
+        now,
+        {str(row.id): SimpleNamespace(id=rid, reserved_until=until)},
+    )
+    assert fields["reservedRedemptionId"] == str(rid)
+    assert fields["reservedUntil"] == until
+
+
+def test_wallet_coupon_nested_reward_reservation(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.routes.storefront import _wallet_coupon
+
+    now = datetime.utcnow()
+    until = now + timedelta(minutes=8)
+    coupon_id = uuid4()
+    cr_id = uuid4()
+    rid = uuid4()
+    coupon = SimpleNamespace(
+        id=coupon_id,
+        coupon_type_id=None,
+        payload=None,
+        code="LOY-TEST",
+        status="RESERVED",
+        expires_at=None,
+        used_at=None,
+        shareable=False,
+        reserved_until=until,
+        reserved_by_redemption_id=rid,
+    )
+    nested = SimpleNamespace(
+        id=cr_id,
+        status="RESERVED",
+        expires_at=None,
+        reserved_until=until,
+        reserved_by_redemption_id=rid,
+    )
+
+    class Q:
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return None
+
+        def all(self):
+            return [nested]
+
+    class DB:
+        def query(self, model):
+            return Q()
+
+    monkeypatch.setattr(
+        "app.routes.storefront.coupon_reward_snapshots",
+        lambda db, coupon: [
+            {
+                "customerRewardId": str(cr_id),
+                "name": "Offre",
+                "benefitType": "PERCENT_DISCOUNT",
+                "benefitValue": 10,
+            }
+        ],
+    )
+    item = _wallet_coupon(DB(), coupon, now=now)
+    assert item["status"] == "RESERVED"
+    assert item["reservedRedemptionId"] == str(rid)
+    assert item["rewards"][0]["status"] == "RESERVED"
+    assert item["rewards"][0]["reservedRedemptionId"] == str(rid)
+
+    coupon.reserved_until = now - timedelta(minutes=1)
+    nested.reserved_until = now - timedelta(minutes=1)
+    stale_item = _wallet_coupon(DB(), coupon, now=now)
+    assert stale_item["status"] == "ISSUED"
+    assert "reservedRedemptionId" not in stale_item
+    assert stale_item["rewards"][0]["status"] == "ISSUED"
+    assert "reservedRedemptionId" not in stale_item["rewards"][0]
