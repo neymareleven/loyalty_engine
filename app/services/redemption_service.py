@@ -447,6 +447,11 @@ def _release_reservation(db: Session, row: Redemption, *, reason: str) -> None:
             coupon.status = "EXPIRED" if expired else "ISSUED"
             coupon.reserved_until = None
             coupon.reserved_by_redemption_id = None
+            for cr in db.query(CustomerReward).filter(CustomerReward.customer_coupon_id == coupon.id).all():
+                if cr.status == "RESERVED":
+                    cr.status = "ISSUED"
+                    cr.reserved_until = None
+                    cr.reserved_by_redemption_id = None
     if row.customer_reward_id:
         reward = (
             db.query(CustomerReward)
@@ -687,9 +692,11 @@ def release(
             coupon.reserved_until = None
             coupon.reserved_by_redemption_id = None
             for cr in db.query(CustomerReward).filter(CustomerReward.customer_coupon_id == coupon.id).all():
-                if cr.status == "USED":
+                if cr.status in {"USED", "RESERVED"}:
                     cr.status = "ISSUED"
                     cr.used_at = None
+                    cr.reserved_until = None
+                    cr.reserved_by_redemption_id = None
         if row.customer_reward_id:
             reward = db.query(CustomerReward).filter(CustomerReward.id == row.customer_reward_id).with_for_update().one()
             reward.status = "ISSUED"

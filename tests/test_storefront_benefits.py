@@ -1568,3 +1568,382 @@ def test_present_wallet_reward_includes_scope_and_products():
     assert presented["stackable"] is False
     assert presented["products"] == [{"id": "woo-1", "name": "Mug", "quantity": 1}]
     assert presented["description"] == "Produit offert"
+
+
+def _release_db(*, row, coupon=None, nested=None, standalone=None):
+    from app.models.customer_coupon import CustomerCoupon
+    from app.models.customer_reward import CustomerReward
+    from app.models.redemption import Redemption
+
+    nested = nested or []
+
+    class Chain:
+        def __init__(self, result, many=None):
+            self.result = result
+            self.many = many if many is not None else ([result] if result is not None else [])
+
+        def filter(self, *a, **k):
+            return self
+
+        def with_for_update(self):
+            return self
+
+        def first(self):
+            return self.result
+
+        def one(self):
+            return self.result
+
+        def all(self):
+            return self.many
+
+    class DB:
+        def __init__(self):
+            self.flushed = False
+
+        def query(self, model):
+            if model is Redemption:
+                return Chain(row)
+            if model is CustomerCoupon:
+                return Chain(coupon)
+            if model is CustomerReward:
+                if standalone is not None:
+                    return Chain(standalone, many=[standalone])
+                return Chain(nested[0] if nested else None, many=nested)
+            return Chain(None)
+
+        def flush(self):
+            self.flushed = True
+
+    return DB()
+
+
+def test_release_reserved_coupon_sets_issued_and_clears_reservation():
+    from datetime import datetime, timedelta
+
+    from app.services.redemption_service import release
+
+    rid = uuid4()
+    coupon_id = uuid4()
+    until = datetime.utcnow() + timedelta(minutes=20)
+    nested = SimpleNamespace(
+        status="RESERVED",
+        reserved_until=until,
+        reserved_by_redemption_id=rid,
+        used_at=None,
+    )
+    coupon = SimpleNamespace(
+        id=coupon_id,
+        status="RESERVED",
+        expires_at=None,
+        used_at=None,
+        reserved_until=until,
+        reserved_by_redemption_id=rid,
+    )
+    row = SimpleNamespace(
+        id=rid,
+        brand="batira",
+        status="RESERVED",
+        customer_coupon_id=coupon_id,
+        customer_reward_id=None,
+        order_ref=None,
+        reserved_until=until,
+        benefit=[],
+    )
+    db = _release_db(row=row, coupon=coupon, nested=[nested])
+    result = release(db, redemption_id=str(rid), reason="cart_abandoned", brand="batira")
+    assert result["status"] == "RELEASED"
+    assert coupon.status == "ISSUED"
+    assert coupon.reserved_until is None
+    assert coupon.reserved_by_redemption_id is None
+    assert nested.status == "ISSUED"
+    assert nested.reserved_until is None
+    assert nested.reserved_by_redemption_id is None
+
+
+def test_release_committed_order_cancelled_reissues_coupon():
+    from datetime import datetime
+
+    from app.services.redemption_service import release
+
+    rid = uuid4()
+    coupon_id = uuid4()
+    nested = SimpleNamespace(
+        status="USED",
+        used_at=datetime.utcnow(),
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+    )
+    coupon = SimpleNamespace(
+        id=coupon_id,
+        status="USED",
+        expires_at=None,
+        used_at=datetime.utcnow(),
+        reserved_until=None,
+        reserved_by_redemption_id=None,
+    )
+    row = SimpleNamespace(
+        id=rid,
+        brand="batira",
+        status="COMMITTED",
+        customer_coupon_id=coupon_id,
+        customer_reward_id=None,
+        order_ref="wc_order_1",
+        reserved_until=None,
+        benefit={"benefits": []},
+    )
+    db = _release_db(row=row, coupon=coupon, nested=[nested])
+    result = release(db, redemption_id=str(rid), reason="order_cancelled", brand="batira")
+    assert result["status"] == "RELEASED"
+    assert coupon.status == "ISSUED"
+    assert coupon.used_at is None
+    assert coupon.reserved_until is None
+    assert coupon.reserved_by_redemption_id is None
+    assert nested.status == "ISSUED"
+    assert nested.used_at is None
+
+
+def test_storefront_release_creates_json_safe_audit(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from starlette.requests import Request
+
+    from app.models.storefront_audit_event import StorefrontAuditEvent
+    from app.routes.storefront import ReleaseIn, storefront_release
+
+    until = datetime.utcnow() + timedelta(minutes=15)
+    rid = uuid4()
+    coupon = SimpleNamespace(status="RESERVED", reserved_until=until, reserved_by_redemption_id=rid)
+
+    def fake_release(db, **kwargs):
+        coupon.status = "ISSUED"
+        coupon.reserved_until = None
+        coupon.reserved_by_redemption_id = None
+        return {
+            "redemptionId": str(rid),
+            "status": "RELEASED",
+            "reservedUntil": until,
+            "orderRef": None,
+            "benefits": [],
+            "applicable": False,
+            "reasons": [],
+        }
+
+    monkeypatch.setattr("app.routes.storefront.release_redemption", fake_release)
+
+    class DB:
+        def __init__(self):
+            self.added = None
+            self.committed = False
+
+        def add(self, obj):
+            self.added = obj
+
+        def flush(self):
+            pass
+
+        def commit(self):
+            self.committed = True
+
+    db = DB()
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+    )
+    client = SimpleNamespace(id=uuid4(), brand="batira")
+    result = storefront_release(str(rid), ReleaseIn(reason="cart_abandoned"), request, client, db)
+    assert result["status"] == "RELEASED"
+    assert coupon.status == "ISSUED"
+    assert db.committed is True
+    assert isinstance(db.added, StorefrontAuditEvent)
+    assert db.added.action == "release"
+    assert db.added.response["status"] == "RELEASED"
+    assert db.added.response["redemptionId"] == str(rid)
+    assert "reservedUntil" not in db.added.response
+
+
+def test_storefront_commit_then_release_order_cancelled_audits(monkeypatch):
+    from datetime import datetime
+
+    from starlette.requests import Request
+
+    from app.models.storefront_audit_event import StorefrontAuditEvent
+    from app.routes.storefront import CommitIn, ReleaseIn, storefront_commit, storefront_release
+
+    rid = str(uuid4())
+    coupon = SimpleNamespace(
+        status="RESERVED",
+        used_at=None,
+        reserved_until=datetime.utcnow(),
+        reserved_by_redemption_id=rid,
+    )
+
+    def fake_commit(db, **kwargs):
+        coupon.status = "USED"
+        coupon.used_at = datetime.utcnow()
+        coupon.reserved_until = None
+        coupon.reserved_by_redemption_id = None
+        return {
+            "redemptionId": rid,
+            "status": "COMMITTED",
+            "reservedUntil": datetime.utcnow(),
+            "orderRef": kwargs.get("order_ref"),
+            "reasons": [],
+            "applicable": True,
+        }
+
+    def fake_release(db, **kwargs):
+        assert kwargs.get("reason") == "order_cancelled"
+        coupon.status = "ISSUED"
+        coupon.used_at = None
+        return {
+            "redemptionId": rid,
+            "status": "RELEASED",
+            "reservedUntil": datetime.utcnow(),
+            "reasons": [],
+            "applicable": False,
+        }
+
+    monkeypatch.setattr("app.routes.storefront.commit_redemption", fake_commit)
+    monkeypatch.setattr("app.routes.storefront.release_redemption", fake_release)
+
+    class DB:
+        def __init__(self):
+            self.events = []
+            self.committed = 0
+
+        def add(self, obj):
+            self.events.append(obj)
+
+        def flush(self):
+            pass
+
+        def commit(self):
+            self.committed += 1
+
+    db = DB()
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "headers": [(b"idempotency-key", b"commit-key-1")],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+    )
+    client = SimpleNamespace(id=uuid4(), brand="batira")
+    committed = storefront_commit(rid, CommitIn(orderRef="wc_order_9"), request, client, db)
+    assert committed["status"] == "COMMITTED"
+    released = storefront_release(rid, ReleaseIn(reason="order_cancelled"), request, client, db)
+    assert released["status"] == "RELEASED"
+    assert coupon.status == "ISSUED"
+    assert db.committed == 2
+    assert [e.action for e in db.events] == ["commit", "release"]
+    assert all(isinstance(e, StorefrontAuditEvent) for e in db.events)
+    assert all("reservedUntil" not in (e.response or {}) for e in db.events)
+
+
+def test_audit_failure_does_not_block_release(monkeypatch):
+    from datetime import datetime
+
+    from starlette.requests import Request
+
+    from app.routes.storefront import ReleaseIn, storefront_release
+
+    coupon = SimpleNamespace(status="RESERVED", reserved_until=datetime.utcnow(), reserved_by_redemption_id="x")
+
+    def fake_release(db, **kwargs):
+        coupon.status = "ISSUED"
+        coupon.reserved_until = None
+        coupon.reserved_by_redemption_id = None
+        return {"redemptionId": "x", "status": "RELEASED", "reservedUntil": datetime.utcnow(), "reasons": []}
+
+    monkeypatch.setattr("app.routes.storefront.release_redemption", fake_release)
+
+    class DB:
+        def __init__(self):
+            self.committed = False
+
+        def add(self, obj):
+            raise TypeError("datetime is not JSON serializable")
+
+        def flush(self):
+            raise TypeError("datetime is not JSON serializable")
+
+        def commit(self):
+            self.committed = True
+
+    db = DB()
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+    )
+    result = storefront_release(
+        "x",
+        ReleaseIn(reason="cart_abandoned"),
+        request,
+        SimpleNamespace(id=uuid4(), brand="batira"),
+        db,
+    )
+    assert result["status"] == "RELEASED"
+    assert coupon.status == "ISSUED"
+    assert db.committed is True
+
+
+def test_record_storefront_audit_encodes_datetime():
+    from datetime import datetime
+
+    from app.models.storefront_audit_event import StorefrontAuditEvent
+    from app.services.storefront_audit import record_storefront_audit
+
+    class DB:
+        def __init__(self):
+            self.added = None
+
+        def add(self, obj):
+            self.added = obj
+
+        def flush(self):
+            pass
+
+    db = DB()
+    record_storefront_audit(
+        db,
+        brand="batira",
+        site_id="1",
+        action="release",
+        profile_id=None,
+        redemption_id="abc",
+        request={"reason": "cart_abandoned"},
+        response={"status": "RELEASED", "reservedUntil": datetime(2026, 1, 1, 12, 0, 0)},
+    )
+    assert isinstance(db.added, StorefrontAuditEvent)
+    assert isinstance(db.added.response["reservedUntil"], str)

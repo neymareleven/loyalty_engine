@@ -98,6 +98,16 @@ class ReleaseIn(BaseModel):
     reason: str = "cart_abandoned"
 
 
+def _audit_redemption_response(result: dict | None) -> dict:
+    result = result or {}
+    return {
+        "status": result.get("status"),
+        "redemptionId": result.get("redemptionId"),
+        "reasons": result.get("reasons"),
+        "applicable": result.get("applicable"),
+    }
+
+
 def _cart_dict(cart: CartIn | None) -> dict:
     if cart is None:
         return {}
@@ -618,12 +628,7 @@ def storefront_reserve(
         profile_id=customer.profile_id,
         redemption_id=str(result.get("redemptionId")) if result.get("redemptionId") else None,
         request=body.model_dump() if hasattr(body, "model_dump") else None,
-        response={
-            "applicable": result.get("applicable"),
-            "status": result.get("status"),
-            "redemptionId": result.get("redemptionId"),
-            "reasons": result.get("reasons"),
-        },
+        response=_audit_redemption_response(result),
     )
     db.commit()
     return result
@@ -654,7 +659,7 @@ def storefront_commit(
         profile_id=None,
         redemption_id=redemption_id,
         request={"orderRef": body.orderRef},
-        response=result,
+        response=_audit_redemption_response(result),
     )
     db.commit()
     return result
@@ -683,7 +688,7 @@ def storefront_release(
         profile_id=None,
         redemption_id=redemption_id,
         request={"reason": body.reason},
-        response=result,
+        response=_audit_redemption_response(result),
     )
     db.commit()
     return result
