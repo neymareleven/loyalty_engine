@@ -261,6 +261,9 @@ def update_customer_status(
         cause_from_reason,
         highest_guarantee_floor_key,
         revoke_consumed_guarantees,
+        revoke_expired_guarantees,
+        revoke_guarantees_above_status,
+        revoke_open_ended_guarantees_on_base,
     )
     from app.services.purchase_service import (
         QUALIFICATION_PURCHASES,
@@ -286,6 +289,10 @@ def update_customer_status(
         qualification_mode=mode,
     )
     revoke_consumed_guarantees(db, customer=customer, earned_status=earned_status)
+    revoke_expired_guarantees(db, customer_id=customer.id)
+    revoke_open_ended_guarantees_on_base(db, customer=customer)
+    if not (min_tier_key or "").strip():
+        revoke_guarantees_above_status(db, customer=customer)
     guarantee_floor = highest_guarantee_floor_key(
         db, customer_id=customer.id, brand=customer.brand
     )
@@ -451,6 +458,7 @@ def update_customer_status(
                 also_generic=status_changed and transaction_type != TIER_CHANGED_REASON,
             )
 
+    revoke_guarantees_above_status(db, customer=customer)
     align_guarantee_expiry_to_status(db, customer=customer)
 
     if sync_unomi:

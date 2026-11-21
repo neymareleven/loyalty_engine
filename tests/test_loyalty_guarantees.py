@@ -201,6 +201,8 @@ def test_bypass_holds_until_status_window_ends(monkeypatch):
     g.expires_at = customer.loyalty_status_expires_at
     update_customer_status(db, customer, reason="LOYALTY_STATUS_EXPIRED", refresh_window=True)
     assert customer.loyalty_status == "bronze"
+    assert g.revoked_at is not None
+    assert serialize_guarantees(db, customer_id=customer.id) == []
 
 
 def test_renewal_aligns_guarantee_expiry(monkeypatch):
@@ -302,11 +304,14 @@ def test_status_expiry_downgrades_when_not_qualified(monkeypatch):
     _patch_status(monkeypatch, earned="bronze", events=events, mode="PURCHASES")
     past = datetime.utcnow() - timedelta(hours=2)
     customer = _customer(loyalty_status="or", loyalty_status_expires_at=past)
-    db = _DB()
+    g = _guarantee(customer_id=customer.id, expires_at=past)
+    db = _DB(guarantees=[g])
     update_customer_status(db, customer, reason="LOYALTY_STATUS_EXPIRED", refresh_window=True)
     assert customer.loyalty_status == "bronze"
     assert "TIER_DOWNGRADED" in events
     assert customer.loyalty_status_expires_at is None
+    assert g.revoked_at is not None
+    assert serialize_guarantees(db, customer_id=customer.id) == []
 
 
 def test_purchase_does_not_renew_window(monkeypatch):
@@ -329,3 +334,95 @@ def test_base_tier_has_no_expiry_event(monkeypatch):
     assert customer.loyalty_status == "bronze"
     assert customer.loyalty_status_expires_at is None
     assert events == []
+
+
+def _patch_cleanup(monkeypatch, *, earned="bronze"):
+    monkeypatch.setattr(
+        "app.services.loyalty_status_service.compute_loyalty_status_from_tiers",
+        lambda *a, **k: earned,
+    )
+    monkeypatch.setattr(
+        "app.services.loyalty_status_service._get_tier_rank_value",
+        lambda db, brand, key: RANKS.get(key),
+    )
+    monkeypatch.setattr(
+        "app.services.loyalty_status_service._get_base_tier_key",
+        lambda db, brand: "bronze",
+    )
+    monkeypatch.setattr(
+        "app.services.purchase_service.get_qualification_mode",
+        lambda db, brand: "PURCHASES",
+    )
+    monkeypatch.setattr(
+        "app.services.purchase_service.get_purchase_balances",
+        lambda db, cid: (0, 0),
+    )
+
+
+def test_cleanup_expired_guarantee_on_bronze_is_revoked_not_open_ended(monkeypatch):
+    _patch_cleanup(monkeypatch, earned="bronze")
+    past = datetime.utcnow() - timedelta(days=1)
+    customer = _customer(
+        loyalty_status="bronze",
+        loyalty_status_expires_at=None,
+        status_points=0,
+        purchase_count=0,
+    )
+    g = _guarantee(customer_id=customer.id, expires_at=past)
+    db = _DB(guarantees=[g], customers=[customer])
+    stats = cleanup_loyalty_guarantees(db)
+    assert stats["revoked"] == 1
+    assert g.revoked_at is not None
+    assert g.expires_at == past
+    assert serialize_guarantees(db, customer_id=customer.id) == []
+
+    ghost = _guarantee(customer_id=customer.id, expires_at=None)
+    db2 = _DB(guarantees=[ghost], customers=[customer])
+    cleanup_loyalty_guarantees(db2)
+    assert ghost.revoked_at is not None
+    assert ghost.expires_at is None
+    assert serialize_guarantees(db2, customer_id=customer.id) == []
+
+
+def test_invariant_revokes_or_floor_while_customer_is_bronze(monkeypatch):
+    events = []
+    _patch_status(monkeypatch, earned="bronze", events=events, mode="PURCHASES")
+    customer = _customer(loyalty_status="bronze", loyalty_status_expires_at=None)
+    g = _guarantee(
+        customer_id=customer.id,
+        expires_at=datetime.utcnow() + timedelta(days=200),
+    )
+    db = _DB(guarantees=[g])
+    update_customer_status(db, customer, reason="PURCHASE_RECORDED", refresh_window=False)
+    assert customer.loyalty_status == "bronze"
+    assert g.revoked_at is not None
+    assert serialize_guarantees(db, customer_id=customer.id) == []
+    assert "TIER_UPGRADED" not in events
+    assert "FIRST_PURCHASE_BYPASS" not in events
+
+    _patch_cleanup(monkeypatch, earned="bronze")
+    live = _guarantee(
+        customer_id=customer.id,
+        expires_at=datetime.utcnow() + timedelta(days=200),
+    )
+    db_cleanup = _DB(guarantees=[live], customers=[customer])
+    cleanup_loyalty_guarantees(db_cleanup)
+    assert live.revoked_at is not None
+    assert customer.loyalty_status == "bronze"
+
+
+def test_valid_or_hold_is_unchanged_and_aligned(monkeypatch):
+    events = []
+    _patch_status(monkeypatch, earned="bronze", events=events, mode="PURCHASES")
+    future = datetime.utcnow() + timedelta(days=180)
+    customer = _customer(loyalty_status="or", loyalty_status_expires_at=future)
+    g = _guarantee(customer_id=customer.id, expires_at=datetime(2027, 6, 1))
+    db = _DB(guarantees=[g])
+    update_customer_status(db, customer, reason="PURCHASE_RECORDED", refresh_window=False)
+    assert customer.loyalty_status == "or"
+    assert g.revoked_at is None
+    assert g.expires_at == future
+    payload = serialize_guarantees(db, customer_id=customer.id)
+    assert len(payload) == 1
+    assert payload[0]["floorTierKey"] == "or"
+    assert payload[0]["expiresAt"] == future

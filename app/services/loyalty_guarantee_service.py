@@ -17,15 +17,76 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
-def active_guarantees(db: Session, *, customer_id) -> list[CustomerLoyaltyGuarantee]:
-    now = _utcnow()
-    rows = (
+def _unrevoked_guarantees(db: Session, *, customer_id) -> list[CustomerLoyaltyGuarantee]:
+    return (
         db.query(CustomerLoyaltyGuarantee)
         .filter(CustomerLoyaltyGuarantee.customer_id == customer_id)
         .filter(CustomerLoyaltyGuarantee.revoked_at.is_(None))
         .all()
     )
-    return [g for g in rows if g.expires_at is None or g.expires_at > now]
+
+
+def _guarantee_is_expired(g: CustomerLoyaltyGuarantee, now: datetime) -> bool:
+    return g.expires_at is not None and g.expires_at <= now
+
+
+def active_guarantees(db: Session, *, customer_id) -> list[CustomerLoyaltyGuarantee]:
+    now = _utcnow()
+    return [g for g in _unrevoked_guarantees(db, customer_id=customer_id) if not _guarantee_is_expired(g, now)]
+
+
+def revoke_expired_guarantees(db: Session, *, customer_id, now: datetime | None = None) -> int:
+    now = now or _utcnow()
+    revoked = 0
+    for g in _unrevoked_guarantees(db, customer_id=customer_id):
+        if _guarantee_is_expired(g, now):
+            g.revoked_at = now
+            revoked += 1
+    if revoked:
+        db.flush()
+    return revoked
+
+
+def revoke_open_ended_guarantees_on_base(db: Session, *, customer) -> int:
+    from app.services.loyalty_status_service import _get_base_tier_key
+
+    base_key = _get_base_tier_key(db, customer.brand)
+    if not base_key or customer.loyalty_status != base_key:
+        return 0
+    now = _utcnow()
+    revoked = 0
+    for g in _unrevoked_guarantees(db, customer_id=customer.id):
+        if g.expires_at is None:
+            g.revoked_at = now
+            revoked += 1
+    if revoked:
+        db.flush()
+    return revoked
+
+
+def revoke_guarantees_above_status(db: Session, *, customer) -> int:
+    from app.services.loyalty_status_service import _get_tier_rank_value
+
+    now = _utcnow()
+    current_rank = _get_tier_rank_value(db, customer.brand, customer.loyalty_status)
+    revoked = 0
+    for g in active_guarantees(db, customer_id=customer.id):
+        floor_rank = _get_tier_rank_value(db, customer.brand, g.floor_tier_key)
+        if floor_rank is None or current_rank is None:
+            continue
+        if floor_rank > current_rank:
+            g.revoked_at = now
+            revoked += 1
+            logger.info(
+                "loyalty guarantee revoked above status customer_id=%s source=%s floor=%s status=%s",
+                customer.id,
+                g.source,
+                g.floor_tier_key,
+                customer.loyalty_status,
+            )
+    if revoked:
+        db.flush()
+    return revoked
 
 
 def highest_guarantee_floor_key(db: Session, *, customer_id, brand: str) -> str | None:
@@ -43,6 +104,20 @@ def highest_guarantee_floor_key(db: Session, *, customer_id, brand: str) -> str 
     return best_key
 
 
+def _default_guarantee_expires_at(db: Session, *, customer) -> datetime | None:
+    expires_at = getattr(customer, "loyalty_status_expires_at", None)
+    if expires_at is not None:
+        return expires_at
+    from app.services.loyalty_settings_service import get_loyalty_settings
+    from app.services.loyalty_status_service import status_window_expires_at
+
+    settings = get_loyalty_settings(db, brand=customer.brand)
+    days = getattr(settings, "loyalty_status_validity_days", None) if settings else None
+    if days is None:
+        return None
+    return status_window_expires_at(_utcnow(), int(days))
+
+
 def grant_loyalty_guarantee(
     db: Session,
     *,
@@ -56,6 +131,7 @@ def grant_loyalty_guarantee(
     key = (floor_tier_key or "").strip()
     if not key:
         raise ValueError("floor_tier_key is required")
+    now = _utcnow()
     existing = (
         db.query(CustomerLoyaltyGuarantee)
         .filter(CustomerLoyaltyGuarantee.customer_id == customer.id)
@@ -63,6 +139,11 @@ def grant_loyalty_guarantee(
         .filter(CustomerLoyaltyGuarantee.revoked_at.is_(None))
         .first()
     )
+    if existing and (
+        existing.expires_at is None or _guarantee_is_expired(existing, now)
+    ):
+        existing.revoked_at = now
+        existing = None
     new_rank = _get_tier_rank_value(db, customer.brand, key)
     if existing:
         old_rank = _get_tier_rank_value(db, customer.brand, existing.floor_tier_key)
@@ -70,6 +151,8 @@ def grant_loyalty_guarantee(
             existing.floor_tier_key = key
         db.flush()
         return existing
+    if expires_at is None:
+        expires_at = _default_guarantee_expires_at(db, customer=customer)
     row = CustomerLoyaltyGuarantee(
         customer_id=customer.id,
         brand=customer.brand,
@@ -106,21 +189,42 @@ def revoke_consumed_guarantees(db: Session, *, customer, earned_status: str | No
 
 
 def align_guarantee_expiry_to_status(db: Session, *, customer) -> int:
-    aligned = 0
+    from app.services.loyalty_status_service import _get_base_tier_key
+
+    now = _utcnow()
+    revoke_expired_guarantees(db, customer_id=customer.id, now=now)
+    base_key = _get_base_tier_key(db, customer.brand)
+    is_base = bool(base_key) and customer.loyalty_status == base_key
     status_expires = customer.loyalty_status_expires_at
+    aligned = 0
+    revoked = 0
     for g in active_guarantees(db, customer_id=customer.id):
+        if is_base or status_expires is None:
+            g.revoked_at = now
+            revoked += 1
+            logger.info(
+                "loyalty guarantee revoked no status window customer_id=%s source=%s floor=%s",
+                customer.id,
+                g.source,
+                g.floor_tier_key,
+            )
+            continue
         if g.expires_at != status_expires:
             g.expires_at = status_expires
             aligned += 1
-    if aligned:
+    if aligned or revoked:
         db.flush()
     return aligned
 
 
 def cleanup_loyalty_guarantees(db: Session) -> dict[str, int]:
-    """Revoke earned floors and align remaining expiry to the status window. Idempotent."""
+    """Revoke stale/expired/above-status guarantees; align remaining to the status window. Idempotent."""
     from app.models.customer import Customer
-    from app.services.loyalty_status_service import _get_tier_rank_value, compute_loyalty_status_from_tiers
+    from app.services.loyalty_status_service import (
+        _get_base_tier_key,
+        _get_tier_rank_value,
+        compute_loyalty_status_from_tiers,
+    )
     from app.services.purchase_service import (
         QUALIFICATION_PURCHASES,
         get_purchase_balances,
@@ -161,13 +265,28 @@ def cleanup_loyalty_guarantees(db: Session) -> dict[str, int]:
                 qualification_mode=mode,
             )
             earned_rank = _get_tier_rank_value(db, customer.brand, earned) if earned else None
+            current_rank = _get_tier_rank_value(db, customer.brand, customer.loyalty_status)
+            base_key = _get_base_tier_key(db, customer.brand)
         except Exception:
             logger.exception("cleanup_loyalty_guarantees skip customer_id=%s", customer_id)
             skipped += 1
             continue
+        is_base = bool(base_key) and customer.loyalty_status == base_key
+        status_expires = customer.loyalty_status_expires_at
         for g in guarantees:
+            if g.revoked_at is not None:
+                continue
             floor_rank = _get_tier_rank_value(db, customer.brand, g.floor_tier_key)
-            if floor_rank is None or (earned_rank is not None and earned_rank >= floor_rank):
+            expired = _guarantee_is_expired(g, now)
+            earned_covers = floor_rank is None or (earned_rank is not None and earned_rank >= floor_rank)
+            above_status = (
+                floor_rank is not None
+                and current_rank is not None
+                and floor_rank > current_rank
+            )
+            ghost_open_ended = g.expires_at is None and is_base
+            no_window = is_base or status_expires is None
+            if expired or earned_covers or above_status or ghost_open_ended or no_window:
                 g.revoked_at = now
                 revoked += 1
                 logger.info(
@@ -177,8 +296,8 @@ def cleanup_loyalty_guarantees(db: Session) -> dict[str, int]:
                     g.floor_tier_key,
                     earned,
                 )
-            elif g.expires_at != customer.loyalty_status_expires_at:
-                g.expires_at = customer.loyalty_status_expires_at
+            elif g.expires_at != status_expires:
+                g.expires_at = status_expires
                 aligned += 1
     db.flush()
     logger.info(
@@ -240,5 +359,8 @@ __all__ = [
     "grant_loyalty_guarantee",
     "highest_guarantee_floor_key",
     "revoke_consumed_guarantees",
+    "revoke_expired_guarantees",
+    "revoke_guarantees_above_status",
+    "revoke_open_ended_guarantees_on_base",
     "serialize_guarantees",
 ]

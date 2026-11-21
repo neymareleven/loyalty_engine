@@ -7,6 +7,7 @@ from app.db import get_db
 from app.deps.brand import assert_brand_matches, get_active_brand
 from app.models.customer import Customer
 from app.models.customer_coupon import CustomerCoupon
+from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
 from app.models.customer_reward import CustomerReward
 from app.models.loyalty_tier import LoyaltyTier
 from app.models.transaction import Transaction
@@ -43,7 +44,7 @@ from app.services.entitlement_history_service import build_customer_entitlement_
 from app.services.transaction_protection import transaction_deletion_meta
 from app.services.customer_loyalty_service import set_customer_loyalty_tier
 from app.services.customer_serialization import serialize_customer_out
-from app.services.loyalty_guarantee_service import serialize_guarantees
+from app.services.loyalty_guarantee_service import active_guarantees, serialize_guarantees
 from app.services.loyalty_history_service import serialize_loyalty_history_item
 from app.services.loyalty_status_service import (
     compute_loyalty_status_from_tiers,
@@ -715,6 +716,13 @@ def get_customer_loyalty(
         )
         if last_tier_event:
             last_change = last_change_from_tier_event(last_tier_event[0])
+            if last_change == "first_purchase_bypass":
+                has_bypass = any(
+                    g.source == GUARANTEE_BYPASS
+                    for g in active_guarantees(db, customer_id=customer.id)
+                )
+                if not has_bypass:
+                    last_change = "upgrade"
 
     return {
         "brand": brand,

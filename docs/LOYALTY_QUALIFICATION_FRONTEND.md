@@ -287,6 +287,8 @@ Dans `currentTier` / `nextTier` / liste `tiers` :
 
 ### Historique des loyalty status (paliers)
 
+Le titre **« Historique des paliers (N) »** doit utiliser **le nombre de lignes affichées** dans le tableau (`rows.length` de la liste déjà filtrée : mêmes événements que le tableau, issus de `GET …/loyalty/history`). Ne pas utiliser une autre source (souvent vide → `(0)` alors que 4 lignes sont visibles). Si le tableau affiche « Aucun changement de palier », N = 0.
+
 **Route à appeler** (fiche client, onglet historique palier) :
 
 ```http
