@@ -21,6 +21,7 @@ SALE_SCHEMA = {
         "brand": {"type": "string"},
         "orderTotal": {"type": "string"},
         "total": {"type": "string"},
+        "totalWithoutShipping": {"type": "integer"},
         "tva": {"type": "integer"},
         "productNames": {"type": "array", "items": {"type": "string"}},
         "productQuantities": {"type": "array", "items": {"type": "integer"}},
@@ -43,6 +44,7 @@ def test_manual_map_for_editor():
         "brand",
         "orderTotal",
         "total",
+        "totalWithoutShipping",
         "tva",
         "productNames",
         "productQuantities",
@@ -52,15 +54,17 @@ def test_manual_map_for_editor():
 
 def test_field_catalog_includes_earn_points_path():
     catalog = payload_schema_field_catalog(SALE_SCHEMA, transaction_type_key="sale")
-    order_total = next(x for x in catalog if x["name"] == "orderTotal")
-    assert order_total["earnPointsPath"] == "orderTotal"
-    assert order_total["dynamicValue"] == {"$path": "payload.orderTotal"}
+    order_total = next(x for x in catalog if x["name"] == "totalWithoutShipping")
+    assert order_total["earnPointsPath"] == "totalWithoutShipping"
+    assert order_total["dynamicValue"] == {"$path": "payload.totalWithoutShipping"}
     assert order_total.get("role") == "order_total"
     assert order_total.get("preferred") is True
     assert order_total.get("earnPointsExample") == {
         "$fn": "to_number",
-        "args": [{"$path": "payload.orderTotal"}],
+        "args": [{"$path": "payload.totalWithoutShipping"}],
     }
+    fallback = next(x for x in catalog if x["name"] == "orderTotal")
+    assert fallback.get("role") == "order_total_fallback"
     products = next(x for x in catalog if x["name"] == "productNames")
     assert products.get("role") == "product_names"
 
@@ -128,7 +132,7 @@ def test_enrich_schema_heals_corrupted_root_as_fields():
 
 def test_sale_rule_hints_order_total_and_products():
     hints = get_transaction_type_rule_hints("sale")
-    assert hints["preferredOrderTotalPath"] == "payload.orderTotal"
+    assert hints["preferredOrderTotalPath"] == "payload.totalWithoutShipping"
     assert hints["productNamesPath"] == "payload.productNames"
     assert hints["productQuantitiesPath"] == "payload.productQuantities"
     example_ids = {ex["id"] for ex in hints["earnPointsExamples"]}

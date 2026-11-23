@@ -1476,14 +1476,14 @@ def list_rule_actions_catalog():
                 "examples": [
                     {"type": "earn_points", "points": 50},
                     {"type": "earn_points", "points": 50, "multiplier": 3},
-                    {"type": "earn_points", "points": {"$path": "payload.total"}},
-                    {"type": "earn_points", "points": {"$path": "total"}, "multiplier": 2},
+                    {"type": "earn_points", "points": {"$path": "payload.totalWithoutShipping"}},
+                    {"type": "earn_points", "points": {"$path": "totalWithoutShipping"}, "multiplier": 2},
                 ],
                 "uiHints": {
                     "points": {
                         "widget": "number_or_payload_path",
                         "min": 0,
-                        "dynamicExample": {"$path": "payload.total"},
+                        "dynamicExample": {"$path": "payload.totalWithoutShipping"},
                         "help": "Nombre fixe OU {$path: 'payload.<champ>'} / {<champ>} depuis le payload de la transaction.",
                     },
                     "multiplier": {"widget": "number", "min": 1, "placeholder": "Optional"},

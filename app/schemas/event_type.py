@@ -118,5 +118,5 @@ class TransactionTypeDetailOut(TransactionTypeOut):
     )
     rule_hints: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Rule authoring hints for this transaction type key (e.g. sale → orderTotal, product points).",
+        description="Rule authoring hints for this transaction type key (e.g. sale → totalWithoutShipping, product points).",
     )

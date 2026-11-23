@@ -71,8 +71,8 @@ def get_transaction_types_ui_catalog():
             "rulesConditionFields": "GET /admin/rules/ui-options/condition-fields?transaction_type={key}",
             "earnPointsDynamic": {
                 "description": "Points dynamiques depuis le payload transaction",
-                "example": {"type": "earn_points", "points": {"$path": "payload.orderTotal"}},
-                "pathFormats": ["payload.total", "total"],
+                "example": {"type": "earn_points", "points": {"$path": "payload.totalWithoutShipping"}},
+                "pathFormats": ["payload.totalWithoutShipping", "payload.orderTotal", "payload.total"],
             },
         },
         "uiHints": {

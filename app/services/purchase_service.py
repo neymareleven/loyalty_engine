@@ -20,10 +20,12 @@ QUALIFICATION_PURCHASES = "PURCHASES"
 
 _PURCHASE_TRANSACTION_TYPES = frozenset({"sale"})
 _AMOUNT_FIELD_CANDIDATES = (
+    "totalWithoutShipping",
+    "total_without_shipping",
+    "subtotal",
     "orderTotal",
     "total",
     "order_total",
-    "subtotal",
     "amount",
     "orderAmount",
     "grandTotal",
@@ -32,6 +34,17 @@ _AMOUNT_FIELD_CANDIDATES = (
     "value",
 )
 _NESTED_PAYLOAD_KEYS = ("properties", "attributes", "order", "data", "payload")
+_LOYALTY_ORDER_AMOUNT_ALIASES = frozenset(
+    {
+        "totalwithoutshipping",
+        "total_without_shipping",
+        "ordertotal",
+        "total",
+        "order_total",
+        "grandtotal",
+        "orderamount",
+    }
+)
 
 
 def normalize_qualification_mode(value: Any) -> str:
@@ -84,12 +97,25 @@ def extract_purchase_amount(payload: dict | None) -> int:
             kl = str(key or "").strip().lower().replace("-", "_")
             if kl.endswith("raw"):
                 continue
+            if "shipping" in kl.replace("_", "") and "withoutshipping" not in kl.replace("_", ""):
+                continue
             if not (kl.endswith("total") or kl.endswith("amount")):
                 continue
             parsed = _parse_amount_value(raw)
             if parsed is not None:
                 return parsed
     return 0
+
+
+def is_loyalty_order_amount_path(path: str | None) -> bool:
+    key = str(path or "").strip()
+    if key.startswith("transaction.payload."):
+        key = key[len("transaction.payload.") :]
+    if key.startswith("payload."):
+        key = key[len("payload.") :]
+    if "." in key:
+        return False
+    return key.lower().replace("-", "_") in _LOYALTY_ORDER_AMOUNT_ALIASES
 
 
 def transaction_occurred_at(transaction) -> datetime:

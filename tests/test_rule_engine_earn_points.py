@@ -47,6 +47,14 @@ def test_resolve_coalesce_order_total_or_total():
     assert _resolve_action_number(db=None, customer=None, action_value=points, transaction=tx2) == 1200
 
 
+def test_resolve_order_total_uses_amount_without_shipping():
+    tx = _tx(orderTotal=900, total=900, shippingTotal=50, totalWithoutShipping=850, subtotal=850)
+    points = {"$path": "payload.orderTotal"}
+    assert _resolve_action_number(db=None, customer=None, action_value=points, transaction=tx) == 850
+    points_new = {"$path": "payload.totalWithoutShipping"}
+    assert _resolve_action_number(db=None, customer=None, action_value=points_new, transaction=tx) == 850
+
+
 def test_resolve_sum_product_points_without_db_returns_zero():
     tx = _tx(productNames=["sku-a"], productQuantities=[2])
     points = {

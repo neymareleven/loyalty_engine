@@ -24,25 +24,30 @@ _TYPE_ALIASES = {
 # Rule authoring hints per EXTERNAL transaction type key (sale / WooCommerce, etc.).
 TRANSACTION_TYPE_RULE_HINTS: dict[str, dict[str, Any]] = {
     "sale": {
-        "preferredOrderTotalPath": "payload.orderTotal",
-        "orderTotalFallbackPaths": ["payload.total"],
+        "preferredOrderTotalPath": "payload.totalWithoutShipping",
+        "orderTotalFallbackPaths": ["payload.subtotal", "payload.orderTotal", "payload.total"],
         "productNamesPath": "payload.productNames",
         "productQuantitiesPath": "payload.productQuantities",
         "earnPointsExamples": [
             {
                 "id": "sale.order_total",
-                "label": "Points = montant orderTotal (recommandé)",
-                "points": {"$fn": "to_number", "args": [{"$path": "payload.orderTotal"}]},
+                "label": "Points = montant hors livraison (totalWithoutShipping)",
+                "points": {"$fn": "to_number", "args": [{"$path": "payload.totalWithoutShipping"}]},
             },
             {
                 "id": "sale.order_total_with_fallback",
-                "label": "Points = orderTotal sinon total",
+                "label": "Points = hors livraison, sinon orderTotal / total",
                 "points": {
                     "$fn": "to_number",
                     "args": [
                         {
                             "$fn": "coalesce",
-                            "args": [{"$path": "payload.orderTotal"}, {"$path": "payload.total"}],
+                            "args": [
+                                {"$path": "payload.totalWithoutShipping"},
+                                {"$path": "payload.subtotal"},
+                                {"$path": "payload.orderTotal"},
+                                {"$path": "payload.total"},
+                            ],
                         }
                     ],
                 },

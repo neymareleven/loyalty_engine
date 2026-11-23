@@ -8,6 +8,7 @@ def test_normalize_sale_monetary_and_quantities():
     out = normalize_transaction_payload(
         {
             "orderTotal": "525 CFA",
+            "totalWithoutShipping": "500 CFA",
             "subtotal": "500",
             "productPrices": ["475 CFA", "50 CFA"],
             "productQuantities": ["1", "2"],
@@ -20,6 +21,7 @@ def test_normalize_sale_monetary_and_quantities():
     )
     assert out["orderTotal"] == 525
     assert out["orderTotalRaw"] == "525 CFA"
+    assert out["totalWithoutShipping"] == 500
     assert out["subtotal"] == 500
     assert out["productPrices"] == [475, 50]
     assert out["productQuantities"] == [1, 2]

@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 def _get_by_path(obj, path: str):
     if obj is None:
         return None
+    from app.services.purchase_service import extract_purchase_amount, is_loyalty_order_amount_path
+
+    if isinstance(obj, dict) and is_loyalty_order_amount_path(path):
+        return extract_purchase_amount(obj)
     current = obj
     for part in path.split("."):
         if current is None:

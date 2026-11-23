@@ -13,6 +13,8 @@ _MONETARY_SCALAR_KEYS = frozenset(
         "ordertotal",
         "total",
         "order_total",
+        "totalwithoutshipping",
+        "total_without_shipping",
         "subtotal",
         "tva",
         "remise",

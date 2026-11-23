@@ -48,6 +48,19 @@ def test_extract_purchase_amount_prefers_order_total():
     assert extract_purchase_amount(None) == 0
 
 
+def test_extract_purchase_amount_prefers_total_without_shipping():
+    payload = {
+        "orderTotal": 900,
+        "total": 900,
+        "subtotal": 850,
+        "shippingTotal": 50,
+        "totalWithoutShipping": 850,
+    }
+    assert extract_purchase_amount(payload) == 850
+    assert extract_purchase_amount({"orderTotal": 900, "subtotal": 850}) == 850
+    assert extract_purchase_amount({"orderTotal": 900, "shippingTotal": 50}) == 900
+
+
 def test_purchase_expiry_uses_sale_date_not_today():
     from datetime import date, datetime
 
