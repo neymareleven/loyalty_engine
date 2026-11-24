@@ -7,6 +7,8 @@ CUSTOMER_PURCHASE_FIELDS = (
     "customer.purchase_amount_total",
 )
 
+CUSTOMER_IDENTITY_FIELDS = ("customer.previously_erased",)
+
 PURCHASE_RECORDED_PAYLOAD_FIELDS = (
     "payload.orderAmount",
     "payload.purchaseCount",
@@ -81,5 +83,10 @@ def purchase_customer_field_meta() -> dict:
             "valueKind": "number",
             "ui": {"widget": "number"},
             "label": "Points de statut",
+        },
+        "customer.previously_erased": {
+            "valueKind": "boolean",
+            "ui": {"widget": "boolean"},
+            "label": "Email déjà anonymisé/effacé (empreinte)",
         },
     }

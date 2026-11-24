@@ -38,6 +38,7 @@ _SYSTEM_MANAGED_JOB_KEYS = {
     "MAINT_RECOMPUTE_CUSTOMER_METRICS",
     "MAINT_RECOMPUTE_SEGMENTS",
     "MAINT_BACKFILL_COUPONS",
+    "MAINT_RETRY_UNOMI_DELETES",
 }
 
 
@@ -755,8 +756,9 @@ def preview_internal_job(
 
     today = date.today()
 
-    q = db.query(Customer)
-    q = q.filter(Customer.brand == active_brand)
+    from app.services.customer_identity_service import exclude_anonymized
+
+    q = exclude_anonymized(db.query(Customer).filter(Customer.brand == active_brand))
 
     if job.segment_id is not None:
         q = q.join(SegmentMember, SegmentMember.customer_id == Customer.id)

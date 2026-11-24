@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer
 from app.models.point_movement import PointMovement
 from app.models.purchase_movement import PurchaseMovement
+from app.services.customer_identity_service import exclude_anonymized
 from app.services.loyalty_settings_service import get_loyalty_settings
 from app.services.loyalty_status_service import (
     _get_base_tier_key,
@@ -134,12 +135,9 @@ def expire_points(db: Session, *, brand: str) -> int:
     if not customer_ids:
         return 0
 
-    customers = (
-        db.query(Customer)
-        .filter(Customer.id.in_(customer_ids))
-        .with_for_update()
-        .all()
-    )
+    customers = exclude_anonymized(
+        db.query(Customer).filter(Customer.id.in_(customer_ids))
+    ).with_for_update().all()
 
     updated = 0
     for i, c in enumerate(customers, start=1):
@@ -204,12 +202,9 @@ def expire_purchases(db: Session, *, brand: str) -> int:
     if not customer_ids:
         return 0
 
-    customers = (
-        db.query(Customer)
-        .filter(Customer.id.in_(customer_ids))
-        .with_for_update()
-        .all()
-    )
+    customers = exclude_anonymized(
+        db.query(Customer).filter(Customer.id.in_(customer_ids))
+    ).with_for_update().all()
 
     updated = 0
     for i, c in enumerate(customers, start=1):
@@ -263,7 +258,7 @@ def expire_loyalty_status(db: Session, *, brand: str) -> int:
 
     base_key = _get_base_tier_key(db, brand)
 
-    q = (
+    q = exclude_anonymized(
         db.query(Customer)
         .filter(Customer.brand == brand)
         .filter(Customer.loyalty_status_expires_at.isnot(None))

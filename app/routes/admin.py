@@ -102,6 +102,9 @@ def admin_schema_health(db: Session = Depends(get_db)):
         "brand_loyalty_settings.max_shipping_benefits_per_cart": (
             "SELECT max_shipping_benefits_per_cart FROM brand_loyalty_settings LIMIT 1"
         ),
+        "customers.anonymized_at": "SELECT anonymized_at FROM customers LIMIT 1",
+        "erased_identities": "SELECT id FROM erased_identities LIMIT 1",
+        "unomi_delete_queue": "SELECT id FROM unomi_delete_queue LIMIT 1",
     }
     missing: list[str] = []
     errors: dict[str, str] = {}
@@ -1184,6 +1187,7 @@ def list_rule_condition_fields(
         "customer.status_points",
         "customer.purchase_count",
         "customer.purchase_amount_total",
+        "customer.previously_erased",
         "customer.created_at",
         "customer.last_activity_at",
         "customer.birthdate",

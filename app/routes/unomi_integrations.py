@@ -67,8 +67,12 @@ def unomi_profile_event(
             brand=brand,
             profile_id=profile_id,
             skip_unomi=True,
+            mode="anonymize",
         )
-        db.commit()
+        if result.get("alreadyAnonymized"):
+            db.rollback()
+        else:
+            db.commit()
     except Exception:
         db.rollback()
         raise

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer
 from app.models.customer_unomi_profile_alias import CustomerUnomiProfileAlias
 from app.models.transaction import Transaction
+from app.services.customer_identity_service import customer_is_anonymized
 from app.services.loyalty_status_service import compute_loyalty_status_from_tiers
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ def get_customer(db: Session, brand: str, profile_id: str) -> Customer | None:
         .first()
     )
     if customer:
-        return customer
+        return None if customer_is_anonymized(customer) else customer
 
     alias = (
         db.query(CustomerUnomiProfileAlias)
@@ -41,7 +42,10 @@ def get_customer(db: Session, brand: str, profile_id: str) -> Customer | None:
     if not alias:
         return None
 
-    return db.query(Customer).filter(Customer.id == alias.customer_id).first()
+    found = db.query(Customer).filter(Customer.id == alias.customer_id).first()
+    if found and customer_is_anonymized(found):
+        return None
+    return found
 
 
 def list_customer_unomi_profile_ids(db: Session, customer: Customer) -> list[str]:
@@ -315,6 +319,8 @@ def resolve_customer_for_lookup(
             .filter(func.lower(Customer.email) == norm_email)
             .first()
         )
+        if by_email and customer_is_anonymized(by_email):
+            by_email = None
 
     by_profile = get_customer(db, brand, profile_id) if profile_id else None
 
@@ -461,7 +467,7 @@ def resolve_customer_for_transaction(
         .filter(func.lower(Customer.email) == email)
         .first()
     )
-    if not by_email:
+    if not by_email or customer_is_anonymized(by_email):
         return None
 
     if by_email.profile_id != profile_id:
@@ -575,6 +581,8 @@ def resolve_customer_for_upsert(
             .filter(func.lower(Customer.email) == norm_email)
             .first()
         )
+        if by_email and customer_is_anonymized(by_email):
+            by_email = None
 
     by_profile = get_customer(db, brand, profile_id)
 

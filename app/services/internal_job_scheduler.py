@@ -84,6 +84,7 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
         "MAINT_RECOMPUTE_SEGMENTS": "Maintenance: Recompute Segments",
         "MAINT_EXPIRE_RESERVATIONS": "Maintenance: Expire Storefront Reservations",
         "MAINT_DISPATCH_WEBHOOKS": "Maintenance: Dispatch Outgoing Webhooks",
+        "MAINT_RETRY_UNOMI_DELETES": "Maintenance: Retry Unomi Profile Deletes",
     }
 
     created_any = False
@@ -99,6 +100,7 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
             "MAINT_RECOMPUTE_SEGMENTS",
             "MAINT_EXPIRE_RESERVATIONS",
             "MAINT_DISPATCH_WEBHOOKS",
+            "MAINT_RETRY_UNOMI_DELETES",
         ]:
             exists = (
                 db.query(InternalJob.id)
@@ -112,7 +114,11 @@ def _ensure_system_managed_jobs(db: Session, *, now: datetime):
             schedule = default_schedule
             active = True
             next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=default_schedule)
-            if job_key in {"MAINT_EXPIRE_RESERVATIONS", "MAINT_DISPATCH_WEBHOOKS"}:
+            if job_key in {
+                "MAINT_EXPIRE_RESERVATIONS",
+                "MAINT_DISPATCH_WEBHOOKS",
+                "MAINT_RETRY_UNOMI_DELETES",
+            }:
                 schedule = on_demand_schedule
                 next_run_at = compute_next_run_at_from_schedule(base_utc=now, schedule=on_demand_schedule)
             if job_key == "MAINT_RECOMPUTE_CUSTOMERS_LOYALTY_STATUS":

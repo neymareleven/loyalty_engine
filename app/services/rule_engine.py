@@ -425,6 +425,14 @@ def _resolve_field_value(*, db: Session, field: str, customer, transaction):
             return [str(r[0]) for r in rows if r and r[0] is not None]
         if field in {"customer.birthdate", "customer.birthday"}:
             return format_customer_birthdate_wire(customer)
+        if field == "customer.previously_erased":
+            from app.services.customer_identity_service import previously_erased
+
+            return previously_erased(
+                db,
+                brand=getattr(customer, "brand", None) or getattr(transaction, "brand", None),
+                email=getattr(customer, "email", None),
+            )
         return _get_by_path(customer, field[len("customer.") :])
 
     if field.startswith("system."):

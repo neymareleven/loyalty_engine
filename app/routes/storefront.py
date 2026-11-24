@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -34,10 +34,15 @@ from app.services.redemption_service import (
     _reservation_is_stale,
 )
 from app.services.storefront_audit import record_storefront_audit
+from app.services.customer_delete_service import (
+    delete_loyalty_customer,
+    finish_unomi_delete_after_commit,
+)
 from app.services.storefront_auth import (
     enforce_storefront_rate_limit,
     persist_storefront_session,
     require_idempotency_key,
+    require_storefront_anonymize_scope,
     require_storefront_client,
 )
 from app.services.wallet_service import get_status_points_balance, resolve_points_expires_at
@@ -691,4 +696,61 @@ def storefront_release(
         response=_audit_redemption_response(result),
     )
     db.commit()
+    return result
+
+
+@router.post("/customers/{profile_id}/anonymize")
+def storefront_anonymize_customer(
+    profile_id: str,
+    request: Request,
+    client: ApiClient = Depends(require_storefront_client),
+    db: Session = Depends(get_db),
+):
+    """Anonymize a loyalty customer (opt-in API key scope storefront:anonymize)."""
+    require_storefront_anonymize_scope(client)
+    enforce_storefront_rate_limit(client)
+    unomi_profile_id = None
+    try:
+        result = delete_loyalty_customer(
+            db,
+            brand=client.brand,
+            profile_id=profile_id,
+            skip_unomi=True,
+            mode="anonymize",
+        )
+        if result.get("alreadyAnonymized"):
+            db.rollback()
+            return result
+        if not result.get("deleted"):
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "CUSTOMER_NOT_FOUND", "message": "Customer not found"},
+            )
+        unomi_profile_id = result.pop("unomiProfileId", None)
+        record_storefront_audit(
+            db,
+            brand=client.brand,
+            site_id=str(client.id),
+            action="anonymize",
+            profile_id=profile_id,
+            redemption_id=None,
+            request={},
+            response={"mode": "anonymize", "counts": result.get("counts")},
+        )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Customer anonymize failed: {e}") from e
+
+    unomi = finish_unomi_delete_after_commit(
+        db,
+        brand=client.brand,
+        profile_id=unomi_profile_id,
+        skip_unomi=False,
+    )
+    if unomi is not None:
+        result["unomi"] = unomi
     return result

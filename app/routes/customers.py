@@ -34,7 +34,12 @@ from app.services.unomi_profile_service import (
     reset_profile_sync_source,
     set_profile_sync_source,
 )
-from app.services.customer_delete_service import delete_loyalty_customer
+from app.services.customer_delete_service import (
+    delete_loyalty_customer,
+    finish_unomi_delete_after_commit,
+)
+from app.services.customer_export_service import export_customer_data
+from app.services.customer_identity_service import ANONYMIZED_STATUS, exclude_anonymized
 from app.services.customer_coupon_service import set_customer_coupon_status
 from app.services.customer_entitlement_serialization import (
     serialize_customer_coupon_out,
@@ -136,6 +141,10 @@ def list_customers(
     offset = max(0, offset)
 
     query = db.query(Customer).filter(Customer.brand == active_brand)
+
+    include_anonymized = (status or "").strip().upper() == ANONYMIZED_STATUS
+    if not include_anonymized:
+        query = exclude_anonymized(query)
 
     if q:
         like = f"%{q}%"
@@ -293,26 +302,74 @@ def upsert_customer(
     return CustomerUpsertOut(**out, unomi_sync=unomi_sync)
 
 
-@router.delete("/{brand}/{profile_id}")
-def delete_customer(
+@router.get("/{brand}/{profile_id}/export")
+def export_customer(
     brand: str,
     profile_id: str,
     active_brand: str = Depends(get_active_brand),
     db: Session = Depends(get_db),
 ):
-    """Delete loyalty customer and the matching Unomi profile (when profile sync is enabled)."""
+    """Export customer data (JSON) before anonymize/erase."""
     assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    data = export_customer_data(db, brand=brand, profile_id=profile_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return data
+
+
+@router.delete("/{brand}/{profile_id}")
+def delete_customer(
+    brand: str,
+    profile_id: str,
+    mode: str = "anonymize",
+    confirm: str | None = None,
+    purge_fingerprint: bool = False,
+    keep_sales: bool = False,
+    active_brand: str = Depends(get_active_brand),
+    db: Session = Depends(get_db),
+):
+    """Anonymize (default) or erase a loyalty customer; Unomi profile deleted after DB commit."""
+    assert_brand_matches(path_or_query_brand=brand, active_brand=active_brand)
+    mode_norm = (mode or "anonymize").strip().lower()
+    unomi_profile_id = None
     try:
-        result = delete_loyalty_customer(db, brand=brand, profile_id=profile_id, skip_unomi=False)
+        result = delete_loyalty_customer(
+            db,
+            brand=brand,
+            profile_id=profile_id,
+            skip_unomi=True,
+            mode=mode_norm,
+            confirm=confirm,
+            purge_fingerprint=purge_fingerprint,
+            keep_sales=keep_sales,
+        )
+        if result.get("alreadyAnonymized"):
+            db.rollback()
+            return result
+        if not result.get("deleted") and result.get("reason") == "not_found":
+            raise HTTPException(status_code=404, detail="Customer not found")
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail="Customer not found")
+        unomi_profile_id = result.pop("unomiProfileId", None)
         db.commit()
     except HTTPException:
         db.rollback()
         raise
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=502, detail=f"Customer delete failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Customer delete failed: {e}") from e
+
+    unomi = finish_unomi_delete_after_commit(
+        db,
+        brand=brand,
+        profile_id=unomi_profile_id,
+        skip_unomi=False,
+    )
+    if unomi is not None:
+        result["unomi"] = unomi
     return result
 
 

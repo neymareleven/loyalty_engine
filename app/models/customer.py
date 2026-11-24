@@ -26,6 +26,8 @@ class Customer(Base):
     birth_year = Column(Integer)
 
     status = Column(String(20), default="ACTIVE")
+    anonymized_at = Column(TIMESTAMP, nullable=True)
+    email_hash = Column(String(64), nullable=True)
     loyalty_status = Column(String(50), nullable=True)
 
     status_points = Column(Integer, nullable=False, default=0)

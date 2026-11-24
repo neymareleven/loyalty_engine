@@ -17,6 +17,7 @@ from app.db import get_db
 from app.models.api_client import ApiClient
 
 STOREFRONT_SCOPE = "storefront"
+STOREFRONT_ANONYMIZE_SCOPE = "storefront:anonymize"
 _RATE_LIMIT_PER_MINUTE = 60
 # In-process only: each uvicorn/gunicorn worker keeps its own counter.
 _rate_lock = threading.Lock()
@@ -78,6 +79,12 @@ def require_storefront_client(request: Request, db: Session = Depends(get_db)) -
     request.state.api_client = client
     request.state.brand = client.brand
     return client
+
+
+def require_storefront_anonymize_scope(client: ApiClient) -> None:
+    scopes = client.scopes if isinstance(client.scopes, list) else []
+    if STOREFRONT_ANONYMIZE_SCOPE not in scopes:
+        raise HTTPException(status_code=403, detail="Insufficient scope (storefront:anonymize required)")
 
 
 def enforce_storefront_rate_limit(client: ApiClient) -> None:

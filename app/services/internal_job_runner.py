@@ -161,6 +161,12 @@ def run_internal_job_once(
         sent = dispatch_due_webhooks(db, brand=job.brand)
         return MaintenanceJobRunStats(expired=int(sent))
 
+    if job.job_key == "MAINT_RETRY_UNOMI_DELETES":
+        from app.services.customer_delete_service import retry_pending_unomi_deletes
+
+        done = retry_pending_unomi_deletes(db, brand=job.brand)
+        return MaintenanceJobRunStats(expired=int(done))
+
     if job.job_key == "MAINT_EXPIRE_RESERVATIONS":
         from app.services.redemption_service import expire_stale_reservations
 
@@ -235,7 +241,9 @@ def run_internal_job_once(
             except Exception:
                 after_id = None
 
-        q = (
+        from app.services.customer_identity_service import exclude_anonymized
+
+        q = exclude_anonymized(
             db.query(Customer)
             .filter(Customer.brand == job.brand)
             .order_by(Customer.id.asc())
@@ -384,7 +392,11 @@ def run_internal_job_once(
         frequency = payload.get("frequency") or "ONCE_PER_CALENDAR_YEAR"
         frequency = str(frequency)
 
-        q = db.query(Customer).filter(Customer.brand == job.brand).order_by(Customer.id.asc())
+        from app.services.customer_identity_service import exclude_anonymized
+
+        q = exclude_anonymized(
+            db.query(Customer).filter(Customer.brand == job.brand).order_by(Customer.id.asc())
+        )
         if after_id:
             q = q.filter(Customer.id > after_id)
 
@@ -467,7 +479,9 @@ def run_internal_job_once(
 
     today: date = now.date()
 
-    q = db.query(Customer)
+    from app.services.customer_identity_service import exclude_anonymized
+
+    q = exclude_anonymized(db.query(Customer))
     if job.brand:
         q = q.filter(Customer.brand == job.brand)
 

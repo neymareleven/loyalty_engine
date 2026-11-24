@@ -338,17 +338,22 @@ def record_purchase_from_transaction(db: Session, *, customer, transaction) -> P
             is_first_purchase=is_first_purchase,
             tier_key=getattr(settings, "first_purchase_bypass_tier_key", None),
         ):
-            bypass_tier_key = (getattr(settings, "first_purchase_bypass_tier_key", None) or "").strip() or None
-            from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
-            from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
+            from app.services.customer_identity_service import previously_erased_bypass
 
-            grant_loyalty_guarantee(
-                db,
-                customer=customer,
-                source=GUARANTEE_BYPASS,
-                floor_tier_key=bypass_tier_key,
-                expires_at=None,
-            )
+            if previously_erased_bypass(db, brand=customer.brand, email=getattr(customer, "email", None)):
+                bypass_tier_key = None
+            else:
+                bypass_tier_key = (getattr(settings, "first_purchase_bypass_tier_key", None) or "").strip() or None
+                from app.models.customer_loyalty_guarantee import GUARANTEE_BYPASS
+                from app.services.loyalty_guarantee_service import grant_loyalty_guarantee
+
+                grant_loyalty_guarantee(
+                    db,
+                    customer=customer,
+                    source=GUARANTEE_BYPASS,
+                    floor_tier_key=bypass_tier_key,
+                    expires_at=None,
+                )
 
         movement = PurchaseMovement(
             customer_id=customer.id,

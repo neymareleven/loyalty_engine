@@ -35,6 +35,7 @@ from app.models.redemption import Redemption  # noqa: F401
 from app.models.webhook_endpoint import WebhookEndpoint  # noqa: F401
 from app.models.webhook_outbox import WebhookOutbox  # noqa: F401
 from app.models.storefront_audit_event import StorefrontAuditEvent  # noqa: F401
+from app.models.erased_identity import ErasedIdentity, UnomiDeleteQueue  # noqa: F401
 
 from app.routes.customers import router as customers_router
 from app.routes.transactions import router as transactions_router
